@@ -184,6 +184,18 @@
       "entry_index": 29,
       "leaf_hash": "sha256:93292c693bf65f0897a6143ba928922310e6050af782b70f42167330a9e450d6",
       "name": "29-unverified-authority-signature-trigger-f"
+    },
+    {
+      "entry_id": "sha256:46c20136062d12e523ed208a7ea9a64fb408bf17d82dfc207c91229b1cd73990",
+      "entry_index": 30,
+      "leaf_hash": "sha256:fc1313e28a97e5d9c4a116b3e523e35da356c1342dcfece6ddb32da8164d2745",
+      "name": "30-key-readd-producer-2"
+    },
+    {
+      "entry_id": "sha256:d36d157d6d4e9a295c741fa76660be3b098b52585adfe22d9f8a218c3f4a51f0",
+      "entry_index": 31,
+      "leaf_hash": "sha256:06563e0f19143dde3cd75ce7773a234d674428a8e27aeaede300b8f275d08dfd",
+      "name": "31-retraction-f-co-signed-authority-and-producer-2"
     }
   ],
   "inclusion": {
@@ -241,6 +253,11 @@
       "name": "cp30",
       "root": "sha256:eceb835965e6f5ba49db1e1f113d602bd09262067d5d99b363e1a6d47572c306",
       "tree_size": 30
+    },
+    {
+      "name": "cp32",
+      "root": "sha256:8cee1108181cfde03529538dbc03a4a49a9a25d0a384337234fdcf99fa11578d",
+      "tree_size": 32
     }
   ]
 }

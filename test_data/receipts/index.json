@@ -135,6 +135,13 @@
       "claim_type": "trigger-effective",
       "embedded_receipts": 1,
       "expect": "accept",
+      "file": "trigger-effective-co-signed-by-authority.ahl"
+    },
+    {
+      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "trigger-effective",
+      "embedded_receipts": 1,
+      "expect": "accept",
       "file": "trigger-effective-derived-rotated-key.ahl"
     },
     {

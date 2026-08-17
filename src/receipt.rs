@@ -1801,14 +1801,25 @@ fn authority_at(
 /// Whether the envelope at `index` is a trigger signed — cryptographically, not just by
 /// claimed `key_id` — by the record's authority.
 ///
-/// A candidate's `signatures[].key_id` naming an authority key proves nothing on its own: the
-/// `sig` bytes are controlled by whoever assembled the statement, who may be a party without
-/// authority. Every candidate MUST be checked with the same `verify_envelope` machinery used
-/// for real statements, restricted to authority keys so an envelope signed by some *other*
-/// valid producer key still correctly fails (that signer isn't this record's authority,
-/// whether or not the bytes verify). A non-verifying envelope that reuses a real authority
-/// `key_id` with a garbage signature can otherwise displace the genuinely authorized trigger
-/// just by anchoring at a later index.
+/// Receipt format §5 step 3a splits this into two separate tests, in order:
+///
+/// 1. **Envelope validity**: EVERY entry in `signatures` MUST resolve to a producer key active
+///    at `index` and MUST verify (`crate::verify_envelope`'s AND-all semantics). An envelope
+///    carrying even one non-verifying or unresolvable entry is invalid outright, regardless of
+///    its other entries — a candidate's `signatures[].key_id` naming an authority key proves
+///    nothing on its own, since the `sig` bytes are controlled by whoever assembled the
+///    statement, who may be a party without authority.
+/// 2. **Authorization**, tested only once the envelope is valid: the trigger is authorized iff
+///    AT LEAST ONE of those verified signers is in the authority key set active at `index`.
+///    Core spec §2.3.3 requires a trigger to be "signed by the record's authority", not signed
+///    *exclusively* by authority keys — a trigger genuinely co-signed by the authority AND some
+///    other active producer key is still authorized.
+///
+/// Splitting the two tests this way, rather than restricting step 1's resolver to authority
+/// keys, is what makes a legitimately co-signed trigger classify correctly: restricting
+/// resolution to authority keys would make ANY additional, genuinely valid co-signer from a
+/// non-authority key fail the whole envelope, misclassifying an authorized trigger as a
+/// challenge.
 fn is_authorized_trigger(
     ctx: &ClaimCtx<'_>,
     envelope: &Value,
@@ -1818,25 +1829,27 @@ fn is_authorized_trigger(
     budget: &mut Budget,
 ) -> Result<bool> {
     budget.spend(1)?;
-    let authority = authority_at(ctx, dataset, by_ingestion, index)?;
     let pubkeys = ctx.governance.producer_pubkeys_at(index);
-    Ok(crate::verify_envelope(envelope, |key_id| {
-        if authority.contains(key_id) {
-            pubkeys.get(key_id).cloned()
-        } else {
-            None
-        }
-    })?)
+    if !crate::verify_envelope(envelope, |key_id| pubkeys.get(key_id).cloned())? {
+        return Ok(false);
+    }
+    let authority = authority_at(ctx, dataset, by_ingestion, index)?;
+    let signers: BTreeSet<String> = array(envelope, "signatures")?
+        .iter()
+        .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
+        .collect::<Result<_>>()?;
+    Ok(!signers.is_disjoint(&authority))
 }
 
 /// Spec §2.3.3: a trigger is effective only if signed by the record's authority. Triggers from
 /// any other key anchor as **challenges**: surfaced by verification, never traversed.
 ///
-/// Format §3 requires this to be a real cryptographic check, not a `key_id` name match: a
-/// signature entry that merely *names* an authority key proves nothing on its own, since the
+/// Format §5 step 3a requires this to be a real cryptographic check, not a `key_id` name match:
+/// a signature entry that merely *names* an authority key proves nothing on its own, since the
 /// `sig` bytes are controlled by whoever assembled the envelope. This routes through the same
 /// `is_authorized_trigger` machinery `verify_competing_triggers` uses, so the receipt's own
-/// envelope must actually verify against an authority key active at `ctx.subject_index`.
+/// envelope must actually verify (every entry, against a key active at `ctx.subject_index`) and
+/// at least one of its genuine signers must be the record's authority.
 fn verify_trigger_authority(
     ctx: &ClaimCtx<'_>,
     introduction: &Embedded,

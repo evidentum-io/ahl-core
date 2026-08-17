@@ -295,6 +295,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp28 = corpus.anchor("cp28");
     let cp29 = corpus.anchor("cp29");
     let cp30 = corpus.anchor("cp30");
+    let cp32 = corpus.anchor("cp32");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -808,6 +809,50 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             rule: "receipt §5 step 4 — every subject envelope signature entry must verify",
             matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 29 }),
         },
+    });
+
+    // Entry 31: a trigger on F CO-SIGNED by both the `customers` authority (`producer-1`) and
+    // a second, genuinely active producer key (`producer-2`, re-added by the `key` statement
+    // at entry 30). Receipt format §5 step 3a states the two-step model precisely: envelope
+    // validity (EVERY entry resolves to an active key and verifies) is a separate, EARLIER
+    // test from authorization (at least one of those verified signers is the authority). A
+    // trigger is authorized when signed BY the record's authority, not signed EXCLUSIVELY by
+    // authority keys — so this legitimately co-signed envelope must still classify as
+    // authorized and must still govern.
+    out.push(Vector {
+        file: "trigger-effective-co-signed-by-authority.ahl",
+        receipt: Spec {
+            claim_type: "trigger-effective",
+            subject_index: 31,
+            anchor: cp32,
+            chain: vec![0, 9, 25, 30],
+            record_subject: customers(&r.c_f),
+            competing: "enumerated",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 32, cp32),
+            claim_material: json!({
+                "introduction": introduction(20, &r.c_f, cp32),
+                "checkpoint_C": cp32.checkpoint,
+                "competing": { "corpus_range": corpus.enumeration(20, 32, cp32) },
+            }),
+            producer_keys: Some(vec![
+                key_entry(&keys.producer_1, None, 25),
+                key_entry(&keys.producer_2, None, 30),
+            ]),
+            note: "Proves that a trigger CO-SIGNED by both the `customers` dataset authority \
+                   (`producer-1`) and another active producer key (`producer-2`, re-added at \
+                   entry 30) is authorized and governs F at cp32. Every signature entry on \
+                   entry 31's envelope cryptographically verifies against a producer key active \
+                   at entry index 31 (receipt §5 step 3a's envelope-validity test), and at \
+                   least one of them — `producer-1`'s — is the record's authority (the \
+                   authorization test), so the extra, genuinely valid co-signature from \
+                   `producer-2` does not disqualify it: core spec §2.3.3 requires a trigger to \
+                   be signed BY the authority, never signed EXCLUSIVELY by authority keys."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
     });
 
     // A trigger on a DERIVED record, signed with a key added after the introduction.

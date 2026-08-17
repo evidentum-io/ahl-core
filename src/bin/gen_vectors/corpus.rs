@@ -21,7 +21,7 @@ use crate::scenario::{
 };
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 30] = [
+pub const NAMES: [&str; 32] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -52,6 +52,8 @@ pub const NAMES: [&str; 30] = [
     "27-derivation-z-from-affected-descendant",
     "28-invalid-signature-trigger-f",
     "29-unverified-authority-signature-trigger-f",
+    "30-key-readd-producer-2",
+    "31-retraction-f-co-signed-authority-and-producer-2",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -620,10 +622,60 @@ impl Corpus {
         );
         let env_29 = Value::Object(env_29_map);
 
+        // --- entry 30: re-add producer-2 to the producer snapshot after manifest v2 dropped
+        // it (spec §7.2, §2.3.6). This is what makes a genuinely CO-SIGNED trigger reachable:
+        // a signer must be an active producer key at the co-signed statement's entry index,
+        // and manifest v2 (entry 25) discarded producer-2. A fresh `key` "add" event brings it
+        // back into force from this entry onward, exactly as entry 9 originally added it.
+        let env_30 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "add",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": T0,
+                },
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entry 31: a trigger on F CO-SIGNED by both the `customers` authority and
+        // producer-2 --- Both signature entries are genuinely valid: `producer-1` (the
+        // authority) and `producer-2` (another producer key active as of this entry, following
+        // entry 30's re-add). Receipt format §5 step 3a: authorization requires AT LEAST ONE
+        // verified signer to be the authority, never signing EXCLUSIVELY by authority keys — a
+        // legitimately co-signed trigger like this one must still classify as authorized and
+        // must still govern.
+        let f_retraction_3 = payload(
+            "retraction",
+            &m2,
+            json!(T0),
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_f,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "other",
+            }),
+        );
+        let producer_1_sig_31 = keys.producer_1.sign(&jcs(&f_retraction_3));
+        let producer_2_sig_31 = keys.producer_2.sign(&jcs(&f_retraction_3));
+        let mut env_31_map = serde_json::Map::new();
+        env_31_map.insert("payload".to_owned(), f_retraction_3);
+        env_31_map.insert(
+            "signatures".to_owned(),
+            json!([
+                { "key_id": keys.producer_1.key_id(), "sig": producer_1_sig_31 },
+                { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig_31 },
+            ]),
+        );
+        let env_31 = Value::Object(env_31_map);
+
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
-            env_23, env_24, env_25, env_26, env_27, env_28, env_29,
+            env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -634,32 +686,42 @@ impl Corpus {
         trees.insert(challenge_affected_root.clone(), challenge_dispositions);
 
         let log_leaves = leaf_bytes(&envelopes);
-        let anchors =
-            [(8u64, 0u64), (13, 0), (20, 0), (24, 0), (25, 0), (28, 25), (29, 25), (30, 25)]
-                .into_iter()
-                .map(|(size, manifest_index)| {
-                    let root = hash_hex(&tree_root(&log_leaves[..at(size)]));
-                    let cp = checkpoint(&log_id, size, &root, T0, &keys.log_1);
-                    let (key, witness_id) = keys.witness_for(manifest_index);
-                    let cosignature = key.sign(&cosignature_bytes(&cp, witness_id));
-                    Anchor {
-                        name: match size {
-                            8 => "cp8",
-                            13 => "cp13",
-                            20 => "cp20",
-                            24 => "cp24",
-                            25 => "cp25",
-                            28 => "cp28",
-                            29 => "cp29",
-                            _ => "cp30",
-                        },
-                        checkpoint: cp,
-                        witness_id,
-                        cosignature,
-                        manifest_index,
-                    }
-                })
-                .collect::<Vec<_>>();
+        let anchors = [
+            (8u64, 0u64),
+            (13, 0),
+            (20, 0),
+            (24, 0),
+            (25, 0),
+            (28, 25),
+            (29, 25),
+            (30, 25),
+            (32, 25),
+        ]
+        .into_iter()
+        .map(|(size, manifest_index)| {
+            let root = hash_hex(&tree_root(&log_leaves[..at(size)]));
+            let cp = checkpoint(&log_id, size, &root, T0, &keys.log_1);
+            let (key, witness_id) = keys.witness_for(manifest_index);
+            let cosignature = key.sign(&cosignature_bytes(&cp, witness_id));
+            Anchor {
+                name: match size {
+                    8 => "cp8",
+                    13 => "cp13",
+                    20 => "cp20",
+                    24 => "cp24",
+                    25 => "cp25",
+                    28 => "cp28",
+                    29 => "cp29",
+                    30 => "cp30",
+                    _ => "cp32",
+                },
+                checkpoint: cp,
+                witness_id,
+                cosignature,
+                manifest_index,
+            }
+        })
+        .collect::<Vec<_>>();
 
         let refusal = refusal_evidence(keys, &log_id, &anchors[1]);
         let closures = closure_cases(r);

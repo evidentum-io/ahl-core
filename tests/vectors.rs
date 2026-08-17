@@ -30,8 +30,9 @@ use serde_json::{json, Value};
 /// The statement vectors, in entry-index order. Entry 28 is an intentional non-verifying-
 /// signature fixture: well-formed shape, real authority `key_id`, garbage `sig`. Entry 29 adds
 /// a second, genuinely valid signature entry from a non-authority key alongside a non-verifying
-/// authority-named one.
-const STATEMENT_FILES: [&str; 30] = [
+/// authority-named one. Entry 30 re-adds `producer-2` to the producer snapshot; entry 31 is a
+/// trigger genuinely CO-SIGNED by both the authority and `producer-2`.
+const STATEMENT_FILES: [&str; 32] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -62,6 +63,8 @@ const STATEMENT_FILES: [&str; 30] = [
     "27-derivation-z-from-affected-descendant.json",
     "28-invalid-signature-trigger-f.json",
     "29-unverified-authority-signature-trigger-f.json",
+    "30-key-readd-producer-2.json",
+    "31-retraction-f-co-signed-authority-and-producer-2.json",
 ];
 
 /// The four published closure scenarios.
