@@ -1,0 +1,52 @@
+{
+  "entry_id": "sha256:6dff99ac4665a6b1083dcfd2b3a218c3dbb7e5894a9e8946d478b7a09dee91a8",
+  "entry_index": 15,
+  "envelope": {
+    "payload": {
+      "ahl_version": "0.3",
+      "inputs": [
+        {
+          "dataset": "customers",
+          "record": "hmac-sha256:1efd18a919cf85ddc216d57e1d78bc13321bfa14ba62aa1649eea13c2a811127",
+          "role": "feature",
+          "statement": "sha256:b4fd8168d5c8c1371b4ce9e926dca8b4e41e14597cde498b502699ea1d46c395"
+        }
+      ],
+      "issued_at": "2026-08-16T12:00:00Z",
+      "manifest": "sha256:5754bada444abfafbd141c1eec9483ce1e4b2e089748ce4f06a64aeb5d6c50f3",
+      "outputs": [
+        {
+          "dataset": "scores",
+          "record": "sha256:bf90b471d24713c16ef7cd945651ed9bd755cf7769eef4b58da51c61bf53d810"
+        }
+      ],
+      "pipeline": "scoring-v1",
+      "producer": "producer-1",
+      "transform": {
+        "code": {
+          "digest": "sha256:6020efb5f77f23aeb11dd4a99623e6fdd09bb16167cb04d51e41614661a57305",
+          "type": "git_commit"
+        },
+        "model": {
+          "digest": "sha256:4010a9f46dbc15f9525f0e43bd55b2498b85a667e59e783270dca2ae97c62dfa",
+          "version": "risk-v4.2"
+        },
+        "params": {
+          "digest": "sha256:82328ce226d48bfd85b70be5918fdc3cd9759478a2e0c107925ac997bbf18a1e"
+        }
+      },
+      "type": "derivation",
+      "valid_time": {
+        "from": "2026-09-01T00:00:00Z",
+        "to": null
+      }
+    },
+    "signatures": [
+      {
+        "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
+        "sig": "base64:ESzBWeEL0b221d2EqPbqFl7n9Zm9EjzXTaAg3icPWy8QvYuPnxpBluVRqKxzZSPizoABil+7ZlxPB7+0+PO/CQ=="
+      }
+    ]
+  },
+  "statement_id": "sha256:61567f6cab4f726983e67f9ea09002b645fb7b2e94b8c26fd75c965a88cdd8fc"
+}

@@ -1,0 +1,46 @@
+{
+  "entry_id": "sha256:a4cc95c38608b8533d54d35dd26ba18162b8c77b0218c9a3ed274cb69aded529",
+  "entry_index": 10,
+  "envelope": {
+    "payload": {
+      "ahl_version": "0.3",
+      "inputs": {
+        "input_set_count": 3,
+        "input_set_root": "sha256:364e088964bd64535d5ff237294e1c08083527824be97acb927711e052cd6cb0"
+      },
+      "issued_at": "2026-08-16T12:00:00Z",
+      "manifest": "sha256:5754bada444abfafbd141c1eec9483ce1e4b2e089748ce4f06a64aeb5d6c50f3",
+      "outputs": [
+        {
+          "dataset": "scores",
+          "locator": "urn:ahl-test:scores/W",
+          "record": "sha256:5929597d694c6d57301d1d81edac6047f0676abc36fc7560d6ce0b74e5bd777c"
+        }
+      ],
+      "pipeline": "scoring-v1",
+      "producer": "producer-1",
+      "transform": {
+        "code": {
+          "digest": "sha256:6020efb5f77f23aeb11dd4a99623e6fdd09bb16167cb04d51e41614661a57305",
+          "type": "git_commit"
+        },
+        "model": {
+          "digest": "sha256:4010a9f46dbc15f9525f0e43bd55b2498b85a667e59e783270dca2ae97c62dfa",
+          "version": "risk-v4.2"
+        },
+        "params": {
+          "digest": "sha256:82328ce226d48bfd85b70be5918fdc3cd9759478a2e0c107925ac997bbf18a1e"
+        }
+      },
+      "type": "derivation",
+      "valid_time": "2026-08-16T12:00:00Z"
+    },
+    "signatures": [
+      {
+        "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
+        "sig": "base64:xENeSZkujB4MYJAMVs86bhiXCKssV1znDnUsUybEZ+QbT8Wo7+5HyYAgEp6vlvyhvSpdZfpN9nQaIpsvPQ0xAA=="
+      }
+    ]
+  },
+  "statement_id": "sha256:b3d1374bbd9d5ace1cf039a0826bd6b498b1401325bfe7c2e46c244aa09bc7f3"
+}

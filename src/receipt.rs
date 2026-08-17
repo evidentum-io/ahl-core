@@ -1,0 +1,1785 @@
+//! Offline verification of AHL Evidence Receipts (`.ahl`).
+//!
+//! [`verify_receipt`] implements the normative algorithm outline of Evidence Receipt format
+//! §5, the assurance semantics of §2.1, the key-binding rules of §2.2, the cross-field
+//! consistency rules of §2.3, the claim-type registry of §3, the resource limits of §3.1 and
+//! the governance-currency modes of §4.
+//!
+//! # What "offline" means here
+//!
+//! The verifier is handed exactly three things: the receipt, the locally possessed adaptor
+//! profile hashes, and a [`TrustPolicy`] standing in for the verifier's locally configured
+//! trust anchor (format §1 design rule 1). It never consults the producer, the log, or the
+//! surrounding corpus — everything else must be carried by the receipt. A receipt that carries
+//! its own genesis anchor proves nothing until that anchor matches configured policy, and this
+//! implementation compares it explicitly rather than trusting it.
+//!
+//! # Failing closed
+//!
+//! Every rejection is a distinct [`ReceiptError`] variant naming the rule that fired, so a test
+//! can assert *which* rule rejected a deliberately malformed receipt rather than that "it
+//! failed somehow". Resource exhaustion is a rejection, never a degraded acceptance (§3.1).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use atl_core::core::merkle::Hash;
+use base64::Engine as _;
+use serde_json::Value;
+
+use crate::bitemporal::Scope;
+use crate::closure::{affected_set, TreeMaterial};
+use crate::range_proof;
+use crate::tree::ValidatedLeafSet;
+use crate::{
+    checkpoint_signing_bytes, commit_keyed, commit_plain, cosignature_bytes, decode_pubkey,
+    entry_id, jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id, verify_signature,
+    AhlError, B64,
+};
+
+/// Receipt container version this verifier implements.
+pub const RECEIPT_VERSION: &str = "1";
+
+/// Core specification version this verifier implements.
+pub const SPEC_VERSION: &str = "0.3.0";
+
+// ---------------------------------------------------------------------------
+// Policy and limits
+// ---------------------------------------------------------------------------
+
+/// Resource limits (format §3.1). A verifier MUST fail closed on exhaustion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Maximum embedded-receipt nesting depth. Normative maximum: 4.
+    pub max_depth: usize,
+    /// Maximum embedded receipts per file. Normative maximum: 64.
+    pub max_embedded: usize,
+    /// Decoded-size budget in bytes, over the JCS serialization of the whole receipt.
+    pub max_decoded_bytes: usize,
+    /// Verification-work budget: one unit per signature check, proof check or tree opening.
+    pub max_work_units: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_depth: 4,
+            max_embedded: 64,
+            max_decoded_bytes: 8 * 1024 * 1024,
+            max_work_units: 100_000,
+        }
+    }
+}
+
+/// The verifier's locally configured trust policy (format §1 design rule 1).
+///
+/// Nothing in this struct may be taken from the receipt: that is the whole point of the trust
+/// anchor. A receipt carries a genesis anchor so it is self-describing; policy decides whether
+/// that anchor is the right one.
+#[derive(Debug, Clone, Default)]
+pub struct TrustPolicy {
+    /// The published genesis entry id of the corpus this verifier accepts.
+    pub genesis_entry_id: String,
+    /// The published producer key fingerprints of the genesis manifest.
+    pub genesis_key_ids: BTreeSet<String>,
+    /// Locally possessed adaptor profiles: profile id to profile document hash.
+    pub adaptor_profiles: BTreeMap<String, String>,
+    /// Dataset HMAC keys this verifier is authorized to hold (`keyed-authorized` binding only).
+    pub dataset_keys: BTreeMap<String, Vec<u8>>,
+    /// Witness key ids trusted by local policy rather than through the manifest chain.
+    pub trusted_witness_key_ids: BTreeSet<String>,
+    /// Resource limits.
+    pub limits: Limits,
+}
+
+// ---------------------------------------------------------------------------
+// Verdict
+// ---------------------------------------------------------------------------
+
+/// The structured assurance block of a receipt (format §2.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assurance {
+    /// `declared` or `enumerated`.
+    pub governance: String,
+    /// `not-checked` or `enumerated`.
+    pub competing_triggers: String,
+    /// At least one witness cosignature on the inclusion checkpoint verified.
+    pub witnessed: bool,
+    /// `later_checkpoint` plus a consistency proof verified.
+    pub continued_history: bool,
+    /// `none`, `plain-verified` or `keyed-authorized`.
+    pub content_binding: String,
+}
+
+/// An accepted receipt, with the boundary the verifier renders for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verdict {
+    /// The registry id of the proven claim (format §3).
+    pub claim_type: String,
+    /// Entry index of the subject statement.
+    pub subject_entry_index: u64,
+    /// Statement id of the subject statement.
+    pub subject_statement_id: String,
+    /// The verified assurance block.
+    pub assurance: Assurance,
+    /// The rendered claim boundary — derived from `claim.type` and `assurance` only, never
+    /// from the receipt's informative `note` (format §2.1: the verdict is never stronger).
+    pub boundary: String,
+    /// Number of embedded receipts verified, including duplicates resolved by reference.
+    pub embedded_receipts: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Rejection reasons
+// ---------------------------------------------------------------------------
+
+/// Why a receipt was rejected. Each variant names the rule that fired.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReceiptError {
+    /// The receipt is not structurally a receipt at all.
+    #[error("malformed receipt: {0}")]
+    Malformed(String),
+
+    /// `ahl_receipt_version` or `spec_version` is not one this verifier implements (§5 step 1).
+    #[error("unsupported {field}: expected `{expected}`, got `{got}`")]
+    UnsupportedVersion {
+        /// The version field.
+        field: &'static str,
+        /// The version this verifier implements.
+        expected: &'static str,
+        /// The version carried.
+        got: String,
+    },
+
+    /// A §3.1 resource limit was exhausted. Rejection, never degradation.
+    #[error("resource limit exhausted: {0}")]
+    LimitExceeded(&'static str),
+
+    /// `subject.statement_id` or `subject.entry_id` disagrees with `envelope` (§5 step 1).
+    #[error("`subject.{field}` does not match the carried envelope")]
+    IdentifierMismatch {
+        /// `statement_id` or `entry_id`.
+        field: &'static str,
+    },
+
+    /// The adaptor profile is not locally possessed, or its hash differs (§5 step 2).
+    #[error("adaptor profile `{id}` is not locally possessed at the pinned hash")]
+    AdaptorUnknown {
+        /// The profile id the receipt pins.
+        id: String,
+    },
+
+    /// The receipt carries material the pinned adaptor profile forbids.
+    #[error("adaptor profile violation: {0}")]
+    AdaptorViolation(&'static str),
+
+    /// The checkpoint signature did not verify (§5 step 3).
+    #[error("checkpoint signature did not verify")]
+    CheckpointSignatureInvalid,
+
+    /// A key used in verification is not bound to a manifest key object as §2.2 requires.
+    #[error("key `{key_id}` is not bound to a manifest key object at entry index {entry_index}")]
+    KeyNotBound {
+        /// The offending key id.
+        key_id: String,
+        /// The binding index the receipt claimed.
+        entry_index: u64,
+    },
+
+    /// A witness cosignature did not verify.
+    #[error("witness cosignature for `{witness_id}` did not verify")]
+    WitnessCosignatureInvalid {
+        /// The witness whose cosignature failed.
+        witness_id: String,
+    },
+
+    /// `subject.entry_index` is not committed by the checkpoint (§5 step 3).
+    #[error("entry index {entry_index} is not committed by a checkpoint of size {tree_size}")]
+    EntryIndexBeyondCheckpoint {
+        /// The claimed entry index.
+        entry_index: u64,
+        /// The checkpoint's tree size.
+        tree_size: u64,
+    },
+
+    /// An inclusion path did not open the root it was checked against.
+    #[error("inclusion path for {what} did not verify against the anchored root")]
+    InclusionPathInvalid {
+        /// Which path failed.
+        what: &'static str,
+    },
+
+    /// The consistency path for `later_checkpoint` did not verify.
+    #[error("consistency path did not verify")]
+    ConsistencyPathInvalid,
+
+    /// The receipt's genesis anchor is not the one local policy configures (§5 step 4).
+    #[error("genesis anchor does not match locally configured policy")]
+    GenesisAnchorMismatch,
+
+    /// The governance chain is not a valid manifest lineage (§2.3.5, §5 step 4).
+    #[error("governance chain invalid: {0}")]
+    GovernanceChainInvalid(String),
+
+    /// An envelope signature did not verify under the key set as of its entry index.
+    #[error("envelope signature at entry index {entry_index} did not verify")]
+    EnvelopeSignatureInvalid {
+        /// The entry index of the offending envelope.
+        entry_index: u64,
+    },
+
+    /// A structured assurance field does not match what verification established (§2.3).
+    #[error("assurance field `{field}` overstates what the receipt proves")]
+    AssuranceMismatch {
+        /// The offending assurance field.
+        field: &'static str,
+    },
+
+    /// `record_subject` is present where §3 requires absence, absent where required, or does
+    /// not match the subject envelope's payload (§2.3).
+    #[error("`claim.record_subject` is wrong for claim type `{claim_type}`: {detail}")]
+    RecordSubjectMismatch {
+        /// The claim type whose subject rule was violated.
+        claim_type: String,
+        /// What exactly was wrong.
+        detail: String,
+    },
+
+    /// `subject.manifest` is present for a manifest statement or absent for anything else.
+    #[error("`subject.manifest` presence is wrong for a `{statement_type}` subject (§2.3)")]
+    SubjectManifestPresence {
+        /// The subject statement's type.
+        statement_type: String,
+    },
+
+    /// An embedded receipt's entry index violates the §2.3 ordering rule.
+    #[error(
+        "ordering violation: {what} at entry index {inner} is not permitted relative to \
+         entry index {outer}"
+    )]
+    EmbeddedOrderingViolation {
+        /// Which relationship was violated.
+        what: &'static str,
+        /// The embedded receipt's subject entry index.
+        inner: u64,
+        /// The referencing receipt's subject entry index.
+        outer: u64,
+    },
+
+    /// An embedded receipt is about a different record than the material referencing it (§2.3).
+    #[error("embedded {what} receipt is about `{got}`, the referencing material names `{want}`")]
+    EmbeddedSubjectMismatch {
+        /// Which embedded receipt.
+        what: &'static str,
+        /// The record the embedded receipt proves.
+        got: String,
+        /// The record the referencing material names.
+        want: String,
+    },
+
+    /// An embedded receipt has the wrong claim type for the slot it fills (§3 registry).
+    #[error("embedded receipt in `{slot}` must be `{expected}`, got `{got}`")]
+    EmbeddedClaimTypeMismatch {
+        /// The claim-material member.
+        slot: &'static str,
+        /// The registry id required by the schema.
+        expected: &'static str,
+        /// The registry id carried.
+        got: String,
+    },
+
+    /// The §3 schema for the claim type requires a member the receipt does not carry.
+    #[error("claim material for `{claim_type}` is missing `{field}`")]
+    ClaimMaterialMissing {
+        /// The claim type whose schema was not satisfied.
+        claim_type: String,
+        /// The missing member.
+        field: &'static str,
+    },
+
+    /// A claim-material Merkle path did not open the root it is checked against.
+    #[error("claim-material path `{what}` did not verify against the anchored root")]
+    ClaimMaterialPathInvalid {
+        /// Which path failed.
+        what: &'static str,
+    },
+
+    /// Carried record bytes do not recompute to the claimed commitment (§2.1).
+    #[error(
+        "content binding `{mode}` failed: carried bytes commit to `{recomputed}`, not `{claimed}`"
+    )]
+    ContentBindingMismatch {
+        /// The declared binding mode.
+        mode: String,
+        /// What the carried bytes actually commit to.
+        recomputed: String,
+        /// The commitment the statement anchors.
+        claimed: String,
+    },
+
+    /// A `trigger-effective` receipt's competing-trigger range is not the required range (§3).
+    #[error(
+        "competing-trigger range [{got_from}, {got_to}) is not the required \
+         [0, {tree_size}) or [{introduction_index}, {tree_size})"
+    )]
+    CompetingRangeInsufficient {
+        /// Lower bound carried.
+        got_from: u64,
+        /// Upper bound carried.
+        got_to: u64,
+        /// Tree size of checkpoint C.
+        tree_size: u64,
+        /// Introduction index fixed by the embedded introduction receipt.
+        introduction_index: u64,
+    },
+
+    /// An authenticated range proof (§4.2) did not verify against the checkpoint root.
+    #[error("range proof for {what} did not verify: {detail}")]
+    RangeProofInvalid {
+        /// Which enumeration failed.
+        what: &'static str,
+        /// Why.
+        detail: String,
+    },
+
+    /// Carried tree material does not open the root it claims (spec §2.5, §3.5).
+    #[error("tree material for `{root}` is invalid: {detail}")]
+    TreeMaterialInvalid {
+        /// The root whose material failed.
+        root: String,
+        /// Why.
+        detail: String,
+    },
+
+    /// The recomputed closure disagrees with the anchored disposition set (spec §5.3).
+    #[error("recomputed affected set disagrees with the anchored disposition tree: {0}")]
+    ClosureMismatch(String),
+
+    /// A manifest or key statement exists in the range a `governance-state` claim asserts is
+    /// empty (§3 registry).
+    #[error(
+        "governance state is not current at index {target_index}: a `{statement_type}` \
+         statement is anchored at entry index {entry_index}"
+    )]
+    GovernanceStateNotCurrent {
+        /// The claimed target index.
+        target_index: u64,
+        /// Where the contradicting statement sits.
+        entry_index: u64,
+        /// Its type.
+        statement_type: String,
+    },
+
+    /// A primitive operation failed on data read from the receipt.
+    #[error(transparent)]
+    Ahl(#[from] AhlError),
+}
+
+type Result<T> = core::result::Result<T, ReceiptError>;
+
+// ---------------------------------------------------------------------------
+// Small accessors that turn absent/ill-typed members into rejections
+// ---------------------------------------------------------------------------
+
+fn obj<'a>(value: &'a Value, path: &str) -> Result<&'a Value> {
+    value
+        .get(path)
+        .filter(|v| v.is_object())
+        .ok_or_else(|| ReceiptError::Malformed(format!("`{path}` object")))
+}
+
+fn text<'a>(value: &'a Value, path: &str) -> Result<&'a str> {
+    value
+        .get(path)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ReceiptError::Malformed(format!("`{path}` string")))
+}
+
+fn number(value: &Value, path: &str) -> Result<u64> {
+    value
+        .get(path)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ReceiptError::Malformed(format!("`{path}` integer")))
+}
+
+fn flag(value: &Value, path: &str) -> Result<bool> {
+    value
+        .get(path)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ReceiptError::Malformed(format!("`{path}` boolean")))
+}
+
+fn array<'a>(value: &'a Value, path: &str) -> Result<&'a Vec<Value>> {
+    value
+        .get(path)
+        .and_then(Value::as_array)
+        .ok_or_else(|| ReceiptError::Malformed(format!("`{path}` array")))
+}
+
+fn path_strings(value: &Value, path: &str) -> Result<Vec<String>> {
+    array(value, path)?
+        .iter()
+        .map(|h| {
+            h.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| ReceiptError::Malformed(format!("`{path}` element")))
+        })
+        .collect()
+}
+
+fn payload_of(envelope: &Value) -> Result<&Value> {
+    obj(envelope, "payload")
+}
+
+fn statement_type(payload: &Value) -> Result<&str> {
+    text(payload, "type")
+}
+
+// ---------------------------------------------------------------------------
+// Budget
+// ---------------------------------------------------------------------------
+
+/// Tracks the §3.1 budgets across a whole receipt tree, including embedded receipts.
+#[derive(Debug)]
+struct Budget {
+    limits: Limits,
+    work: u64,
+    embedded: usize,
+    /// Entry ids of embedded receipts already verified: duplicates are verified once (§3.1).
+    seen: BTreeSet<String>,
+}
+
+impl Budget {
+    const fn new(limits: Limits) -> Self {
+        Self { limits, work: 0, embedded: 0, seen: BTreeSet::new() }
+    }
+
+    const fn spend(&mut self, units: u64) -> Result<()> {
+        self.work = self.work.saturating_add(units);
+        if self.work > self.limits.max_work_units {
+            return Err(ReceiptError::LimitExceeded("verification work budget"));
+        }
+        Ok(())
+    }
+
+    const fn enter(&mut self, depth: usize) -> Result<()> {
+        if depth > self.limits.max_depth {
+            return Err(ReceiptError::LimitExceeded("embedded-receipt nesting depth"));
+        }
+        if depth > 0 {
+            self.embedded += 1;
+            if self.embedded > self.limits.max_embedded {
+                return Err(ReceiptError::LimitExceeded("embedded receipts per file"));
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Governance chain
+// ---------------------------------------------------------------------------
+
+/// A producer key-set transition, ordered by the entry index that anchored it.
+struct KeyEvent {
+    entry_index: u64,
+    key_id: String,
+    pubkey: String,
+    added: bool,
+}
+
+/// The verified governance state carried by a receipt.
+struct Governance<'a> {
+    /// Manifest statements in the chain, ascending by entry index.
+    manifests: Vec<(u64, &'a Value)>,
+    /// Producer key transitions, ascending by entry index.
+    events: Vec<KeyEvent>,
+}
+
+impl<'a> Governance<'a> {
+    /// The producer key set as of `index` (spec §2.3.6: key set as of the entry index).
+    fn producer_keys_at(&self, index: u64) -> BTreeMap<String, String> {
+        let mut keys = BTreeMap::new();
+        for event in self.events.iter().filter(|e| e.entry_index <= index) {
+            if event.added {
+                keys.insert(event.key_id.clone(), event.pubkey.clone());
+            } else {
+                keys.remove(&event.key_id);
+            }
+        }
+        keys
+    }
+
+    /// The manifest version active for a checkpoint of size `tree_size` (format §2.2: the
+    /// manifest statement with the greatest entry index smaller than that tree size).
+    fn active_for(&self, tree_size: u64) -> Result<(u64, &'a Value)> {
+        self.manifests.iter().rfind(|(index, _)| *index < tree_size).copied().ok_or_else(|| {
+            ReceiptError::GovernanceChainInvalid(format!(
+                "no manifest version is active for a checkpoint of size {tree_size}"
+            ))
+        })
+    }
+}
+
+/// Read the manifest key objects of `group` (`keys`, `log.keys`, `witnesses[].keys`).
+fn key_objects(container: &Value) -> Result<Vec<(String, String)>> {
+    array(container, "keys")?
+        .iter()
+        .map(|object| Ok((text(object, "key_id")?.to_owned(), text(object, "pubkey")?.to_owned())))
+        .collect()
+}
+
+/// Build and structurally validate the governance chain (spec §2.3.5).
+fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance<'a>> {
+    let chain = array(obj(receipt, "governance")?, "chain")?;
+    if chain.is_empty() {
+        return Err(ReceiptError::GovernanceChainInvalid("chain is empty".to_owned()));
+    }
+
+    let mut manifests = Vec::new();
+    let mut events = Vec::new();
+    let mut previous_index: Option<u64> = None;
+    let mut previous_manifest_entry_id: Option<String> = None;
+
+    for hop in chain {
+        let index = number(hop, "entry_index")?;
+        if previous_index.is_some_and(|prev| prev >= index) {
+            return Err(ReceiptError::GovernanceChainInvalid(
+                "chain hops must ascend by entry index".to_owned(),
+            ));
+        }
+        previous_index = Some(index);
+
+        let envelope = obj(hop, "envelope")?;
+        let payload = payload_of(envelope)?;
+        match statement_type(payload)? {
+            "manifest" => {
+                let predecessor = payload.get("predecessor").and_then(Value::as_str);
+                match (&previous_manifest_entry_id, predecessor) {
+                    (None, Some(_)) => {
+                        return Err(ReceiptError::GovernanceChainInvalid(
+                            "the genesis manifest must carry no predecessor reference".to_owned(),
+                        ))
+                    }
+                    (Some(_), None) => {
+                        return Err(ReceiptError::GovernanceChainInvalid(
+                            "a non-genesis manifest must reference its predecessor".to_owned(),
+                        ))
+                    }
+                    // A non-genesis manifest references its predecessor by *entry* id:
+                    // signature identity matters for chain links (spec §2.3.5).
+                    (Some(want), Some(got)) if want != got => {
+                        return Err(ReceiptError::GovernanceChainInvalid(format!(
+                            "manifest at entry index {index} references `{got}`, \
+                             its predecessor in the chain is `{want}`"
+                        )))
+                    }
+                    _ => {}
+                }
+                previous_manifest_entry_id = Some(entry_id(envelope));
+                for (key_id, pubkey) in key_objects(payload)? {
+                    events.push(KeyEvent { entry_index: index, key_id, pubkey, added: true });
+                }
+                manifests.push((index, payload));
+            }
+            "key" => {
+                let key = obj(payload, "key")?;
+                events.push(KeyEvent {
+                    entry_index: index,
+                    key_id: text(key, "key_id")?.to_owned(),
+                    pubkey: text(key, "pubkey")?.to_owned(),
+                    added: match text(payload, "action")? {
+                        "add" => true,
+                        "retire" => false,
+                        other => {
+                            return Err(ReceiptError::GovernanceChainInvalid(format!(
+                                "unknown key action `{other}`"
+                            )))
+                        }
+                    },
+                });
+            }
+            other => {
+                return Err(ReceiptError::GovernanceChainInvalid(format!(
+                    "`{other}` is not a governance statement"
+                )))
+            }
+        }
+    }
+
+    let genesis = &chain[0];
+    let genesis_envelope = obj(genesis, "envelope")?;
+    if number(genesis, "entry_index")? != 0
+        || statement_type(payload_of(genesis_envelope)?)? != "manifest"
+    {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "the chain must start at the genesis manifest at entry index 0".to_owned(),
+        ));
+    }
+    let carried_anchor = text(obj(receipt, "governance")?, "genesis_entry_id")?;
+    if carried_anchor != entry_id(genesis_envelope) {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "`genesis_entry_id` does not digest the carried genesis envelope".to_owned(),
+        ));
+    }
+    if carried_anchor != policy.genesis_entry_id {
+        return Err(ReceiptError::GenesisAnchorMismatch);
+    }
+    let genesis_key_ids: BTreeSet<String> =
+        key_objects(payload_of(genesis_envelope)?)?.into_iter().map(|(id, _)| id).collect();
+    if genesis_key_ids != policy.genesis_key_ids {
+        return Err(ReceiptError::GenesisAnchorMismatch);
+    }
+
+    Ok(Governance { manifests, events })
+}
+
+// ---------------------------------------------------------------------------
+// Anchoring
+// ---------------------------------------------------------------------------
+
+/// The verified anchoring context every later step checks material against.
+struct Anchoring {
+    tree_size: u64,
+    root: Hash,
+    witnessed: bool,
+    continued_history: bool,
+}
+
+/// Locate a key object in the manifest version claimed by `binding.entry_index` (§2.2).
+fn bind_key(
+    governance: &Governance<'_>,
+    entry: &Value,
+    group: &str,
+    active_index: u64,
+) -> Result<String> {
+    let key_id = text(entry, "key_id")?.to_owned();
+    let source = text(entry, "source")?;
+    if source == "local-policy" {
+        // Permitted only for witness keys the verifier already trusts (§2.2).
+        return if group == "witness" {
+            Ok(text(entry, "pubkey")?.to_owned())
+        } else {
+            Err(ReceiptError::KeyNotBound { key_id, entry_index: active_index })
+        };
+    }
+    let binding_index = number(obj(entry, "binding")?, "entry_index")?;
+    if binding_index != active_index {
+        return Err(ReceiptError::KeyNotBound { key_id, entry_index: binding_index });
+    }
+    let (_, manifest) = governance
+        .manifests
+        .iter()
+        .find(|(index, _)| *index == binding_index)
+        .copied()
+        .ok_or_else(|| ReceiptError::KeyNotBound {
+            key_id: key_id.clone(),
+            entry_index: binding_index,
+        })?;
+
+    let declared: Vec<(String, String)> = match group {
+        "log" => key_objects(obj(manifest, "log")?)?,
+        "witness" => {
+            let mut all = Vec::new();
+            for witness in array(manifest, "witnesses")? {
+                all.extend(key_objects(witness)?);
+            }
+            all
+        }
+        _ => key_objects(manifest)?,
+    };
+    let pubkey = text(entry, "pubkey")?;
+    declared
+        .into_iter()
+        .find(|(id, key)| id == &key_id && key == pubkey)
+        .map(|(_, key)| key)
+        .ok_or(ReceiptError::KeyNotBound { key_id, entry_index: binding_index })
+}
+
+/// Recompute a key id from its public key rather than trusting the carried value
+/// (adaptor profile §3; producer keys additionally normative per spec §2.3.6).
+fn check_key_id(entry: &Value) -> Result<()> {
+    let key_id = text(entry, "key_id")?;
+    let pubkey = decode_pubkey(text(entry, "pubkey")?)?;
+    if sha256_hex(pubkey.as_bytes()) != key_id {
+        return Err(ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index: 0 });
+    }
+    Ok(())
+}
+
+fn verify_checkpoint(
+    receipt: &Value,
+    governance: &Governance<'_>,
+    budget: &mut Budget,
+) -> Result<Anchoring> {
+    let anchoring = obj(receipt, "anchoring")?;
+    let checkpoint = obj(anchoring, "checkpoint")?;
+    if checkpoint.get("raw").is_some() {
+        // The corpus adaptor profile defines no binary checkpoint framing (§5).
+        return Err(ReceiptError::AdaptorViolation(
+            "`anchoring.checkpoint.raw` is forbidden by adaptor profile ahl-test-log-v1",
+        ));
+    }
+    let tree_size = number(checkpoint, "tree_size")?;
+    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
+    let (active_index, active_manifest) = governance.active_for(tree_size)?;
+
+    // The log id must match the manifest version active for the checkpoint (adaptor §5).
+    if text(obj(active_manifest, "log")?, "id")? != text(checkpoint, "log_id")? {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "checkpoint `log_id` is not the log the active manifest declares".to_owned(),
+        ));
+    }
+
+    let keys = obj(receipt, "keys")?;
+    let mut log_keys = BTreeMap::new();
+    for entry in array(keys, "log")? {
+        check_key_id(entry)?;
+        log_keys.insert(
+            text(entry, "key_id")?.to_owned(),
+            bind_key(governance, entry, "log", active_index)?,
+        );
+    }
+    let mut witness_keys = BTreeMap::new();
+    for entry in array(keys, "witness")? {
+        check_key_id(entry)?;
+        witness_keys.insert(
+            text(entry, "key_id")?.to_owned(),
+            bind_key(governance, entry, "witness", active_index)?,
+        );
+    }
+
+    let signing_key =
+        log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| ReceiptError::KeyNotBound {
+            key_id: text(checkpoint, "key_id").unwrap_or_default().to_owned(),
+            entry_index: active_index,
+        })?;
+    budget.spend(1)?;
+    if !verify_signature(
+        &decode_pubkey(signing_key)?,
+        &checkpoint_signing_bytes(checkpoint)?,
+        text(checkpoint, "signature")?,
+    )? {
+        return Err(ReceiptError::CheckpointSignatureInvalid);
+    }
+
+    let mut witnessed = false;
+    for cosignature in anchoring.get("witnesses").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+        let witness_id = text(cosignature, "witness_id")?.to_owned();
+        let key_id = text(cosignature, "key_id")?;
+        let pubkey = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
+            key_id: key_id.to_owned(),
+            entry_index: active_index,
+        })?;
+        budget.spend(1)?;
+        if !verify_signature(
+            &decode_pubkey(pubkey)?,
+            &cosignature_bytes(checkpoint, &witness_id),
+            text(cosignature, "cosignature")?,
+        )? {
+            return Err(ReceiptError::WitnessCosignatureInvalid { witness_id });
+        }
+        witnessed = true;
+    }
+
+    // `continued_history` requires a later checkpoint plus a verifying consistency proof.
+    let continued_history = anchoring.get("later_checkpoint").is_some();
+    if continued_history {
+        // The corpus adaptor profile exercises no consistency proofs; a receipt claiming
+        // continued history under it cannot be checked, so it is rejected rather than accepted
+        // on the strength of an unverifiable field.
+        return Err(ReceiptError::ConsistencyPathInvalid);
+    }
+
+    Ok(Anchoring { tree_size, root, witnessed, continued_history })
+}
+
+/// Verify an inclusion path carried bare (adaptor profile §2.3) against a root.
+fn check_inclusion(
+    leaf: &[u8],
+    leaf_index: u64,
+    tree_size: u64,
+    path: &[String],
+    root: &Hash,
+    what: &'static str,
+    budget: &mut Budget,
+) -> Result<()> {
+    budget.spend(1)?;
+    let proof = proof_from_hex(leaf_index, tree_size, path)?;
+    if crate::verify_inclusion_proof(leaf, &proof, root)? {
+        Ok(())
+    } else {
+        Err(ReceiptError::InclusionPathInvalid { what })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Authenticated enumeration (format §4.2)
+// ---------------------------------------------------------------------------
+
+/// A verified §4.2 enumeration: the complete, in-order entry set of a range.
+struct Enumeration {
+    from_index: u64,
+    to_index: u64,
+    entries: Vec<Value>,
+}
+
+impl Enumeration {
+    /// The entry at absolute index `index`, if the range covers it.
+    fn at(&self, index: u64) -> Option<&Value> {
+        index
+            .checked_sub(self.from_index)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .and_then(|offset| self.entries.get(offset))
+    }
+}
+
+fn verify_enumeration(
+    material: &Value,
+    root: &Hash,
+    tree_size: u64,
+    what: &'static str,
+    budget: &mut Budget,
+) -> Result<Enumeration> {
+    let range = obj(material, "range")?;
+    let from_index = number(range, "from_index")?;
+    let to_index = number(range, "to_index")?;
+    let entries = array(material, "entries")?;
+
+    let width = to_index.checked_sub(from_index).filter(|w| *w > 0).ok_or_else(|| {
+        ReceiptError::RangeProofInvalid {
+            what,
+            detail: format!("empty or inverted range [{from_index}, {to_index})"),
+        }
+    })?;
+    if entries.len() as u64 != width {
+        return Err(ReceiptError::RangeProofInvalid {
+            what,
+            detail: format!("range width {width} but {} entries carried", entries.len()),
+        });
+    }
+
+    let mut envelopes = Vec::with_capacity(entries.len());
+    for (offset, entry) in entries.iter().enumerate() {
+        let claimed = number(entry, "entry_index")?;
+        let expected = from_index + offset as u64;
+        if claimed != expected {
+            return Err(ReceiptError::RangeProofInvalid {
+                what,
+                detail: format!("entry {offset} claims index {claimed}, expected {expected}"),
+            });
+        }
+        envelopes.push(obj(entry, "envelope")?.clone());
+    }
+
+    let proof = range_proof::decode(text(obj(material, "range_proof")?, "adaptor_form")?)?;
+    if proof.tree_size != tree_size || proof.from_index != from_index || proof.to_index != to_index
+    {
+        return Err(ReceiptError::RangeProofInvalid {
+            what,
+            detail: format!(
+                "proof covers [{}, {}) of a size-{} tree, material declares [{from_index}, \
+                 {to_index}) of a size-{tree_size} tree",
+                proof.from_index, proof.to_index, proof.tree_size
+            ),
+        });
+    }
+    budget.spend(u64::try_from(envelopes.len()).unwrap_or(u64::MAX).saturating_add(1))?;
+    let leaves: Vec<Vec<u8>> = envelopes.iter().map(jcs).collect();
+    if !range_proof::verify_over_leaves(&proof, &leaves, root)? {
+        return Err(ReceiptError::RangeProofInvalid {
+            what,
+            detail: "recomputed root differs from the checkpoint root".to_owned(),
+        });
+    }
+
+    Ok(Enumeration { from_index, to_index, entries: envelopes })
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// Verify an Evidence Receipt against locally configured policy.
+///
+/// Implements the receipt format's §5 algorithm in order: parse and versions and §3.1 limits;
+/// adaptor-profile resolution; checkpoint, key binding, witness cosignatures and inclusion;
+/// governance chain from the configured genesis anchor; the §3 claim-material schema; the §2.3
+/// cross-field consistency rules; and finally the rendered boundary.
+///
+/// # Errors
+///
+/// Returns the [`ReceiptError`] variant naming the first rule that rejected the receipt.
+pub fn verify_receipt(receipt: &Value, policy: &TrustPolicy) -> Result<Verdict> {
+    let encoded = jcs(receipt);
+    if encoded.len() > policy.limits.max_decoded_bytes {
+        return Err(ReceiptError::LimitExceeded("decoded size budget"));
+    }
+    let mut budget = Budget::new(policy.limits);
+    let verdict = verify_nested(receipt, policy, &mut budget, 0)?;
+    Ok(Verdict { embedded_receipts: budget.embedded, ..verdict })
+}
+
+/// Verify a receipt at nesting `depth`, sharing the whole tree's resource budget.
+// The §5 algorithm is a fixed ordered sequence of steps; splitting it into helpers that each
+// take the growing set of intermediate results would obscure the order the format mandates.
+#[allow(clippy::too_many_lines)]
+fn verify_nested(
+    receipt: &Value,
+    policy: &TrustPolicy,
+    budget: &mut Budget,
+    depth: usize,
+) -> Result<Verdict> {
+    budget.enter(depth)?;
+
+    // --- §5 step 1: versions, identifiers -------------------------------------------
+    for (field, expected) in
+        [("ahl_receipt_version", RECEIPT_VERSION), ("spec_version", SPEC_VERSION)]
+    {
+        let got = text(receipt, field)?;
+        if got != expected {
+            return Err(ReceiptError::UnsupportedVersion {
+                field: if field == "spec_version" { "spec_version" } else { "ahl_receipt_version" },
+                expected,
+                got: got.to_owned(),
+            });
+        }
+    }
+
+    let envelope = obj(receipt, "envelope")?;
+    let subject = obj(receipt, "subject")?;
+    if text(subject, "statement_id")? != statement_id(envelope)? {
+        return Err(ReceiptError::IdentifierMismatch { field: "statement_id" });
+    }
+    if text(subject, "entry_id")? != entry_id(envelope) {
+        return Err(ReceiptError::IdentifierMismatch { field: "entry_id" });
+    }
+    let subject_index = number(subject, "entry_index")?;
+    let payload = payload_of(envelope)?;
+    let subject_type = statement_type(payload)?.to_owned();
+
+    // --- §5 step 2: adaptor profile -------------------------------------------------
+    let adaptor = obj(obj(receipt, "anchoring")?, "adaptor")?;
+    let adaptor_id = text(adaptor, "id")?;
+    if policy.adaptor_profiles.get(adaptor_id).map(String::as_str) != Some(text(adaptor, "hash")?) {
+        return Err(ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() });
+    }
+
+    // --- §5 step 4 (chain structure first: key binding depends on it) ---------------
+    let governance = read_chain(receipt, policy)?;
+
+    // --- §5 step 3: checkpoint, keys, cosignatures, inclusion -----------------------
+    let anchoring = verify_checkpoint(receipt, &governance, budget)?;
+    if subject_index >= anchoring.tree_size {
+        return Err(ReceiptError::EntryIndexBeyondCheckpoint {
+            entry_index: subject_index,
+            tree_size: anchoring.tree_size,
+        });
+    }
+    check_inclusion(
+        &jcs(envelope),
+        subject_index,
+        anchoring.tree_size,
+        &path_strings(obj(receipt, "anchoring")?, "inclusion_path")?,
+        &anchoring.root,
+        "subject",
+        budget,
+    )?;
+
+    // --- §5 step 4: chain anchoring and signatures ----------------------------------
+    for hop in array(obj(receipt, "governance")?, "chain")? {
+        let index = number(hop, "entry_index")?;
+        let hop_envelope = obj(hop, "envelope")?;
+        check_inclusion(
+            &jcs(hop_envelope),
+            index,
+            anchoring.tree_size,
+            &path_strings(hop, "inclusion_path")?,
+            &anchoring.root,
+            "governance chain hop",
+            budget,
+        )?;
+        verify_envelope_at(hop_envelope, &governance, index, budget)?;
+    }
+    verify_envelope_at(envelope, &governance, subject_index, budget)?;
+
+    // --- §2.1 / §4: governance currency ---------------------------------------------
+    let claim = obj(receipt, "claim")?;
+    let assurance_block = obj(claim, "assurance")?;
+    let assurance = Assurance {
+        governance: text(assurance_block, "governance")?.to_owned(),
+        competing_triggers: text(assurance_block, "competing_triggers")?.to_owned(),
+        witnessed: flag(assurance_block, "witnessed")?,
+        continued_history: flag(assurance_block, "continued_history")?,
+        content_binding: text(assurance_block, "content_binding")?.to_owned(),
+    };
+    let currency = obj(obj(receipt, "governance")?, "currency")?;
+    let mode = text(currency, "mode")?;
+    if assurance.governance != mode {
+        return Err(ReceiptError::AssuranceMismatch { field: "governance" });
+    }
+    if assurance.witnessed != anchoring.witnessed {
+        return Err(ReceiptError::AssuranceMismatch { field: "witnessed" });
+    }
+    if assurance.continued_history != anchoring.continued_history {
+        return Err(ReceiptError::AssuranceMismatch { field: "continued_history" });
+    }
+
+    let claim_type = text(claim, "type")?.to_owned();
+    let enumeration = match mode {
+        "declared" => {
+            if !DECLARED_MODE_TYPES.contains(&claim_type.as_str()) {
+                return Err(ReceiptError::AssuranceMismatch { field: "governance" });
+            }
+            None
+        }
+        "enumerated" => {
+            Some(verify_governance_enumeration(currency, &governance, &anchoring, budget)?)
+        }
+        other => return Err(ReceiptError::Malformed(format!("unknown governance mode `{other}`"))),
+    };
+
+    // --- §2.3: subject-level cross-field consistency --------------------------------
+    let manifest_declared = subject.get("manifest").is_some();
+    if manifest_declared == (subject_type == "manifest") {
+        return Err(ReceiptError::SubjectManifestPresence { statement_type: subject_type });
+    }
+    let record_subject = check_record_subject(claim, payload, &claim_type, &subject_type)?;
+
+    // --- §5 step 5: the §3 claim-material schema ------------------------------------
+    let ctx = ClaimCtx {
+        receipt,
+        policy,
+        governance: &governance,
+        payload,
+        subject_index,
+        claim_type: &claim_type,
+        assurance: &assurance,
+        record_subject: record_subject.as_ref(),
+        enumeration: enumeration.as_ref(),
+        depth,
+    };
+    verify_claim_material(&ctx, budget)?;
+
+    Ok(Verdict {
+        boundary: render(&claim_type, &assurance),
+        claim_type,
+        subject_entry_index: subject_index,
+        subject_statement_id: text(subject, "statement_id")?.to_owned(),
+        assurance,
+        embedded_receipts: budget.embedded,
+    })
+}
+
+/// Claim types §4 permits in `declared` mode.
+const DECLARED_MODE_TYPES: [&str; 5] = [
+    "statement-anchored",
+    "record-ingested",
+    "record-derived",
+    "trigger-declared",
+    "disposition-declared",
+];
+
+fn verify_envelope_at(
+    envelope: &Value,
+    governance: &Governance<'_>,
+    index: u64,
+    budget: &mut Budget,
+) -> Result<()> {
+    let keys = governance.producer_keys_at(index);
+    budget.spend(1)?;
+    if crate::verify_envelope(envelope, |key_id| keys.get(key_id).cloned())? {
+        Ok(())
+    } else {
+        Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index })
+    }
+}
+
+/// Verify enumerated governance currency: the presented chain is the complete set of
+/// manifest/key entries in the enumerated range (§4).
+fn verify_governance_enumeration(
+    currency: &Value,
+    governance: &Governance<'_>,
+    anchoring: &Anchoring,
+    budget: &mut Budget,
+) -> Result<Enumeration> {
+    let material = obj(currency, "material")?;
+    let enumeration =
+        verify_enumeration(material, &anchoring.root, anchoring.tree_size, "governance", budget)?;
+
+    let presented: BTreeSet<u64> = governance.manifests.iter().map(|(index, _)| *index).collect();
+    let mut presented_all = presented;
+    presented_all.extend(governance.events.iter().map(|e| e.entry_index));
+
+    for (offset, envelope) in enumeration.entries.iter().enumerate() {
+        let index = enumeration.from_index + offset as u64;
+        let kind = statement_type(payload_of(envelope)?)?;
+        if matches!(kind, "manifest" | "key") && !presented_all.contains(&index) {
+            return Err(ReceiptError::GovernanceChainInvalid(format!(
+                "enumeration reveals a `{kind}` statement at entry index {index} that the \
+                 presented chain omits"
+            )));
+        }
+    }
+    Ok(enumeration)
+}
+
+/// Enforce the §3 subject rule and the §2.3 `record_subject` match.
+fn check_record_subject(
+    claim: &Value,
+    payload: &Value,
+    claim_type: &str,
+    subject_type: &str,
+) -> Result<Option<(String, String)>> {
+    let required = claim_type.starts_with("record-")
+        || claim_type.starts_with("trigger-")
+        || claim_type.starts_with("disposition-");
+    let carried = claim.get("record_subject");
+
+    match (required, carried) {
+        (false, Some(_)) => Err(ReceiptError::RecordSubjectMismatch {
+            claim_type: claim_type.to_owned(),
+            detail: "must be absent for this claim type (§3 subject rule)".to_owned(),
+        }),
+        (false, None) => Ok(None),
+        (true, None) => Err(ReceiptError::RecordSubjectMismatch {
+            claim_type: claim_type.to_owned(),
+            detail: "is REQUIRED for this claim type (§3 subject rule)".to_owned(),
+        }),
+        (true, Some(subject)) => {
+            let pair = (text(subject, "dataset")?.to_owned(), text(subject, "record")?.to_owned());
+            // Types whose subject envelope names the record directly must agree with it.
+            if matches!(subject_type, "ingestion" | "retraction" | "correction") {
+                let declared =
+                    (text(payload, "dataset")?.to_owned(), text(payload, "record")?.to_owned());
+                if declared != pair {
+                    return Err(ReceiptError::RecordSubjectMismatch {
+                        claim_type: claim_type.to_owned(),
+                        detail: format!(
+                            "names `{}` but the subject envelope names `{}` (§2.3)",
+                            pair.1, declared.1
+                        ),
+                    });
+                }
+            }
+            Ok(Some(pair))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Claim material (format §3)
+// ---------------------------------------------------------------------------
+
+struct ClaimCtx<'a> {
+    receipt: &'a Value,
+    policy: &'a TrustPolicy,
+    governance: &'a Governance<'a>,
+    payload: &'a Value,
+    subject_index: u64,
+    claim_type: &'a str,
+    assurance: &'a Assurance,
+    record_subject: Option<&'a (String, String)>,
+    enumeration: Option<&'a Enumeration>,
+    depth: usize,
+}
+
+impl ClaimCtx<'_> {
+    fn material(&self) -> Result<&Value> {
+        obj(self.receipt, "claim_material")
+    }
+
+    fn missing(&self, field: &'static str) -> ReceiptError {
+        ReceiptError::ClaimMaterialMissing { claim_type: self.claim_type.to_owned(), field }
+    }
+
+    fn require_subject_type(&self, expected: &str) -> Result<()> {
+        let got = statement_type(self.payload)?;
+        if got == expected {
+            Ok(())
+        } else {
+            Err(ReceiptError::Malformed(format!(
+                "claim type `{}` requires a `{expected}` subject, got `{got}`",
+                self.claim_type
+            )))
+        }
+    }
+}
+
+fn verify_claim_material(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
+    match ctx.claim_type {
+        "statement-anchored" => Ok(()),
+        "record-ingested" => verify_record_ingested(ctx),
+        "record-derived" => verify_record_derived(ctx, budget),
+        "trigger-declared" => verify_trigger(ctx, budget, "trigger-declared"),
+        "trigger-effective" => verify_trigger(ctx, budget, "trigger-effective"),
+        "disposition-declared" => verify_disposition(ctx, budget, "trigger-declared"),
+        "disposition-effective" => verify_disposition(ctx, budget, "trigger-effective"),
+        "propagation-complete" => verify_propagation_complete(ctx, budget),
+        "governance-state" => verify_governance_state(ctx),
+        other => Err(ReceiptError::Malformed(format!("`{other}` is not a registry claim type"))),
+    }
+}
+
+/// `record-ingested` (§3): the subject ingestion introduces the record; optional content
+/// binding recomputes the commitment from carried canonical bytes.
+fn verify_record_ingested(ctx: &ClaimCtx<'_>) -> Result<()> {
+    ctx.require_subject_type("ingestion")?;
+    let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
+    verify_content_binding(ctx, dataset, record, "record_bytes")
+}
+
+/// Recompute a commitment from carried canonical bytes per the dataset's declared mode
+/// (§2.1, spec §2.4). `content_binding: "none"` requires the evidence fields to be absent.
+fn verify_content_binding(
+    ctx: &ClaimCtx<'_>,
+    dataset: &str,
+    record: &str,
+    field: &'static str,
+) -> Result<()> {
+    let material = ctx.material()?;
+    if ctx.assurance.content_binding == "none" {
+        return if material.get(field).is_some() {
+            Err(ReceiptError::AssuranceMismatch { field: "content_binding" })
+        } else {
+            Ok(())
+        };
+    }
+
+    let (_, manifest) = ctx.governance.active_for(ctx.subject_index + 1)?;
+    let declared_mode =
+        text(obj(obj(manifest, "datasets")?, dataset)?, "commitment_mode")?.to_owned();
+    let encoded = material.get(field).and_then(Value::as_str).ok_or_else(|| ctx.missing(field))?;
+    let bytes = B64
+        .decode(crate::strip_prefix(encoded, "base64:")?)
+        .map_err(|source| ReceiptError::Ahl(AhlError::Base64(source)))?;
+
+    let recomputed = match ctx.assurance.content_binding.as_str() {
+        "plain-verified" if declared_mode == "plain" => commit_plain(dataset, &bytes),
+        "keyed-authorized" if declared_mode == "keyed" => {
+            let key = ctx.policy.dataset_keys.get(dataset).ok_or_else(|| {
+                ReceiptError::ContentBindingMismatch {
+                    mode: "keyed-authorized".to_owned(),
+                    recomputed: "<no dataset key held>".to_owned(),
+                    claimed: record.to_owned(),
+                }
+            })?;
+            commit_keyed(key, dataset, &bytes)?
+        }
+        // A binding mode the dataset's declared commitment mode cannot satisfy (§2.1).
+        mode => {
+            return Err(ReceiptError::ContentBindingMismatch {
+                mode: mode.to_owned(),
+                recomputed: format!("<dataset `{dataset}` is in `{declared_mode}` mode>"),
+                claimed: record.to_owned(),
+            })
+        }
+    };
+    if recomputed == record {
+        Ok(())
+    } else {
+        Err(ReceiptError::ContentBindingMismatch {
+            mode: ctx.assurance.content_binding.clone(),
+            recomputed,
+            claimed: record.to_owned(),
+        })
+    }
+}
+
+/// `record-derived` (§3): one output record's derivation, unbatched or through the batch tree.
+fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
+    ctx.require_subject_type("derivation")?;
+    let material = ctx.material()?;
+    let output = obj(material, "output")?;
+    let claimed = (text(output, "dataset")?.to_owned(), text(output, "record")?.to_owned());
+    if ctx.record_subject != Some(&claimed) {
+        return Err(ReceiptError::RecordSubjectMismatch {
+            claim_type: ctx.claim_type.to_owned(),
+            detail: "does not match `claim_material.output`".to_owned(),
+        });
+    }
+
+    if let Some(root) = ctx.payload.get("outputs_root").and_then(Value::as_str) {
+        let leaf = material.get("batch_leaf").ok_or_else(|| ctx.missing("batch_leaf"))?;
+        if (text(leaf, "dataset")?.to_owned(), text(leaf, "record")?.to_owned()) != claimed {
+            return Err(ReceiptError::ClaimMaterialPathInvalid { what: "batch_leaf" });
+        }
+        let count = number(ctx.payload, "outputs_count")?;
+        let index = number(material, "leaf_index")?;
+        check_inclusion(
+            &jcs(leaf),
+            index,
+            count,
+            &path_strings(material, "leaf_path")?,
+            &parse_hash_hex(root)?,
+            "batch output leaf",
+            budget,
+        )?;
+        verify_input_members(ctx, leaf, budget)?;
+    } else {
+        let listed = array(ctx.payload, "outputs")?.iter().any(|entry| {
+            entry.get("dataset").and_then(Value::as_str) == Some(claimed.0.as_str())
+                && entry.get("record").and_then(Value::as_str) == Some(claimed.1.as_str())
+        });
+        if !listed {
+            return Err(ReceiptError::ClaimMaterialPathInvalid { what: "output" });
+        }
+    }
+
+    verify_content_binding(ctx, &claimed.0, &claimed.1, "output_bytes")
+}
+
+/// Optional `input_members` (§3): each proves one input's membership in the leaf's input set.
+fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -> Result<()> {
+    let material = ctx.material()?;
+    let Some(members) = material.get("input_members").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let inputs = leaf.get("inputs").ok_or_else(|| ctx.missing("batch_leaf.inputs"))?;
+    let root = text(inputs, "input_set_root")?;
+    let count = number(inputs, "input_set_count")?;
+    for member in members {
+        let input = obj(member, "input")?;
+        check_inclusion(
+            &jcs(input),
+            number(member, "input_index")?,
+            count,
+            &path_strings(member, "input_path")?,
+            &parse_hash_hex(root)?,
+            "input-set member",
+            budget,
+        )?;
+    }
+    Ok(())
+}
+
+/// An embedded receipt, verified recursively under the shared §3.1 budget.
+struct Embedded {
+    verdict: Verdict,
+    entry_index: u64,
+    record: Option<(String, String)>,
+}
+
+/// Claim types accepted in an embedded slot. `introduction` slots accept either introduction
+/// form, because a record is introduced by an ingestion *or* by a derivation (spec §2.3.1).
+const INTRODUCTION_TYPES: [&str; 2] = ["record-ingested", "record-derived"];
+
+/// Verify an embedded receipt and return its verdict, subject index and record subject.
+fn verify_embedded(
+    ctx: &ClaimCtx<'_>,
+    slot: &'static str,
+    expected: &'static str,
+    permitted: &[&str],
+    budget: &mut Budget,
+) -> Result<Embedded> {
+    let embedded =
+        ctx.material()?.get(slot).filter(|v| v.is_object()).ok_or_else(|| ctx.missing(slot))?;
+    // Duplicate embedded receipts are verified once and referenced thereafter (§3.1).
+    let key = entry_id(obj(embedded, "envelope")?);
+    let verdict = verify_nested(embedded, ctx.policy, budget, ctx.depth + 1)?;
+    budget.seen.insert(key);
+
+    if !permitted.contains(&verdict.claim_type.as_str()) {
+        return Err(ReceiptError::EmbeddedClaimTypeMismatch {
+            slot,
+            expected,
+            got: verdict.claim_type,
+        });
+    }
+    let record = obj(embedded, "claim")?.get("record_subject").map(|subject| {
+        (
+            subject.get("dataset").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            subject.get("record").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        )
+    });
+    Ok(Embedded { verdict, entry_index: number(obj(embedded, "subject")?, "entry_index")?, record })
+}
+
+/// `trigger-declared` / `trigger-effective` (§3).
+fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result<()> {
+    let subject_type = statement_type(ctx.payload)?;
+    if !matches!(subject_type, "retraction" | "correction") {
+        return Err(ReceiptError::Malformed(format!(
+            "claim type `{}` requires a trigger subject, got `{subject_type}`",
+            ctx.claim_type
+        )));
+    }
+    let (_, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
+
+    // The introduction proof establishes who may retract (§3 authority note).
+    let introduction =
+        verify_embedded(ctx, "introduction", "introduction", &INTRODUCTION_TYPES, budget)?;
+    // Spec §2.3.3: a trigger anchored at a smaller entry index than the record's introduction
+    // is never effective — authority cannot predate the introduction that creates it.
+    if introduction.entry_index >= ctx.subject_index {
+        return Err(ReceiptError::EmbeddedOrderingViolation {
+            what: "introduction",
+            inner: introduction.entry_index,
+            outer: ctx.subject_index,
+        });
+    }
+    if introduction.record.as_ref().map(|(_, r)| r.as_str()) != Some(record.as_str()) {
+        return Err(ReceiptError::EmbeddedSubjectMismatch {
+            what: "introduction",
+            got: introduction.record.map_or_else(String::new, |(_, r)| r),
+            want: record.clone(),
+        });
+    }
+
+    if subject_type == "correction" {
+        let replacement = text(ctx.payload, "replacement")?.to_owned();
+        let embedded = verify_embedded(
+            ctx,
+            "replacement_introduction",
+            "introduction",
+            &INTRODUCTION_TYPES,
+            budget,
+        )?;
+        // Spec §2.3.3: a correction's replacement must be introduced at an entry index no
+        // greater than the correction's.
+        if embedded.entry_index > ctx.subject_index {
+            return Err(ReceiptError::EmbeddedOrderingViolation {
+                what: "replacement introduction",
+                inner: embedded.entry_index,
+                outer: ctx.subject_index,
+            });
+        }
+        if embedded.record.as_ref().map(|(_, r)| r.as_str()) != Some(replacement.as_str()) {
+            return Err(ReceiptError::EmbeddedSubjectMismatch {
+                what: "replacement introduction",
+                got: embedded.record.map_or_else(String::new, |(_, r)| r),
+                want: replacement,
+            });
+        }
+    }
+
+    // Scope is what makes a trigger meaningful at all; a scopeless one is malformed (§2.3.3).
+    Scope::from_payload(ctx.payload)?;
+
+    if kind == "trigger-effective" {
+        verify_competing_triggers(ctx, introduction.entry_index, budget)?;
+    } else if ctx.assurance.competing_triggers != "not-checked" {
+        return Err(ReceiptError::AssuranceMismatch { field: "competing_triggers" });
+    }
+    Ok(())
+}
+
+/// The §3 competing-trigger enumeration required by `trigger-effective`.
+fn verify_competing_triggers(
+    ctx: &ClaimCtx<'_>,
+    introduction_index: u64,
+    budget: &mut Budget,
+) -> Result<()> {
+    if ctx.assurance.competing_triggers != "enumerated" || ctx.assurance.governance != "enumerated"
+    {
+        return Err(ReceiptError::AssuranceMismatch { field: "competing_triggers" });
+    }
+    let material = ctx.material()?;
+    let checkpoint_c = obj(material, "checkpoint_C")?;
+    let tree_size = number(checkpoint_c, "tree_size")?;
+    let root = parse_hash_hex(text(checkpoint_c, "root_hash")?)?;
+    let competing = obj(material, "competing")?;
+    let range_material = obj(competing, "corpus_range")?;
+
+    let enumeration =
+        verify_enumeration(range_material, &root, tree_size, "competing triggers", budget)?;
+
+    // The range must be the complete corpus prefix, or the prefix from the record's
+    // introduction — sound because a trigger anchored before the introduction is never
+    // effective (spec §2.3.3).
+    if enumeration.to_index != tree_size
+        || (enumeration.from_index != 0 && enumeration.from_index != introduction_index)
+    {
+        return Err(ReceiptError::CompetingRangeInsufficient {
+            got_from: enumeration.from_index,
+            got_to: enumeration.to_index,
+            tree_size,
+            introduction_index,
+        });
+    }
+
+    // Among the effective triggers naming the record, the greatest entry index governs
+    // (spec §2.3.3); the subject must be that one.
+    let (_, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
+    let dataset = &ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?.0;
+    let mut governing = None;
+    for (offset, envelope) in enumeration.entries.iter().enumerate() {
+        let index = enumeration.from_index + offset as u64;
+        let payload = payload_of(envelope)?;
+        if matches!(statement_type(payload)?, "retraction" | "correction")
+            && payload.get("dataset").and_then(Value::as_str) == Some(dataset.as_str())
+            && payload.get("record").and_then(Value::as_str) == Some(record.as_str())
+        {
+            governing = Some(index);
+        }
+    }
+    if governing != Some(ctx.subject_index) {
+        return Err(ReceiptError::ClosureMismatch(format!(
+            "the trigger governing `{record}` at tree size {tree_size} is at entry index {}, \
+             not {}",
+            governing.map_or_else(|| "<none>".to_owned(), |i| i.to_string()),
+            ctx.subject_index
+        )));
+    }
+    Ok(())
+}
+
+/// `disposition-declared` / `disposition-effective` (§3).
+fn verify_disposition(
+    ctx: &ClaimCtx<'_>,
+    budget: &mut Budget,
+    trigger_kind: &'static str,
+) -> Result<()> {
+    ctx.require_subject_type("propagation")?;
+    let material = ctx.material()?;
+    let trigger = verify_embedded(ctx, "trigger", trigger_kind, &[trigger_kind], budget)?;
+
+    // The propagation must name the trigger the embedded receipt proves (spec §2.3.4).
+    if text(ctx.payload, "trigger")? != trigger.verdict.subject_statement_id {
+        return Err(ReceiptError::EmbeddedSubjectMismatch {
+            what: "trigger",
+            got: trigger.verdict.subject_statement_id,
+            want: text(ctx.payload, "trigger")?.to_owned(),
+        });
+    }
+    // §2.3: introduction index < trigger index <= propagation index.
+    if trigger.entry_index > ctx.subject_index {
+        return Err(ReceiptError::EmbeddedOrderingViolation {
+            what: "trigger",
+            inner: trigger.entry_index,
+            outer: ctx.subject_index,
+        });
+    }
+
+    let leaf = material.get("disposition_leaf").ok_or_else(|| ctx.missing("disposition_leaf"))?;
+    let leaf_record = (text(leaf, "dataset")?.to_owned(), text(leaf, "record")?.to_owned());
+    if ctx.record_subject != Some(&leaf_record) {
+        return Err(ReceiptError::RecordSubjectMismatch {
+            claim_type: ctx.claim_type.to_owned(),
+            detail: "does not match the carried disposition leaf".to_owned(),
+        });
+    }
+    // The dispositioned record must not be the trigger's own record: dispositions cover the
+    // affected derived records (spec §2.3.4, §5.1).
+    if trigger.record.as_ref() == Some(&leaf_record) {
+        return Err(ReceiptError::EmbeddedSubjectMismatch {
+            what: "disposition leaf",
+            got: leaf_record.1,
+            want: "a derived record, not the trigger's own".to_owned(),
+        });
+    }
+
+    check_inclusion(
+        &jcs(leaf),
+        number(material, "leaf_index")?,
+        number(ctx.payload, "affected_count")?,
+        &path_strings(material, "leaf_path")?,
+        &parse_hash_hex(text(ctx.payload, "affected_root")?)?,
+        "disposition leaf",
+        budget,
+    )
+}
+
+/// `propagation-complete` (§3): the anchored affected set equals the recomputable closure.
+fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
+    ctx.require_subject_type("propagation")?;
+    if ctx.assurance.governance != "enumerated" {
+        return Err(ReceiptError::AssuranceMismatch { field: "governance" });
+    }
+    let material = ctx.material()?;
+    let prefix_material = material
+        .get("corpus_prefix")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| ctx.missing("corpus_prefix"))?;
+
+    let checkpoint = obj(ctx.payload, "corpus_checkpoint")?;
+    let tree_size = number(checkpoint, "tree_size")?;
+    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
+    let prefix = verify_enumeration(prefix_material, &root, tree_size, "corpus prefix", budget)?;
+    if prefix.from_index != 0 || prefix.to_index != tree_size {
+        return Err(ReceiptError::RangeProofInvalid {
+            what: "corpus prefix",
+            detail: format!(
+                "must be the complete prefix [0, {tree_size}), got [{}, {})",
+                prefix.from_index, prefix.to_index
+            ),
+        });
+    }
+
+    // Committed tree material for every root the prefix references, validated against its
+    // commitment before a single edge is read from it (spec §2.5, §3.5).
+    let trees_block = obj(material, "trees")?;
+    let mut trees = TreeMaterial::new();
+    for (root_hex, entry) in trees_block.as_object().into_iter().flatten() {
+        trees.insert(root_hex.clone(), array(entry, "leaves")?.clone());
+    }
+
+    // The disposition tree is validated here so a wrong-root or short leaf set is a typed
+    // rejection rather than a closure disagreement.
+    let affected_root = text(ctx.payload, "affected_root")?;
+    let affected_count = number(ctx.payload, "affected_count")?;
+    let dispositions = ValidatedLeafSet::open(
+        affected_root,
+        affected_count,
+        trees.get(affected_root).cloned().ok_or_else(|| ReceiptError::TreeMaterialInvalid {
+            root: affected_root.to_owned(),
+            detail: "no leaf material carried".to_owned(),
+        })?,
+    )
+    .map_err(|source| ReceiptError::TreeMaterialInvalid {
+        root: affected_root.to_owned(),
+        detail: source.to_string(),
+    })?;
+
+    // Locate the trigger inside the enumerated prefix and recompute the closure.
+    let trigger_statement = text(ctx.payload, "trigger")?;
+    let trigger_index = prefix
+        .entries
+        .iter()
+        .position(|envelope| statement_id(envelope).ok().as_deref() == Some(trigger_statement))
+        .ok_or_else(|| {
+            ReceiptError::ClosureMismatch(
+                "the corpus prefix does not contain the trigger the propagation names".to_owned(),
+            )
+        })?;
+
+    budget.spend(u64::try_from(prefix.entries.len()).unwrap_or(u64::MAX))?;
+    let closure = affected_set(&prefix.entries, &trees, trigger_index, prefix.entries.len())
+        .map_err(|source| match source {
+            AhlError::MissingTreeMaterial(root) => ReceiptError::TreeMaterialInvalid {
+                root,
+                detail: "no leaf material carried".to_owned(),
+            },
+            AhlError::TreeRootMismatch { root, recomputed } => ReceiptError::TreeMaterialInvalid {
+                root,
+                detail: format!("recomputes to {recomputed}"),
+            },
+            AhlError::TreeCountMismatch { root, declared, got } => {
+                ReceiptError::TreeMaterialInvalid {
+                    root,
+                    detail: format!("commits {declared} leaves, {got} carried"),
+                }
+            }
+            other => ReceiptError::Ahl(other),
+        })?;
+
+    let anchored: BTreeSet<(String, String)> = dispositions
+        .leaves()
+        .iter()
+        .map(|leaf| Ok((text(leaf, "dataset")?.to_owned(), text(leaf, "record")?.to_owned())))
+        .collect::<Result<_>>()?;
+    // Completeness is relative to the declared corpus; nothing here proves the declared corpus
+    // is the real corpus (spec §5.3). The rendered boundary says so.
+    if anchored == closure.affected {
+        Ok(())
+    } else {
+        Err(ReceiptError::ClosureMismatch(format!(
+            "recomputed {} affected records, the disposition tree anchors {}",
+            closure.affected.len(),
+            anchored.len()
+        )))
+    }
+}
+
+/// `governance-state` (§3): the manifest/key state at a target index is exactly the chain.
+fn verify_governance_state(ctx: &ClaimCtx<'_>) -> Result<()> {
+    let subject_type = statement_type(ctx.payload)?;
+    if !matches!(subject_type, "manifest" | "key") {
+        return Err(ReceiptError::Malformed(format!(
+            "`governance-state` requires a manifest or key subject, got `{subject_type}`"
+        )));
+    }
+    if ctx.assurance.governance != "enumerated" {
+        return Err(ReceiptError::AssuranceMismatch { field: "governance" });
+    }
+    let target_index = number(ctx.material()?, "target_index")?;
+    if ctx.subject_index > target_index {
+        return Err(ReceiptError::EmbeddedOrderingViolation {
+            what: "governance subject",
+            inner: ctx.subject_index,
+            outer: target_index,
+        });
+    }
+    let enumeration = ctx.enumeration.ok_or_else(|| ctx.missing("governance.currency.material"))?;
+
+    // The §4 material must cover exactly `(subject.entry_index, target_index]`.
+    if enumeration.from_index != ctx.subject_index + 1 || enumeration.to_index != target_index + 1 {
+        return Err(ReceiptError::RangeProofInvalid {
+            what: "governance state range",
+            detail: format!(
+                "must cover ({}, {target_index}], got [{}, {})",
+                ctx.subject_index, enumeration.from_index, enumeration.to_index
+            ),
+        });
+    }
+    for index in enumeration.from_index..enumeration.to_index {
+        let Some(envelope) = enumeration.at(index) else { continue };
+        let kind = statement_type(payload_of(envelope)?)?;
+        if matches!(kind, "manifest" | "key") {
+            return Err(ReceiptError::GovernanceStateNotCurrent {
+                target_index,
+                entry_index: index,
+                statement_type: kind.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Verdict rendering (format §5 step 6)
+// ---------------------------------------------------------------------------
+
+/// Render the claim boundary from `claim.type` and `assurance` alone.
+///
+/// The `-declared` types never use the words "effective", "governs" or "complete"; the
+/// `-effective`/`-complete` types do, and only ever reach this function with enumerated
+/// governance because verification rejects them otherwise (§3 naming rule).
+fn render(claim_type: &str, assurance: &Assurance) -> String {
+    let base = match claim_type {
+        "statement-anchored" => {
+            "the subject envelope is anchored at the stated entry index and signed under the \
+             producer-declared manifest chain"
+        }
+        "record-ingested" => "the subject ingestion introduced the named record into the corpus",
+        "record-derived" => "the subject derivation committed the named output record",
+        "trigger-declared" => {
+            "a trigger naming the record is anchored and signed under the declared chain by the \
+             declared issuer"
+        }
+        "trigger-effective" => {
+            "the trigger governs the record at the stated checkpoint, its issuer's authority \
+             held under enumerated governance"
+        }
+        "disposition-declared" => "the subject propagation statement dispositions the named record",
+        "disposition-effective" => {
+            "the subject propagation statement dispositions the named record under a trigger \
+             proven effective at the stated checkpoint"
+        }
+        "propagation-complete" => {
+            "the propagation statement's affected set equals the closure recomputable from the \
+             enumerated corpus prefix — complete relative to the declared corpus only"
+        }
+        "governance-state" => {
+            "the manifest and key state active at the target index is exactly the presented chain"
+        }
+        other => return format!("unknown claim type `{other}`"),
+    };
+    let mut boundary = base.to_owned();
+    boundary.push_str(if assurance.witnessed {
+        "; anchored under a witness-cosigned checkpoint"
+    } else {
+        "; the anchoring checkpoint carries no verified witness cosignature"
+    });
+    if !assurance.continued_history {
+        boundary.push_str("; no claim of continued append-only history beyond that checkpoint");
+    }
+    boundary.push_str(match assurance.content_binding.as_str() {
+        "plain-verified" => "; record content verified against the commitment",
+        "keyed-authorized" => {
+            "; record content verified against the commitment by an authorized key holder"
+        }
+        _ => "; record content not verified",
+    });
+    boundary
+}

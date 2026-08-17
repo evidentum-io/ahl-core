@@ -13,7 +13,8 @@ and anyone can recompute every `keyed` commitment in `test_data/`.
 | `producer-1.seed` | Ed25519 seed, 32 bytes hex — the corpus producer |
 | `producer-2.seed` | Ed25519 seed, 32 bytes hex — the key added by entry 9 |
 | `log-1.seed` | Ed25519 seed, 32 bytes hex — checkpoint-signing key of the test log |
-| `witness-1.seed` | Ed25519 seed, 32 bytes hex — the independent witness (spec §3.3) |
+| `witness-1.seed` | Ed25519 seed, 32 bytes hex — the witness of manifest version 1 (spec §3.3) |
+| `witness-2.seed` | Ed25519 seed, 32 bytes hex — the witness of manifest version 2, after rotation |
 | `dataset_customers.key` | HMAC-SHA-256 key, 32 bytes hex — dataset `customers` (spec §2.4) |
 
 Regenerate the corpus with `cargo run --bin gen_vectors`; the generator rewrites these

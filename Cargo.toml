@@ -22,6 +22,9 @@ serde_json = "1"
 hex = "0.4"
 base64 = "0.22"
 thiserror = "1"
+# Every RFC 3339 value in the crate - `valid_time`, `effective_from`, checkpoint times - is
+# parsed and compared through this one datetime type. String comparison is never used.
+time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 
 [lints.rust]
 unsafe_code = "forbid"

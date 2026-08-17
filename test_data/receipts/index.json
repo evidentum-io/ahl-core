@@ -1,0 +1,149 @@
+{
+  "description": "Every Evidence Receipt vector in this directory, with the outcome a conformant verifier must reach. Negative vectors name the normative rule that must fire. The `policy` block is the locally configured trust policy the outcomes assume (receipt format §1 design rule 1); it is deliberately NOT derived from any receipt.",
+  "policy": {
+    "adaptor_profiles": {
+      "ahl-test-log-v1": "sha256:26509012fc3a5791e9e19ac0cd0835443a09b38148b7f6265b3426e6167d71d6"
+    },
+    "dataset_keys": {
+      "customers": "test_data/keys/dataset_customers.key — held only by an authorized verifier; never packaged in a receipt"
+    },
+    "genesis_entry_id": "sha256:ddd9a5bbaf91b7f121dbeeddb6d08982dd166fdf3cbd7c4571696cc5806ce2bf",
+    "genesis_key_ids": [
+      "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
+    ],
+    "limits": {
+      "max_decoded_bytes": 8388608,
+      "max_embedded_depth": 4,
+      "max_embedded_receipts": 64,
+      "max_work_units": 100000
+    }
+  },
+  "vectors": [
+    {
+      "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "statement-anchored",
+      "embedded_receipts": 0,
+      "expect": "accept",
+      "file": "statement-anchored-valid.ahl"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "reject",
+      "file": "overclaim-must-fail.ahl",
+      "reason": "assurance field `governance` overstates what the receipt proves",
+      "rule": "receipt §2.3 — assurance.governance must equal governance.currency.mode"
+    },
+    {
+      "boundary": "the subject ingestion introduced the named record into the corpus; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content verified against the commitment by an authorized key holder",
+      "claim_type": "record-ingested",
+      "embedded_receipts": 0,
+      "expect": "accept",
+      "file": "record-ingested-valid.ahl"
+    },
+    {
+      "claim_type": "record-ingested",
+      "expect": "reject",
+      "file": "record-ingested-content-mismatch-must-fail.ahl",
+      "reason": "content binding `keyed-authorized` failed: carried bytes commit to `hmac-sha256:04de2effaa7ad9f21761b7338449a4aba8c9edb59a90fd96236c31fdcd8ab46d`, not `hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510`",
+      "rule": "receipt §2.1 — carried record bytes must recompute to the anchored commitment"
+    },
+    {
+      "boundary": "the subject derivation committed the named output record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "record-derived",
+      "embedded_receipts": 0,
+      "expect": "accept",
+      "file": "record-derived-valid.ahl"
+    },
+    {
+      "claim_type": "record-derived",
+      "expect": "reject",
+      "file": "record-derived-wrong-path-must-fail.ahl",
+      "reason": "inclusion path for batch output leaf did not verify against the anchored root",
+      "rule": "receipt §3 — `leaf_path` must open `outputs_root`"
+    },
+    {
+      "boundary": "a trigger naming the record is anchored and signed under the declared chain by the declared issuer; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "trigger-declared",
+      "embedded_receipts": 2,
+      "expect": "accept",
+      "file": "trigger-declared-valid.ahl"
+    },
+    {
+      "claim_type": "trigger-declared",
+      "expect": "reject",
+      "file": "trigger-declared-replacement-ordering-must-fail.ahl",
+      "reason": "ordering violation: replacement introduction at entry index 11 is not permitted relative to entry index 6",
+      "rule": "spec §2.3.3 / receipt §2.3 — replacement introduction index <= trigger index"
+    },
+    {
+      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "trigger-effective",
+      "embedded_receipts": 2,
+      "expect": "accept",
+      "file": "trigger-effective-valid.ahl"
+    },
+    {
+      "claim_type": "trigger-effective",
+      "expect": "reject",
+      "file": "trigger-effective-short-range-must-fail.ahl",
+      "reason": "competing-trigger range [3, 8) is not the required [0, 8) or [1, 8)",
+      "rule": "receipt §3 — competing.corpus_range must be [0, tree_size(C)) or [introduction_index, tree_size(C))"
+    },
+    {
+      "boundary": "the subject propagation statement dispositions the named record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "disposition-declared",
+      "embedded_receipts": 3,
+      "expect": "accept",
+      "file": "disposition-declared-valid.ahl"
+    },
+    {
+      "claim_type": "disposition-declared",
+      "expect": "reject",
+      "file": "disposition-declared-wrong-path-must-fail.ahl",
+      "reason": "inclusion path for disposition leaf did not verify against the anchored root",
+      "rule": "receipt §3 — `leaf_path` must open the propagation's `affected_root`"
+    },
+    {
+      "boundary": "the subject propagation statement dispositions the named record under a trigger proven effective at the stated checkpoint; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "disposition-effective",
+      "embedded_receipts": 3,
+      "expect": "accept",
+      "file": "disposition-effective-valid.ahl"
+    },
+    {
+      "claim_type": "disposition-effective",
+      "expect": "reject",
+      "file": "disposition-effective-declared-trigger-must-fail.ahl",
+      "reason": "embedded receipt in `trigger` must be `trigger-effective`, got `trigger-declared`",
+      "rule": "receipt §3 — disposition-effective must embed a trigger-effective receipt"
+    },
+    {
+      "boundary": "the propagation statement's affected set equals the closure recomputable from the enumerated corpus prefix — complete relative to the declared corpus only; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "propagation-complete",
+      "embedded_receipts": 0,
+      "expect": "accept",
+      "file": "propagation-complete-valid.ahl"
+    },
+    {
+      "claim_type": "propagation-complete",
+      "expect": "reject",
+      "file": "propagation-complete-missing-leaf-must-fail.ahl",
+      "reason": "tree material for `sha256:e2b28a7f873d19d26d922f8a06cdbac454dd3be370aaa055551f6204ef4ef06c` is invalid: commits 3 leaves, 2 carried",
+      "rule": "spec §2.5/§3.5 — committed tree material must open its anchored root and count"
+    },
+    {
+      "boundary": "the manifest and key state active at the target index is exactly the presented chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "governance-state",
+      "embedded_receipts": 0,
+      "expect": "accept",
+      "file": "governance-state-valid.ahl"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-state-not-current-must-fail.ahl",
+      "reason": "governance state is not current at index 10: a `key` statement is anchored at entry index 9",
+      "rule": "receipt §3 — governance-state must prove absence of governance statements in (subject.entry_index, target_index]"
+    }
+  ]
+}

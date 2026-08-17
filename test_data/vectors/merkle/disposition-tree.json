@@ -1,10 +1,10 @@
 {
   "adaptor": {
-    "hash": "sha256:dd733d9f57a063924c8aaaa85d9929b0b570fb7e7de44f2a509183a9ed1bb43f",
+    "hash": "sha256:26509012fc3a5791e9e19ac0cd0835443a09b38148b7f6265b3426e6167d71d6",
     "id": "ahl-test-log-v1"
   },
   "affected_count": 4,
-  "affected_root": "sha256:4bd82efc9f06646acc30186a67187081bd3a5adc9425afd447e9b23fd3f82dd2",
+  "affected_root": "sha256:0ab9c287327b1cf7a85c9944f4bdc849fc5f66585f23b0ad7d0fc07567345eed",
   "description": "Disposition tree committed by the propagation statement at entry 8 (core spec §2.3.4, §2.5). Leaves are record-sorted disposition objects; leaf bytes are JCS(leaf).",
   "inclusion": {
     "leaf": {
@@ -15,9 +15,9 @@
     "leaf_index": 0,
     "path": [
       "sha256:e9da4e2c9ab30836defdf1a3b83fbc2b9b529ecdd867169eb0a5e2202b71d50d",
-      "sha256:f9c0264cfbc8917d5023896d49394055b95b1e935a8c96e13a065aee63a69187"
+      "sha256:b5fc859e505a6f00e560b175e11d08ed392f3618d30f1cef1d54019737428766"
     ],
-    "root": "sha256:4bd82efc9f06646acc30186a67187081bd3a5adc9425afd447e9b23fd3f82dd2",
+    "root": "sha256:0ab9c287327b1cf7a85c9944f4bdc849fc5f66585f23b0ad7d0fc07567345eed",
     "tree_size": 4
   },
   "leaf_rule": "sha256(0x00 || JCS(leaf))",
@@ -36,7 +36,7 @@
       "dataset": "scores",
       "disposition": "recomputed",
       "record": "sha256:7f706bff69ab07703a27a6770f401c2b302e9bca264129e57d517a10a54f25d1",
-      "successor_statement": "sha256:012cf94aa6e69b854a342d6e9af53f56438f1c8380f41b99c7a958dba2635b27"
+      "successor_statement": "sha256:3218f3eb7458af6c2728d3d4bd885a5176356c4bbf402c236ce05cfb4cc3797f"
     },
     {
       "dataset": "scores",
@@ -45,5 +45,5 @@
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",
-  "sort_rule": "leaves sorted ascending by the byte sequence of the `record` family string; duplicates prohibited (core spec §2.5)"
+  "sort_rule": "leaves sorted ascending by the UTF-8 bytes of the canonical `record` commitment string; non-canonical strings and duplicates are rejected (core spec §2.5)"
 }

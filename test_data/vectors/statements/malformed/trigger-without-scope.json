@@ -4,7 +4,7 @@
       "ahl_version": "0.3",
       "dataset": "customers",
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:77b0a6bd4834a89ae68001c2e3c2ca0beee1959063b6fc8f7c175fd97da319d7",
+      "manifest": "sha256:5754bada444abfafbd141c1eec9483ce1e4b2e089748ce4f06a64aeb5d6c50f3",
       "producer": "producer-1",
       "reason_code": "consent_withdrawn",
       "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
@@ -13,8 +13,8 @@
     },
     "signatures": [
       {
-        "keyid": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:h3+rF3jF8YX4Is0A3th4ThyxP1u7N4YG+0XKr3hKLn/MxfkhF1G8qyqPPVx3OYXzZbqE/Eq6IZ7tLHgtBygRAQ=="
+        "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
+        "sig": "base64:DfGKjW+MVghcnEUH9JYrcArL28WhHZgYStqWaeL32y4JziajSfUWwQggvSGfi5xoXaE8cf8Ja/ZUy1FFTvi1Ag=="
       }
     ]
   },

@@ -1,43 +1,93 @@
 {
   "adaptor": {
-    "hash": "sha256:dd733d9f57a063924c8aaaa85d9929b0b570fb7e7de44f2a509183a9ed1bb43f",
+    "hash": "sha256:26509012fc3a5791e9e19ac0cd0835443a09b38148b7f6265b3426e6167d71d6",
     "id": "ahl-test-log-v1"
   },
   "checkpoints": [
     {
+      "active_manifest_entry_index": 0,
       "checkpoint": {
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:5acb2282a107e7f7435e28117b0006f0e724aad828f8e8c2709c0a68d74ac6ba",
-        "signature": "base64:H6LFJQDD4d4gW3uUN1F5vLCX4yzH3XxVBnSyXc04ueu6Ryr0cuxb9DiodoipcmJ+TkZESwAc54cHdDUA2x/lDA==",
+        "root_hash": "sha256:91ebdbe9e50dbea205506c50d59a958289eb061bae4cb9a0aa947e5e608e32db",
+        "signature": "base64:CuqnEsc0Gcc8vOfXMZgmfQj/uYRwAsvSnCSmQsk5xkq3YEzlury+6VtXSfBvPe0o44yW4CxRcnJbWJFpE8+HBw==",
         "tree_size": 8
       },
       "name": "cp8"
     },
     {
+      "active_manifest_entry_index": 0,
       "checkpoint": {
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:a8fafd3b5f4240ab2e0a1304fe2687d56d99c2c91a570c1aff8c6ab0d36c9fad",
-        "signature": "base64:5FRqWg9pyC1lkkk3y0hGMuD6Bgfk72O4AbvtQSTSA+xGQ3Jv3VvNP+ZgS182z0gzs2ujRdItJgDR0D4FgjPfDA==",
-        "tree_size": 10
+        "root_hash": "sha256:203add746b5eb8f99f7c8f5a879e0041d69323305573b67f1e37542f76630344",
+        "signature": "base64:4KaZ1QbV4c4suZlH+kKIJ+OuNPo4oFvQI/fnbHrI7ye615oo2vtxbreVSME4z5o2Z0OH2rpG6Ygdw7OQRgj2Cg==",
+        "tree_size": 13
       },
-      "name": "cp10"
+      "name": "cp13"
+    },
+    {
+      "active_manifest_entry_index": 0,
+      "checkpoint": {
+        "checkpoint_time": "2026-08-16T12:00:00Z",
+        "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
+        "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
+        "root_hash": "sha256:28123df86ed4ff25c09529d989a0156610ed8c5c6cd2b0a2781e21be570525ea",
+        "signature": "base64:Ff/NjffckP45Frn60Dm4SGl+dQzihp5G3BWqb5XD/kFgtSJoy/G6rbEsvzHICrD9j7Fdmfj6n7y0qr1h49weDQ==",
+        "tree_size": 18
+      },
+      "name": "cp18"
+    },
+    {
+      "active_manifest_entry_index": 18,
+      "checkpoint": {
+        "checkpoint_time": "2026-08-16T12:00:00Z",
+        "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
+        "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
+        "root_hash": "sha256:27667d055aa0a5f945f5c9deef5929677367a436c04139669ca017c9dba8191a",
+        "signature": "base64:FP9jH2RFsJ1F6MFxvPkllbvkpOylseQBCIM8nzBses5kUioLBapnPK25MUHAlvVqOvIsw+STR8eTUq2B/F8WCw==",
+        "tree_size": 20
+      },
+      "name": "cp20"
     }
   ],
   "cosignatures": [
     {
-      "checkpoint": "cp10",
-      "cosignature": "base64:DByAzcbcUXMY1/XGMSjSoG+tQR5YFzJBCugUGqXCHgRUzfFVQoakRGjccKna/JBZOPSxzKPxmEPwN03IAmRICQ==",
+      "checkpoint": "cp8",
+      "cosignature": "base64:7pREGXJ8Nif3Ocnn2L49aH8OkgulzMQbcM0qx6E6YvXqNRgT32Iog2BWPS6/Vq1zSu5SY3U6O3cRei8w92XOAw==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
-      "signed_over": "JCS({\"checkpoint\": <signed cp10>, \"witness_id\": \"witness-1\"})",
+      "signed_over": "JCS({\"checkpoint\": <signed cp8>, \"witness_id\": \"witness-1\"})",
       "witness_id": "witness-1"
+    },
+    {
+      "checkpoint": "cp13",
+      "cosignature": "base64:Kd1BRCyBp9QouCr9KnYWRLhCsF2X+LurQ0RR0DN7WBRaE35B1JHTwiFgesgzyPV+qYqTWnTpjoAlR6JUlxdkDA==",
+      "cosigned_at": "2026-08-16T12:00:00Z",
+      "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
+      "signed_over": "JCS({\"checkpoint\": <signed cp13>, \"witness_id\": \"witness-1\"})",
+      "witness_id": "witness-1"
+    },
+    {
+      "checkpoint": "cp18",
+      "cosignature": "base64:S2BFc71iQeZM66lgJoINkQa6gptw1ophNqnmTrEbBAVVOlAOND46Xyu6TGNK+OUnNjSas7QMfORNKeh5S6+7Bw==",
+      "cosigned_at": "2026-08-16T12:00:00Z",
+      "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
+      "signed_over": "JCS({\"checkpoint\": <signed cp18>, \"witness_id\": \"witness-1\"})",
+      "witness_id": "witness-1"
+    },
+    {
+      "checkpoint": "cp20",
+      "cosignature": "base64:M/5zduJW53VrrYM/iERIN079u4p+T0ZYW0B63JU64roc9Eqv0/ruhooPz5+kGt1InOVD48b6o4MYK7y86pLDDA==",
+      "cosigned_at": "2026-08-16T12:00:00Z",
+      "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
+      "signed_over": "JCS({\"checkpoint\": <signed cp20>, \"witness_id\": \"witness-2\"})",
+      "witness_id": "witness-2"
     }
   ],
-  "description": "Signed log checkpoints and the witness cosignature over cp10 (core spec §1.2, §3.3). Signing rules are pinned by the adaptor profile.",
+  "description": "Signed log checkpoints and their witness cosignatures (core spec §1.2, §3.3). Signing rules are pinned by the adaptor profile. cp20 is cosigned by witness-2 because manifest v2, anchored at entry 18, replaced the witness key set in full (§7.2) and is the manifest version active for tree_size 20.",
   "log": {
     "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",

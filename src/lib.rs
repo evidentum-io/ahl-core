@@ -10,7 +10,11 @@
 //! * domain-separated record commitments in `plain` and `keyed` mode (spec §2.4);
 //! * Ed25519 statement envelopes and signed checkpoints;
 //! * AHL Merkle trees — leaf `0x00 || bytes`, node `0x01 || left || right` (spec §2.5);
-//! * revocation closure over an anchored statement graph (spec §5.1).
+//! * validated committed-tree material (spec §2.5, §3.5) and authenticated range proofs
+//!   (spec §3 contract item 5);
+//! * revocation closure over an anchored statement graph (spec §5.1), including trigger scope
+//!   (§2.3.3) and correction supersession;
+//! * offline Evidence Receipt verification against the format's §5 algorithm.
 //!
 //! # Anti-drift
 //!
@@ -35,8 +39,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bitemporal;
 pub mod closure;
 mod error;
+pub mod range_proof;
+pub mod receipt;
+pub mod tree;
 
 use atl_core::core::merkle::{compute_root, generate_inclusion_proof, verify_inclusion};
 use base64::Engine as _;
@@ -67,7 +75,7 @@ const SHA256_PREFIX: &str = "sha256:";
 const HMAC_PREFIX: &str = "hmac-sha256:";
 const BASE64_PREFIX: &str = "base64:";
 
-const B64: base64::engine::general_purpose::GeneralPurpose =
+pub(crate) const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
 // ---------------------------------------------------------------------------
@@ -153,9 +161,11 @@ pub fn commit_keyed(key: &[u8], dataset: &str, canonical: &[u8]) -> AhlResult<St
 
 /// A deterministic Ed25519 test key derived from a committed 32-byte seed.
 ///
-/// `key_id` and `pubkey` encodings are fixed by the adaptor profile document
-/// (`test_data/adaptor/ahl-test-log-v1.md`): `key_id = SHA-256(raw 32-byte public key)`
-/// rendered `sha256:<hex>`, public key rendered `base64:<raw 32 bytes>`.
+/// For **producer** keys the derivation is normative: core spec §2.3.6 fixes `key_id` as
+/// `sha256:` plus lowercase hex SHA-256 of the raw 32-byte Ed25519 public key. Log and witness
+/// key ids are adaptor-defined; the corpus adaptor profile
+/// (`test_data/adaptor/ahl-test-log-v1.md` §3) adopts the same rule, and fixes the public-key
+/// encoding as `base64:<raw 32 bytes>` for all three roles.
 #[derive(Debug, Clone)]
 pub struct TestKey {
     name: String,
@@ -253,19 +263,21 @@ pub fn verify_signature(key: &VerifyingKey, msg: &[u8], signature: &str) -> AhlR
     Ok(key.verify(msg, &ed25519_dalek::Signature::from_bytes(&bytes)).is_ok())
 }
 
-/// Build a signed statement envelope `{payload, signatures:[{keyid, sig}]}` (spec §2.1).
+/// Build a signed statement envelope `{payload, signatures:[{key_id, sig}]}` (spec §2.1).
 ///
-/// The signature covers `JCS(payload)`.
+/// The signature covers `JCS(payload)`. The signature member is spelled `key_id` throughout
+/// AHL — envelope, manifest key objects, `key` statements and the receipt keys block all use
+/// the same spelling (spec §2.1, errata r1).
 #[must_use]
 pub fn envelope(payload: Value, key: &TestKey) -> Value {
     let sig = key.sign(&jcs(&payload));
     let mut env = serde_json::Map::new();
     env.insert("payload".to_owned(), payload);
-    env.insert("signatures".to_owned(), json!([ { "keyid": key.key_id(), "sig": sig } ]));
+    env.insert("signatures".to_owned(), json!([ { "key_id": key.key_id(), "sig": sig } ]));
     Value::Object(env)
 }
 
-/// Verify every signature on an envelope against a `keyid -> pubkey` resolver.
+/// Verify every signature on an envelope against a `key_id -> pubkey` resolver.
 ///
 /// Returns `false` for an envelope with no signatures: unsigned objects are not AHL
 /// statements (spec §2.1).
@@ -290,9 +302,9 @@ where
     }
     let msg = jcs(payload);
     for entry in signatures {
-        let keyid = field_str(entry, "keyid")?;
+        let key_id = field_str(entry, "key_id")?;
         let sig = field_str(entry, "sig")?;
-        let Some(pubkey) = resolve(keyid) else { return Ok(false) };
+        let Some(pubkey) = resolve(key_id) else { return Ok(false) };
         if !verify_signature(&decode_pubkey(&pubkey)?, &msg, sig)? {
             return Ok(false);
         }
@@ -437,16 +449,21 @@ pub fn proof_from_hex(
 
 /// Sort tree leaves ascending by their `record` field and reject duplicates (spec §2.5).
 ///
-/// The comparison is over the byte sequence of the `record` family string
-/// (`sha256:<hex>` / `hmac-sha256:<hex>`), as pinned by the adaptor profile document.
+/// The comparison is the ascending lexicographic comparison of the **UTF-8 bytes of the
+/// canonical commitment string** (`sha256:<hex>` / `hmac-sha256:<hex>`, lowercase hex).
+/// Non-canonical commitment strings are rejected rather than ordered.
 ///
 /// # Errors
 ///
-/// Returns [`AhlError::Field`] if a leaf carries no string `record`, or
+/// Returns [`AhlError::Field`] if a leaf carries no string `record`,
+/// [`AhlError::InvalidCommitment`] if a `record` is not a canonical family string, or
 /// [`AhlError::DuplicateRecord`] if two leaves name the same record.
 pub fn record_sorted(mut leaves: Vec<Value>) -> AhlResult<Vec<Value>> {
     for leaf in &leaves {
-        field_str(leaf, "record")?;
+        let record = field_str(leaf, "record")?;
+        if !tree::is_canonical_commitment(record) {
+            return Err(AhlError::InvalidCommitment(record.to_owned()));
+        }
     }
     leaves.sort_by_key(record_key);
     for pair in leaves.windows(2) {
@@ -479,6 +496,11 @@ fn strip<'a>(value: &'a str, prefix: &'static str) -> AhlResult<&'a str> {
         expected: prefix,
         got: value.chars().take(24).collect(),
     })
+}
+
+/// Crate-internal re-export of [`strip`] for sibling modules.
+pub(crate) fn strip_prefix<'a>(value: &'a str, prefix: &'static str) -> AhlResult<&'a str> {
+    strip(value, prefix)
 }
 
 #[cfg(test)]
@@ -538,17 +560,38 @@ mod tests {
         }
     }
 
+    fn commitment(byte: u8) -> String {
+        format!("sha256:{}", hex::encode([byte; 32]))
+    }
+
     #[test]
     fn record_sorting_rejects_duplicates() {
-        let leaves = vec![json!({ "record": "sha256:aa" }), json!({ "record": "sha256:aa" })];
+        let leaves =
+            vec![json!({ "record": commitment(0xaa) }), json!({ "record": commitment(0xaa) })];
         assert!(matches!(record_sorted(leaves), Err(AhlError::DuplicateRecord(_))));
     }
 
     #[test]
     fn record_sorting_is_ascending() {
-        let leaves = vec![json!({ "record": "sha256:bb" }), json!({ "record": "sha256:aa" })];
+        let leaves =
+            vec![json!({ "record": commitment(0xbb) }), json!({ "record": commitment(0xaa) })];
         let sorted = record_sorted(leaves).expect("distinct records");
-        assert_eq!(record_key(&sorted[0]), "sha256:aa");
+        assert_eq!(record_key(&sorted[0]), commitment(0xaa));
+    }
+
+    #[test]
+    fn record_sorting_rejects_non_canonical_commitments() {
+        let leaves = vec![json!({ "record": "sha256:aa" })];
+        assert!(matches!(record_sorted(leaves), Err(AhlError::InvalidCommitment(_))));
+    }
+
+    #[test]
+    fn keyed_commitments_sort_after_plain_ones() {
+        // 'h' (0x68) < 's' (0x73), so every `hmac-sha256:` record precedes every `sha256:` one.
+        let hmac = format!("hmac-sha256:{}", hex::encode([0xffu8; 32]));
+        let leaves = vec![json!({ "record": commitment(0x00) }), json!({ "record": &hmac })];
+        let sorted = record_sorted(leaves).expect("distinct records");
+        assert_eq!(record_key(&sorted[0]), hmac);
     }
 
     #[test]
