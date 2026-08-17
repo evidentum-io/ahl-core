@@ -28,7 +28,7 @@ use ahl_core::{
 use serde_json::{json, Value};
 
 /// The twenty-five statement vectors, in entry-index order.
-const STATEMENT_FILES: [&str; 25] = [
+const STATEMENT_FILES: [&str; 28] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -48,20 +48,25 @@ const STATEMENT_FILES: [&str; 25] = [
     "16-derivation-e3-closed-past-interval.json",
     "17-retraction-c-non-retroactive.json",
     "18-retraction-a-original-after-correction.json",
-    "19-ingestion-customers-f.json",
-    "20-derivation-h-from-f.json",
-    "21-challenge-retraction-f-unauthorized.json",
-    "22-propagation-over-challenge.json",
-    "23-manifest-v2-rotate-witness-drop-key.json",
-    "24-ingestion-customers-d-under-v2.json",
+    "19-retraction-s1-prime-derived-authority.json",
+    "20-ingestion-customers-f.json",
+    "21-derivation-h-from-f.json",
+    "22-retraction-f-authorized.json",
+    "23-challenge-retraction-f-unauthorized.json",
+    "24-propagation-over-challenge.json",
+    "25-manifest-v2-rotate-witness-drop-key.json",
+    "26-ingestion-customers-d-under-v2.json",
+    "27-derivation-z-from-affected-descendant.json",
 ];
 
 /// The four published closure scenarios.
-const CLOSURE_FILES: [&str; 4] = [
+const CLOSURE_FILES: [&str; 6] = [
     "toy-corpus.json",
     "supersession-chain.json",
     "non-retroactive-retraction.json",
     "retraction-after-correction.json",
+    "derived-record-authority-after-rotation.json",
+    "descendant-enlargement-past-declared-checkpoint.json",
 ];
 
 const TREE_VECTORS: [(&str, &str, &str); 5] = [
@@ -111,7 +116,7 @@ fn key_set(vectors: &[Value]) -> BTreeMap<String, String> {
             );
         }
     };
-    for index in [0usize, 23] {
+    for index in [0usize, 25] {
         let manifest = &vectors[index]["envelope"]["payload"];
         absorb(&manifest["keys"]);
         absorb(&manifest["log"]["keys"]);
@@ -173,21 +178,21 @@ fn statement_and_entry_ids_are_reproducible() {
 fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
     let vectors = statement_vectors();
     let m1 = field_str(&vectors[0], "statement_id").expect("vector carries statement_id");
-    let m2 = field_str(&vectors[23], "statement_id").expect("vector carries statement_id");
+    let m2 = field_str(&vectors[25], "statement_id").expect("vector carries statement_id");
 
     // A manifest statement declares no `manifest` member (spec §2.2, receipt §2.3).
-    for index in [0usize, 23] {
+    for index in [0usize, 25] {
         assert!(
             vectors[index]["envelope"]["payload"].get("manifest").is_none(),
             "a manifest statement must not declare a `manifest` member"
         );
     }
     for (index, vector) in vectors.iter().enumerate() {
-        if index == 0 || index == 23 {
+        if index == 0 || index == 25 {
             continue;
         }
         // The manifest version id is the manifest statement's *statement id* (spec §2.3.5).
-        let expected = if index < 23 { m1 } else { m2 };
+        let expected = if index < 25 { m1 } else { m2 };
         assert_eq!(
             field_str(&vector["envelope"]["payload"], "manifest")
                 .expect("payload carries manifest"),
@@ -202,7 +207,7 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
 fn the_manifest_chain_links_by_entry_id_and_rotates_the_witness_set() {
     let vectors = statement_vectors();
     let genesis = &vectors[0]["envelope"];
-    let successor = &vectors[23]["envelope"]["payload"];
+    let successor = &vectors[25]["envelope"]["payload"];
 
     assert!(
         genesis["payload"].get("predecessor").is_none(),
@@ -468,7 +473,7 @@ fn checkpoints_and_witness_cosignatures_verify_under_the_active_manifest() {
         // Format §2.2: the active manifest is the one with the greatest entry index smaller
         // than the checkpoint's tree size.
         let tree_size = cp["tree_size"].as_u64().expect("tree_size");
-        let expected = if tree_size > 23 { 23 } else { 0 };
+        let expected = if tree_size > 25 { 25 } else { 0 };
         assert_eq!(
             entry["active_manifest_entry_index"].as_u64(),
             Some(expected),
@@ -497,7 +502,7 @@ fn checkpoints_and_witness_cosignatures_verify_under_the_active_manifest() {
         );
         // The witness must be the one the active manifest version declares.
         let tree_size = cp["tree_size"].as_u64().expect("tree_size");
-        assert_eq!(witness_id, if tree_size > 23 { "witness-2" } else { "witness-1" });
+        assert_eq!(witness_id, if tree_size > 25 { "witness-2" } else { "witness-1" });
     }
 }
 
@@ -673,7 +678,7 @@ fn supersession_seeds_the_original_and_the_superseded_replacement_only() {
 fn the_non_retroactive_retraction_excludes_out_of_scope_derivations() {
     let vectors = statement_vectors();
     let envelopes = envelopes(&vectors);
-    let closure = affected_set(&envelopes, &tree_material(), 17, 18).expect("corpus");
+    let closure = affected_set(&envelopes, &tree_material(), 17, 20).expect("corpus");
 
     let scope = Scope::from_payload(&vectors[17]["envelope"]["payload"]).expect("scoped trigger");
     assert!(!scope.retroactive, "this vector exists to exercise the non-retroactive branch");
@@ -821,7 +826,7 @@ fn the_receipt_index_lists_every_receipt_on_disk() {
         .filter(|name| Path::new(name).extension().is_some_and(|ext| ext == "ahl"))
         .collect();
     assert_eq!(listed, on_disk, "the index and the directory must agree");
-    assert!(on_disk.len() >= 23, "one positive and one negative vector per registry claim type");
+    assert!(on_disk.len() >= 26, "one positive and one negative vector per registry claim type");
 }
 
 #[test]
@@ -869,7 +874,7 @@ fn every_positive_receipt_verifies_and_renders_its_boundary() {
         }
         accepted += 1;
     }
-    assert!(accepted >= 9, "every registry claim type needs a positive vector, got {accepted}");
+    assert!(accepted >= 11, "every registry claim type needs a positive vector, got {accepted}");
 }
 
 /// Assert that a rejection is the *specific* rule the index entry names.
@@ -924,11 +929,15 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         }
         "trigger-effective-unauthorized-issuer-must-fail.ahl"
         | "propagation-complete-challenge-trigger-must-fail.ahl" => {
-            matches!(error, ReceiptError::TriggerNotAuthorized { entry_index: 21, .. })
+            matches!(error, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. })
         }
+        "propagation-complete-past-declared-checkpoint-must-fail.ahl" => matches!(
+            error,
+            ReceiptError::CheckpointNotBound { field: "claim_material.corpus_checkpoint", .. }
+        ),
         "governance-state-short-range-must-fail.ahl" => matches!(
             error,
-            ReceiptError::GovernanceRangeNotComplete { got_from: 0, got_to: 6, tree_size: 25 }
+            ReceiptError::GovernanceRangeNotComplete { got_from: 0, got_to: 6, tree_size: 28 }
         ),
         "governance-state-key-subject-must-fail.ahl" => {
             matches!(error, ReceiptError::GovernanceSubjectNotManifest { .. })
@@ -956,7 +965,7 @@ fn every_negative_receipt_is_rejected_by_the_rule_it_names() {
         assert_eq!(error.to_string(), field_str(entry, "reason").expect("reason"));
         rejected += 1;
     }
-    assert!(rejected >= 14, "every registry claim type needs a negative vector, got {rejected}");
+    assert!(rejected >= 15, "every registry claim type needs a negative vector, got {rejected}");
 }
 
 #[test]
@@ -1021,7 +1030,7 @@ fn the_adaptor_profile_hash_is_pinned_by_both_manifest_versions_and_by_receipts(
         .expect("adaptor profile document is published alongside the vectors");
     let hash = sha256_hex(&bytes);
 
-    for index in [0usize, 23] {
+    for index in [0usize, 25] {
         let adaptor = &vectors[index]["envelope"]["payload"]["log"]["adaptor"];
         assert_eq!(field_str(adaptor, "id").expect("adaptor id"), "ahl-test-log-v1");
         assert_eq!(
@@ -1158,17 +1167,17 @@ fn the_challenge_trigger_is_anchored_but_never_authorised() {
     // The challenge is a real, well-signed statement — that is what makes it a challenge
     // rather than a malformed object (spec §2.3.3).
     let keys = key_set(&vectors);
-    assert!(verify_envelope(&vectors[21]["envelope"], |key_id| keys.get(key_id).cloned())
+    assert!(verify_envelope(&vectors[23]["envelope"], |key_id| keys.get(key_id).cloned())
         .expect("well-formed envelope"));
     let signer =
-        field_str(&vectors[21]["envelope"]["signatures"][0], "key_id").expect("key_id").to_owned();
+        field_str(&vectors[23]["envelope"]["signatures"][0], "key_id").expect("key_id").to_owned();
     assert!(!authority.contains(&signer), "the challenge must not be signed by the authority");
 
     // And the propagation at entry 22 names it, so a completeness claim over that propagation
     // is exactly the thing a verifier must refuse.
     assert_eq!(
-        field_str(&vectors[22]["envelope"]["payload"], "trigger").expect("trigger"),
-        field_str(&vectors[21], "statement_id").expect("statement_id")
+        field_str(&vectors[24]["envelope"]["payload"], "trigger").expect("trigger"),
+        field_str(&vectors[23], "statement_id").expect("statement_id")
     );
 }
 
@@ -1604,4 +1613,146 @@ fn the_governing_trigger_must_be_the_subject() {
         matches!(verify_receipt(&receipt, &policy), Err(ReceiptError::RangeProofInvalid { .. })),
         "editing an enumerated entry must break the range proof before anything else"
     );
+}
+
+#[test]
+fn dedup_keys_on_the_whole_receipt_not_the_envelope() {
+    // Format §3.1: "Embedded-receipt deduplication MUST key on the JCS digest of the complete
+    // embedded receipt object — the entry id alone is insufficient (claim material is not
+    // determined by the envelope); non-identical receipt objects sharing an entry id are each
+    // verified in full."
+    //
+    // The attack an entry-id cache would enable: carry one honest embedded receipt and one
+    // forged receipt *about the same statement*, so the forgery is waved through as a
+    // "duplicate" of the honest one.
+    let policy = trust_policy();
+    let (_, receipt) = read_receipt("trigger-declared-valid.ahl");
+    let honest = receipt["claim_material"]["introduction"].clone();
+
+    let mut forged = honest.clone();
+    // Same envelope — therefore the same entry id — but different claim material.
+    forged["claim"]["assurance"]["content_binding"] = json!("plain-verified");
+    forged["claim_material"] = json!({
+        "record_bytes": "base64:AAAA",
+        "canonicalization": "jcs-v1",
+    });
+    assert_eq!(
+        honest["subject"]["entry_id"], forged["subject"]["entry_id"],
+        "the two embedded receipts must share an entry id for this to be the right test"
+    );
+    assert_ne!(honest["claim_material"], forged["claim_material"]);
+
+    let mut attack = receipt;
+    attack["claim_material"]["replacement_introduction"] = forged.clone();
+    let error = verify_receipt(&attack, &policy)
+        .expect_err("the forged embedded receipt must be verified in full, not skipped");
+    assert!(
+        matches!(error, ReceiptError::ContentBindingMismatch { .. }),
+        "the forgery must fail on its own claim material, not be waved through: {error}"
+    );
+
+    // And the honest receipt in that slot fails only on the §2.3 record rule — proving the
+    // rejection above came from the forged material rather than from the slot itself.
+    let mut control = attack;
+    control["claim_material"]["replacement_introduction"] = honest;
+    assert!(matches!(
+        verify_receipt(&control, &policy),
+        Err(ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. })
+    ));
+}
+
+#[test]
+fn completeness_is_pinned_to_the_declared_checkpoint() {
+    // The corpus itself carries the counterexample: a legal derivation consuming an already
+    // affected descendant enlarges the trigger's closure past the propagation's declared
+    // checkpoint D (spec §2.3.4).
+    let vectors = statement_vectors();
+    let envelopes = envelopes(&vectors);
+    let trees = tree_material();
+
+    let declared = &vectors[8]["envelope"]["payload"]["corpus_checkpoint"];
+    let d_size = usize::try_from(declared["tree_size"].as_u64().expect("tree_size")).expect("size");
+    let at_d = affected_set(&envelopes, &trees, 6, d_size).expect("corpus");
+    let later = affected_set(&envelopes, &trees, 6, envelopes.len()).expect("corpus");
+
+    assert!(at_d.affected.is_subset(&later.affected));
+    assert!(
+        at_d.affected.len() < later.affected.len(),
+        "the corpus must demonstrate closure growing past D, or the rule has nothing to bite on"
+    );
+
+    // The enlarging derivation consumes a record that IS in the affected set at D, and is
+    // anchored after the propagation — both legal, because §2.3.2 bars only the triggered
+    // record itself.
+    let consumed = (
+        "scores".to_owned(),
+        field_str(&vectors[27]["envelope"]["payload"]["inputs"][0], "record")
+            .expect("record")
+            .to_owned(),
+    );
+    assert!(at_d.affected.contains(&consumed));
+    assert!(vectors[27]["entry_index"].as_u64().expect("index") > 8);
+
+    // The anchored disposition tree matches the closure at D, and only at D.
+    let dispositioned: BTreeSet<RecordRef> =
+        read_json(&test_data().join("vectors").join("merkle").join("disposition-tree.json"))
+            ["leaves"]
+            .as_array()
+            .expect("leaves")
+            .iter()
+            .map(|leaf| {
+                (
+                    field_str(leaf, "dataset").expect("dataset").to_owned(),
+                    field_str(leaf, "record").expect("record").to_owned(),
+                )
+            })
+            .collect();
+    assert_eq!(dispositioned, at_d.affected);
+    assert_ne!(dispositioned, later.affected);
+}
+
+#[test]
+fn a_later_challenge_cannot_unseat_an_authorized_trigger() {
+    let vectors = statement_vectors();
+    let manifest = &vectors[0]["envelope"]["payload"];
+    let authority: BTreeSet<String> = manifest["datasets"]["customers"]["authority"]["key_ids"]
+        .as_array()
+        .expect("authority key set")
+        .iter()
+        .map(|k| k.as_str().expect("key id").to_owned())
+        .collect();
+
+    let record = field_str(&vectors[22]["envelope"]["payload"], "record").expect("record");
+    let signer = |index: usize| {
+        field_str(&vectors[index]["envelope"]["signatures"][0], "key_id")
+            .expect("key_id")
+            .to_owned()
+    };
+
+    // Both triggers name the same record; the later one is the unauthorized signer.
+    assert_eq!(field_str(&vectors[23]["envelope"]["payload"], "record").expect("record"), record);
+    assert!(authority.contains(&signer(22)), "entry 22 must be the authorized trigger");
+    assert!(!authority.contains(&signer(23)), "entry 23 must be the challenge");
+
+    // Selecting by greatest entry index *first* would pick the challenge — the pre-fix bug.
+    let naive_governing = (0..vectors.len())
+        .rfind(|i| {
+            let payload = &vectors[*i]["envelope"]["payload"];
+            matches!(payload["type"].as_str(), Some("retraction" | "correction"))
+                && payload["record"].as_str() == Some(record)
+        })
+        .expect("a trigger names the record");
+    assert_eq!(naive_governing, 23, "the unfiltered rule would wrongly select the challenge");
+
+    // Filtering challenges first selects the authorized trigger, which is what the receipt
+    // vector `trigger-effective-later-challenge-ignored.ahl` asserts end to end.
+    let governing = (0..vectors.len())
+        .rfind(|i| {
+            let payload = &vectors[*i]["envelope"]["payload"];
+            matches!(payload["type"].as_str(), Some("retraction" | "correction"))
+                && payload["record"].as_str() == Some(record)
+                && authority.contains(&signer(*i))
+        })
+        .expect("an authorized trigger names the record");
+    assert_eq!(governing, 22);
 }
