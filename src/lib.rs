@@ -595,6 +595,92 @@ mod tests {
     }
 
     #[test]
+    fn wrong_length_inputs_are_rejected_with_their_lengths() {
+        assert!(matches!(
+            TestKey::from_seed_hex("short", "0011"),
+            Err(AhlError::BadLength { what: "ed25519 seed", expected: 32, got: 2 })
+        ));
+        assert!(matches!(TestKey::from_seed_hex("nonhex", "zz"), Err(AhlError::Hex(_))));
+        assert!(matches!(
+            decode_pubkey(&format!("{BASE64_PREFIX}{}", B64.encode([0u8; 5]))),
+            Err(AhlError::BadLength { what: "ed25519 public key", expected: 32, got: 5 })
+        ));
+        assert!(matches!(decode_pubkey("no-prefix"), Err(AhlError::MissingPrefix { .. })));
+        assert!(matches!(
+            verify_signature(
+                &key().verifying_key(),
+                b"msg",
+                &format!("{BASE64_PREFIX}{}", B64.encode([0u8; 9])),
+            ),
+            Err(AhlError::BadLength { what: "ed25519 signature", expected: 64, got: 9 })
+        ));
+        assert!(matches!(
+            parse_hash_hex(&format!("{SHA256_PREFIX}00ff")),
+            Err(AhlError::BadLength { what: "sha-256 digest", expected: 32, got: 2 })
+        ));
+        assert!(matches!(parse_hash_hex("md5:00"), Err(AhlError::MissingPrefix { .. })));
+    }
+
+    #[test]
+    fn hmac_accepts_any_key_length_so_dataset_keys_are_length_checked_elsewhere() {
+        // `Hmac::<Sha256>::new_from_slice` never rejects a length, so `commit_keyed`'s
+        // `BadLength` arm is defensive only. The corpus pins 32-byte dataset keys by
+        // convention, not by this call rejecting anything else.
+        assert!(commit_keyed(&[7u8; 8], "customers", b"bytes").is_ok());
+        assert!(commit_keyed(&[7u8; 64], "customers", b"bytes").is_ok());
+    }
+
+    #[test]
+    fn an_unresolvable_key_id_fails_the_envelope_rather_than_erroring() {
+        let env = envelope(json!({ "type": "key" }), &key());
+        assert!(!verify_envelope(&env, |_| None).expect("well-formed envelope"));
+    }
+
+    #[test]
+    fn a_wrong_signature_verifies_as_false_not_as_an_error() {
+        let k = key();
+        let other = TestKey::from_seed_hex("other", &"02".repeat(32)).expect("32-byte seed");
+        let env = envelope(json!({ "type": "key" }), &k);
+        let sig = field_str(&env["signatures"][0], "sig").expect("signature");
+        assert!(!verify_signature(&other.verifying_key(), &jcs(&env["payload"]), sig)
+            .expect("well-formed signature"));
+    }
+
+    #[test]
+    fn envelope_shape_errors_are_reported_by_field() {
+        assert!(matches!(statement_id(&json!({})), Err(AhlError::Field(_))));
+        assert!(matches!(verify_envelope(&json!({}), |_| None), Err(AhlError::Field(_))));
+        assert!(matches!(
+            verify_envelope(&json!({ "payload": {} }), |_| None),
+            Err(AhlError::Field(_))
+        ));
+        assert!(matches!(
+            checkpoint_signing_bytes(&json!("not an object")),
+            Err(AhlError::Field(_))
+        ));
+    }
+
+    #[test]
+    fn key_metadata_round_trips() {
+        let k = key();
+        assert_eq!(k.name(), "producer-1");
+        let object = k.key_object(7);
+        assert_eq!(field_str(&object, "key_id").expect("key_id"), k.key_id());
+        assert_eq!(field_str(&object, "pubkey").expect("pubkey"), k.pubkey());
+        assert_eq!(object["valid_from_index"].as_u64(), Some(7));
+    }
+
+    #[test]
+    fn proof_paths_round_trip_through_their_serialization() {
+        let leaves: Vec<Vec<u8>> = (0u8..5).map(|i| vec![i; 3]).collect();
+        let proof = inclusion_proof(&leaves, 2).expect("index within tree");
+        let path = proof_path_hex(&proof);
+        assert_eq!(path.len(), proof.path.len());
+        assert_eq!(proof_from_hex(2, 5, &path).expect("well-formed path"), proof);
+        assert!(inclusion_proof(&leaves, 9).is_err());
+    }
+
+    #[test]
     fn checkpoint_signature_covers_everything_but_the_signature() {
         let k = key();
         let cp = checkpoint("sha256:00", 10, "sha256:11", "2026-08-16T12:00:00Z", &k);

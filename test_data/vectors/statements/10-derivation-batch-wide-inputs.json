@@ -1,25 +1,14 @@
 {
-  "entry_id": "sha256:8da5d1ed982f01e3fdb3c85b31d0e14e8247d4a750dbe38f819174948a5a9581",
-  "entry_index": 15,
+  "entry_id": "sha256:20a4ecd5bea5d1eb5af1b455be19b1d186475eada7a3d3ac1744e2cfb31912d1",
+  "entry_index": 10,
   "envelope": {
     "payload": {
       "ahl_version": "0.3",
-      "inputs": [
-        {
-          "dataset": "customers",
-          "record": "hmac-sha256:1efd18a919cf85ddc216d57e1d78bc13321bfa14ba62aa1649eea13c2a811127",
-          "role": "feature",
-          "statement": "sha256:d154ce3945ff7537a3f3b5a0ed44a620e8011e473c50e27901ac073338a7c60d"
-        }
-      ],
       "issued_at": "2026-08-16T12:00:00Z",
+      "leaf_format": "ahl-leaf-v2",
       "manifest": "sha256:55df7588fe4cfad02a53a2b5cf0dcb710a153918ac717294ab39fc064900ce13",
-      "outputs": [
-        {
-          "dataset": "scores",
-          "record": "sha256:bf90b471d24713c16ef7cd945651ed9bd755cf7769eef4b58da51c61bf53d810"
-        }
-      ],
+      "outputs_count": 2,
+      "outputs_root": "sha256:4ebd25e67e0f7081ddead5808219a1d74e220ce579e66b810fce5477e7fbe48e",
       "pipeline": "scoring-v1",
       "producer": "producer-1",
       "transform": {
@@ -36,17 +25,14 @@
         }
       },
       "type": "derivation",
-      "valid_time": {
-        "from": "2026-09-01T00:00:00Z",
-        "to": null
-      }
+      "valid_time": "2026-08-16T12:00:00Z"
     },
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:Itpq+XPWL22pvQIf9bJTctJnZc1wcTbBXQKkHaOru/R4TNYNrG4LA+B0Vb+fr/jdM/IyD7dvEJrnVR37JaiWDg=="
+        "sig": "base64:NEpvvKSwC4DHwlSOOe3MZVdMR8WAw9WV1IyQoQvtOzjBr9+JANINojP/T9TzXsKKS+6bTiYydUDhsswUNKABBQ=="
       }
     ]
   },
-  "statement_id": "sha256:e236ad477b355ecfcabae9c274401e4736146470d77dd6b2fc748eabb5f70d23"
+  "statement_id": "sha256:7f1db276d30e867584f28d2cf91b0afacffaebb28f475d0d885d30b3ce652bb1"
 }

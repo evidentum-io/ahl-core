@@ -1,12 +1,17 @@
 {
-  "entry_id": "sha256:133a4fb1a319713689a2310f484c5d02cd15f098a902cb01e94af9e5d07eba52",
-  "entry_index": 18,
+  "entry_id": "sha256:46ec5575423fcfda584dc07eb2f18f9ec082edccda6c105b4960f7af1d5db0bb",
+  "entry_index": 23,
   "envelope": {
     "payload": {
       "ahl_version": "0.3",
       "datasets": {
         "customers": {
-          "authority": "producer-1",
+          "authority": {
+            "key_ids": [
+              "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
+            ],
+            "producer": "producer-1"
+          },
           "canonicalization": "jcs-v1",
           "commitment_mode": "keyed",
           "key_access": "authorized-verifiers-only"
@@ -22,18 +27,13 @@
         {
           "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
           "pubkey": "base64:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=",
-          "valid_from_index": 0
-        },
-        {
-          "key_id": "sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827",
-          "pubkey": "base64:gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=",
-          "valid_from_index": 9
+          "valid_from_index": 23
         }
       ],
       "level": "L3",
       "log": {
         "adaptor": {
-          "hash": "sha256:26509012fc3a5791e9e19ac0cd0835443a09b38148b7f6265b3426e6167d71d6",
+          "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e",
           "id": "ahl-test-log-v1"
         },
         "checkpoint_cadence": "PT1H",
@@ -54,7 +54,7 @@
           "scoring-v1"
         ]
       },
-      "predecessor": "sha256:ddd9a5bbaf91b7f121dbeeddb6d08982dd166fdf3cbd7c4571696cc5806ce2bf",
+      "predecessor": "sha256:8e65b4c7491243ed79690156de5967342d1b10f0691a3329fbb5231ff6cb058a",
       "producer": "producer-1",
       "properties": {
         "reproducible_reconstruction": false
@@ -74,7 +74,7 @@
             {
               "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
               "pubkey": "base64:iodf/x6zhFFXes1a/uQFRWVo3XyJ4JCGOgVXvHr0nxc=",
-              "valid_from_index": 18
+              "valid_from_index": 23
             }
           ],
           "witness_id": "witness-2"
@@ -84,9 +84,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:NCA9dMN35sJ1FxJV4y0uPpifFLdtIF/mJmFkFfpAsYtKvRh5eihcZtCGjwiamuDnnDxbN5cSftfuU7Ol8Aa6DQ=="
+        "sig": "base64:669B6o8PFwW4bJEAG7Rax1/yxGpilDE/rGyYyao3M/jaCRq3QpVcoB5RQy0JOCWppHaCj4pVj8g3rN5b2y+WBw=="
       }
     ]
   },
-  "statement_id": "sha256:c677a3871ae1c616351cad7eaa7b0f240cd09948fa41f8555bc729a714070fe0"
+  "statement_id": "sha256:8b0539601cba27e1364794471cc2f934a8c634be1a3aa4fdffd30cfdb110ea28"
 }

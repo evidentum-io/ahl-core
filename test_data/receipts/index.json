@@ -2,12 +2,18 @@
   "description": "Every Evidence Receipt vector in this directory, with the outcome a conformant verifier must reach. Negative vectors name the normative rule that must fire. The `policy` block is the locally configured trust policy the outcomes assume (receipt format §1 design rule 1); it is deliberately NOT derived from any receipt.",
   "policy": {
     "adaptor_profiles": {
-      "ahl-test-log-v1": "sha256:26509012fc3a5791e9e19ac0cd0835443a09b38148b7f6265b3426e6167d71d6"
+      "ahl-test-log-v1": {
+        "capabilities": {
+          "checkpoint_raw": false,
+          "consistency_proofs": false
+        },
+        "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e"
+      }
     },
     "dataset_keys": {
       "customers": "test_data/keys/dataset_customers.key — held only by an authorized verifier; never packaged in a receipt"
     },
-    "genesis_entry_id": "sha256:ddd9a5bbaf91b7f121dbeeddb6d08982dd166fdf3cbd7c4571696cc5806ce2bf",
+    "genesis_entry_id": "sha256:8e65b4c7491243ed79690156de5967342d1b10f0691a3329fbb5231ff6cb058a",
     "genesis_key_ids": [
       "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
     ],
@@ -32,6 +38,13 @@
       "file": "overclaim-must-fail.ahl",
       "reason": "assurance field `governance` overstates what the receipt proves",
       "rule": "receipt §2.3 — assurance.governance must equal governance.currency.mode"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "reject",
+      "file": "statement-anchored-dropped-producer-key-must-fail.ahl",
+      "reason": "key `sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827` is not bound to a manifest key object at entry index 9",
+      "rule": "spec §7.2 — a manifest's producer key array is a snapshot that discards the prior one"
     },
     {
       "boundary": "the subject ingestion introduced the named record into the corpus; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content verified against the commitment by an authorized key holder",
@@ -90,6 +103,13 @@
       "rule": "receipt §3 — competing.corpus_range must be [0, tree_size(C)) or [introduction_index, tree_size(C))"
     },
     {
+      "claim_type": "trigger-effective",
+      "expect": "reject",
+      "file": "trigger-effective-unauthorized-issuer-must-fail.ahl",
+      "reason": "trigger at entry index 21 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
+      "rule": "spec §2.3.3 — a trigger not signed by the record's authority is a challenge"
+    },
+    {
       "boundary": "the subject propagation statement dispositions the named record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "disposition-declared",
       "embedded_receipts": 3,
@@ -120,7 +140,7 @@
     {
       "boundary": "the propagation statement's affected set equals the closure recomputable from the enumerated corpus prefix — complete relative to the declared corpus only; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "propagation-complete",
-      "embedded_receipts": 0,
+      "embedded_receipts": 3,
       "expect": "accept",
       "file": "propagation-complete-valid.ahl"
     },
@@ -128,8 +148,15 @@
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-missing-leaf-must-fail.ahl",
-      "reason": "tree material for `sha256:e2b28a7f873d19d26d922f8a06cdbac454dd3be370aaa055551f6204ef4ef06c` is invalid: commits 3 leaves, 2 carried",
+      "reason": "tree material for `sha256:78d43d6659df91e5c953b388de06aa68a1612918c61b9f4fd683feff29b20dc1` is invalid: commits 3 leaves, 2 carried",
       "rule": "spec §2.5/§3.5 — committed tree material must open its anchored root and count"
+    },
+    {
+      "claim_type": "propagation-complete",
+      "expect": "reject",
+      "file": "propagation-complete-challenge-trigger-must-fail.ahl",
+      "reason": "trigger at entry index 21 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
+      "rule": "receipt §3 / spec §2.3.3 — propagation-complete must embed a trigger-effective receipt; challenges are never traversed"
     },
     {
       "boundary": "the manifest and key state active at the target index is exactly the presented chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
@@ -144,6 +171,20 @@
       "file": "governance-state-not-current-must-fail.ahl",
       "reason": "governance state is not current at index 10: a `key` statement is anchored at entry index 9",
       "rule": "receipt §3 — governance-state must prove absence of governance statements in (subject.entry_index, target_index]"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-state-short-range-must-fail.ahl",
+      "reason": "enumerated governance covers [0, 6) but §4 requires exactly [0, 25) — a narrower range can hide a later governance statement",
+      "rule": "receipt §4 — enumerated governance must cover exactly [0, tree_size(C))"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-state-key-subject-must-fail.ahl",
+      "reason": "`governance-state` subject must be a manifest statement, got `key` (key state is composed from the manifest plus later key statements)",
+      "rule": "receipt §3 — governance-state subjects are manifest statements only"
     }
   ]
 }

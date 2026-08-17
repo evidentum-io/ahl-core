@@ -450,6 +450,51 @@ mod tests {
     }
 
     #[test]
+    fn structurally_broken_proofs_are_rejected_before_any_hashing() {
+        let leaves = corpus(8);
+        let all = hashes(&leaves);
+        let root = tree_root(&leaves);
+        let proof = generate(&all, 2, 5).expect("valid range");
+
+        // A proof whose node list has been truncated cannot be replayed to the root.
+        let mut short = proof.clone();
+        short.nodes.pop();
+        assert!(matches!(verify(&short, &all[2..5], &root), Err(AhlError::RangeProof(_))));
+
+        // Nor one carrying more nodes than the recursion consumes.
+        let mut long = proof;
+        long.nodes.push([0u8; 32]);
+        assert!(matches!(verify(&long, &all[2..5], &root), Err(AhlError::RangeProof(_))));
+
+        // A zero-size tree has no leaves to prove anything about.
+        let empty = RangeProof { tree_size: 0, from_index: 0, to_index: 1, nodes: Vec::new() };
+        assert!(matches!(verify(&empty, &all[..1], &root), Err(AhlError::RangeProof(_))));
+        assert!(matches!(generate(&[], 0, 1), Err(AhlError::RangeProof(_))));
+    }
+
+    #[test]
+    fn a_declared_node_count_that_disagrees_with_the_body_is_rejected() {
+        let all = hashes(&corpus(8));
+        let proof = generate(&all, 1, 3).expect("valid range");
+        let mut raw =
+            B64.decode(encode(&proof).strip_prefix("base64:").expect("prefix")).expect("base64");
+        raw[33] = raw[33].wrapping_add(1); // bump node_count without adding node bytes
+        assert!(matches!(
+            decode(&format!("base64:{}", B64.encode(&raw))),
+            Err(AhlError::RangeProof(_))
+        ));
+    }
+
+    #[test]
+    fn a_width_one_proof_that_does_not_open_the_root_is_false_not_an_error() {
+        let leaves = corpus(8);
+        let all = hashes(&leaves);
+        let proof = generate(&all, 3, 4).expect("valid range");
+        let wrong_root = leaf_hash(b"some other tree");
+        assert!(!verify(&proof, &all[3..4], &wrong_root).expect("well-formed proof"));
+    }
+
+    #[test]
     fn decoding_rejects_wrong_magic_and_bad_lengths() {
         let all = hashes(&corpus(8));
         let encoded = encode(&generate(&all, 1, 3).expect("valid range"));

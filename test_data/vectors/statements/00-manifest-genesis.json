@@ -1,12 +1,17 @@
 {
-  "entry_id": "sha256:ddd9a5bbaf91b7f121dbeeddb6d08982dd166fdf3cbd7c4571696cc5806ce2bf",
+  "entry_id": "sha256:8e65b4c7491243ed79690156de5967342d1b10f0691a3329fbb5231ff6cb058a",
   "entry_index": 0,
   "envelope": {
     "payload": {
       "ahl_version": "0.3",
       "datasets": {
         "customers": {
-          "authority": "producer-1",
+          "authority": {
+            "key_ids": [
+              "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
+            ],
+            "producer": "producer-1"
+          },
           "canonicalization": "jcs-v1",
           "commitment_mode": "keyed",
           "key_access": "authorized-verifiers-only"
@@ -28,7 +33,7 @@
       "level": "L3",
       "log": {
         "adaptor": {
-          "hash": "sha256:26509012fc3a5791e9e19ac0cd0835443a09b38148b7f6265b3426e6167d71d6",
+          "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e",
           "id": "ahl-test-log-v1"
         },
         "checkpoint_cadence": "PT1H",
@@ -78,9 +83,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:2E9o/bnijc65V3BsmlUuv+ub9L00960tjqA0DQagpJk83rqxPeCSamTdcG9rBRZeSmRh1egEn/JmpRIz7QjNAg=="
+        "sig": "base64:/zn7cYmcGtnRpDYvM1+Ee7+DvBmQVHBEif1kcoiZFDMBipAit9+MMowoUCC55uNhB4XWXuhuL3frvdfMULb3BA=="
       }
     ]
   },
-  "statement_id": "sha256:5754bada444abfafbd141c1eec9483ce1e4b2e089748ce4f06a64aeb5d6c50f3"
+  "statement_id": "sha256:55df7588fe4cfad02a53a2b5cf0dcb710a153918ac717294ab39fc064900ce13"
 }

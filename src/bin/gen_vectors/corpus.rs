@@ -1,4 +1,4 @@
-//! The 20-entry toy corpus and every non-receipt vector file it produces.
+//! The 25-entry toy corpus and every non-receipt vector file it produces.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -19,7 +19,7 @@ use crate::scenario::{
 };
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 20] = [
+pub const NAMES: [&str; 25] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -30,7 +30,7 @@ pub const NAMES: [&str; 20] = [
     "07-derivation-s1-prime",
     "08-propagation",
     "09-key-add-producer-2",
-    "10-derivation-wide-inputs",
+    "10-derivation-batch-wide-inputs",
     "11-ingestion-customers-a3",
     "12-correction-a-to-a3-superseding",
     "13-ingestion-customers-c",
@@ -38,8 +38,13 @@ pub const NAMES: [&str; 20] = [
     "15-derivation-e2-open-interval",
     "16-derivation-e3-closed-past-interval",
     "17-retraction-c-non-retroactive",
-    "18-manifest-v2-witness-rotation",
-    "19-ingestion-customers-d-under-v2",
+    "18-retraction-a-original-after-correction",
+    "19-ingestion-customers-f",
+    "20-derivation-h-from-f",
+    "21-challenge-retraction-f-unauthorized",
+    "22-propagation-over-challenge",
+    "23-manifest-v2-rotate-witness-drop-key",
+    "24-ingestion-customers-d-under-v2",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -96,10 +101,13 @@ pub struct Records {
     pub s3: String,
     pub s4: String,
     pub s1p: String,
-    pub w: String,
+    pub w1: String,
+    pub w2: String,
     pub e1: String,
     pub e2: String,
     pub e3: String,
+    pub c_f: String,
+    pub h: String,
     /// Canonical bytes of record A, carried by the `record-ingested` receipt.
     pub c_a_bytes: Vec<u8>,
     /// Canonical bytes of record B — the wrong bytes for the negative receipt.
@@ -107,13 +115,15 @@ pub struct Records {
 }
 
 pub struct Corpus {
-    /// The twenty anchored envelopes, in entry-index order.
+    /// The twenty-five anchored envelopes, in entry-index order.
     pub envelopes: Vec<Value>,
     /// Committed tree material keyed by root (spec §3.5).
     pub trees: TreeMaterial,
     pub batch_root: String,
+    pub wide_outputs_root: String,
     pub input_set_root: String,
     pub affected_root: String,
+    pub challenge_affected_root: String,
     pub records: Records,
     pub log_id: String,
     pub anchors: Vec<Anchor>,
@@ -275,7 +285,10 @@ impl Corpus {
             &keys.producer_1,
         );
 
-        // --- entry 10: derivation with wide inputs committed as a tree (spec §2.5) -
+        // --- entry 10: batch derivation whose leaves carry wide inputs (spec §2.5) -
+        // Receipt format §3 makes `input_members` apply "ONLY when `batch_leaf.inputs` is the
+        // input-set form", so the two batching mechanisms compose: an outputs tree whose
+        // leaves commit their input set by root rather than inline.
         let input_leaves = record_sorted(vec![
             json!({ "dataset": DS_CUSTOMERS, "record": r.c_a2, "role": "feature", "statement": id_5 }),
             json!({ "dataset": DS_CUSTOMERS, "record": r.c_b, "role": "reference", "statement": id_2 }),
@@ -283,13 +296,26 @@ impl Corpus {
         ])
         .expect("distinct input records");
         let input_set_root = hash_hex(&tree_root(&leaf_bytes(&input_leaves)));
+        let wide_inputs =
+            json!({ "input_set_root": input_set_root, "input_set_count": input_leaves.len() });
+        let wide_leaves = record_sorted(
+            [&r.w1, &r.w2]
+                .iter()
+                .map(|record| {
+                    json!({ "dataset": DS_SCORES, "record": record, "inputs": wide_inputs })
+                })
+                .collect(),
+        )
+        .expect("distinct batch outputs");
+        let wide_outputs_root = hash_hex(&tree_root(&leaf_bytes(&wide_leaves)));
         let env_10 = signed(
             "derivation",
             &m1,
             json!({
                 "pipeline": PIPELINE,
-                "outputs": [ { "dataset": DS_SCORES, "record": r.w, "locator": "urn:ahl-test:scores/W" } ],
-                "inputs": { "input_set_root": input_set_root, "input_set_count": input_leaves.len() },
+                "outputs_root": wide_outputs_root,
+                "outputs_count": wide_leaves.len(),
+                "leaf_format": LEAF_FORMAT,
                 "transform": transform(),
             }),
             &keys.producer_1,
@@ -349,29 +375,122 @@ impl Corpus {
             &keys.producer_1,
         );
 
-        // --- entries 18, 19: manifest rotation and a statement under the successor -
-        // Signed by a key valid under the *previous* manifest version, referencing that
-        // version by entry id (spec §2.3.5).
-        let env_18 = envelope(
-            manifest(keys, &log_id, adaptor_hash, 18, Some(&entry_id(&env_0))),
+        // --- entry 18: retraction of the ORIGINAL A, after two corrections of it ---
+        // Spec §5.1: a retraction seeds exactly its own record. Consumers of the superseded
+        // replacements must stay out of the affected set.
+        let env_18 = signed(
+            "retraction",
+            &m1,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_a,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "legal_obligation",
+            }),
             &keys.producer_1,
         );
-        let m2 = statement_id(&env_18).expect("well-formed envelope");
+
+        // --- entries 19..22: a challenge trigger and a propagation over it ---------
         let env_19 =
+            signed("ingestion", &m1, ingest(&r.c_f, "2026-08-16/customers-06"), &keys.producer_1);
+        let id_19 = statement_id(&env_19).expect("well-formed envelope");
+        let env_20 = signed(
+            "derivation",
+            &m1,
+            json!({
+                "pipeline": PIPELINE,
+                "outputs": [ { "dataset": DS_SCORES, "record": r.h, "locator": "urn:ahl-test:scores/H" } ],
+                "inputs": [ {
+                    "dataset": DS_CUSTOMERS, "record": r.c_f,
+                    "role": "feature", "statement": id_19,
+                } ],
+                "transform": transform(),
+            }),
+            &keys.producer_1,
+        );
+        // Signed by `producer-2` — a valid producer key at this entry index, but NOT the
+        // authority the manifest declares for `customers`. Spec §2.3.3 anchors it as a
+        // challenge: surfaced by verification, never traversed.
+        let env_21 = signed(
+            "retraction",
+            &m1,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_f,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "other",
+            }),
+            &keys.producer_2,
+        );
+        let id_21 = statement_id(&env_21).expect("well-formed envelope");
+        let challenge_dispositions =
+            vec![json!({ "dataset": DS_SCORES, "record": r.h, "disposition": "invalidated" })];
+        let challenge_affected_root = hash_hex(&tree_root(&leaf_bytes(&challenge_dispositions)));
+        let prefix_22: Vec<Value> = vec![
+            env_0.clone(),
+            env_1.clone(),
+            env_2.clone(),
+            env_3.clone(),
+            env_4.clone(),
+            env_5.clone(),
+            env_6.clone(),
+            env_7.clone(),
+            env_8.clone(),
+            env_9.clone(),
+            env_10.clone(),
+            env_11.clone(),
+            env_12.clone(),
+            env_13.clone(),
+            env_14.clone(),
+            env_15.clone(),
+            env_16.clone(),
+            env_17.clone(),
+            env_18.clone(),
+            env_19.clone(),
+            env_20.clone(),
+            env_21.clone(),
+        ];
+        let root_22 = hash_hex(&tree_root(&leaf_bytes(&prefix_22)));
+        let env_22 = signed(
+            "propagation",
+            &m1,
+            json!({
+                "trigger": id_21,
+                "corpus_checkpoint": { "log_id": log_id, "tree_size": 22, "root_hash": root_22 },
+                "affected_root": challenge_affected_root,
+                "affected_count": challenge_dispositions.len(),
+                "complete_relative_to_manifest": true,
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entries 23, 24: manifest rotation and a statement under the successor -
+        // Signed by a key valid under the *previous* manifest version, referencing that
+        // version by entry id (spec §2.3.5). Version 2 rotates the witness key set AND drops
+        // `producer-2` from the producer snapshot (spec §7.2).
+        let env_23 = envelope(
+            manifest(keys, &log_id, adaptor_hash, 23, Some(&entry_id(&env_0))),
+            &keys.producer_1,
+        );
+        let m2 = statement_id(&env_23).expect("well-formed envelope");
+        let env_24 =
             signed("ingestion", &m2, ingest(&r.c_d, "2026-08-16/customers-05"), &keys.producer_1);
 
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
-            env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19,
+            env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
+            env_23, env_24,
         ];
 
         let mut trees = TreeMaterial::new();
         trees.insert(batch_root.clone(), batch_leaves);
+        trees.insert(wide_outputs_root.clone(), wide_leaves);
         trees.insert(input_set_root.clone(), input_leaves);
         trees.insert(affected_root.clone(), dispositions);
+        trees.insert(challenge_affected_root.clone(), challenge_dispositions);
 
         let log_leaves = leaf_bytes(&envelopes);
-        let anchors = [(8u64, 0u64), (13, 0), (18, 0), (20, 18)]
+        let anchors = [(8u64, 0u64), (13, 0), (19, 0), (23, 0), (25, 23)]
             .into_iter()
             .map(|(size, manifest_index)| {
                 let root = hash_hex(&tree_root(&log_leaves[..at(size)]));
@@ -382,8 +501,9 @@ impl Corpus {
                     name: match size {
                         8 => "cp8",
                         13 => "cp13",
-                        18 => "cp18",
-                        _ => "cp20",
+                        19 => "cp19",
+                        23 => "cp23",
+                        _ => "cp25",
                     },
                     checkpoint: cp,
                     witness_id,
@@ -400,8 +520,10 @@ impl Corpus {
             envelopes,
             trees,
             batch_root,
+            wide_outputs_root,
             input_set_root,
             affected_root,
+            challenge_affected_root,
             records,
             log_id,
             anchors,
@@ -496,15 +618,15 @@ impl Corpus {
 
         // Manifest lineage: the successor references its predecessor by entry id (§2.3.5).
         assert_eq!(
-            field_str(self.payload(18), "predecessor").expect("successor manifest"),
+            field_str(self.payload(23), "predecessor").expect("successor manifest"),
             entry_id(&self.envelopes[0]),
             "manifest v2 must reference the genesis manifest by entry id"
         );
         assert!(self.payload(0).get("predecessor").is_none());
         assert_eq!(
-            field_str(self.payload(19), "manifest").expect("statement under v2"),
-            self.manifest_id(18),
-            "entry 19 must bind to the manifest version id of v2 (its statement id)"
+            field_str(self.payload(24), "manifest").expect("statement under v2"),
+            self.manifest_id(23),
+            "entry 24 must bind to the manifest version id of v2 (its statement id)"
         );
         let witnesses = |index: usize| {
             self.payload(index)["witnesses"][0]["witness_id"]
@@ -513,9 +635,60 @@ impl Corpus {
                 .to_owned()
         };
         assert_eq!(witnesses(0), WITNESS_1);
-        assert_eq!(witnesses(18), WITNESS_2, "v2 replaces the witness key set in full (§7.2)");
+        assert_eq!(witnesses(23), WITNESS_2, "v2 replaces the witness key set in full (§7.2)");
+
+        // §7.2: the producer `keys` array is a snapshot that DISCARDS the prior one. Version 2
+        // therefore drops the key that entry 9 added, and nothing it signs after entry 23 can
+        // verify against the v2 state.
+        let snapshot = |index: usize| {
+            self.payload(index)["keys"]
+                .as_array()
+                .expect("producer key objects")
+                .iter()
+                .map(|k| field_str(k, "key_id").expect("key_id").to_owned())
+                .collect::<BTreeSet<String>>()
+        };
+        assert_eq!(snapshot(0), BTreeSet::from([keys.producer_1.key_id()]));
+        assert_eq!(
+            snapshot(23),
+            BTreeSet::from([keys.producer_1.key_id()]),
+            "manifest v2 must drop producer-2 from its producer-key snapshot"
+        );
+        assert_eq!(
+            field_str(&self.payload(9)["key"], "key_id").expect("key statement"),
+            keys.producer_2.key_id(),
+            "entry 9 is the key transition v2's snapshot discards"
+        );
         println!(
-            "  [ok] manifest lineage: v2 chains to genesis by entry id, rotates the witness set"
+            "  [ok] manifest lineage: v2 chains to genesis by entry id, rotates the witness \
+             set, and drops producer-2 from the producer-key snapshot (§7.2)"
+        );
+
+        // The challenge at entry 21 must be a *valid signature* by a key that is not the
+        // dataset authority — otherwise it would be malformed rather than a challenge.
+        let authority: BTreeSet<String> = self.payload(0)["datasets"][DS_CUSTOMERS]["authority"]
+            ["key_ids"]
+            .as_array()
+            .expect("dataset authority key set")
+            .iter()
+            .map(|k| k.as_str().expect("key id").to_owned())
+            .collect();
+        let challenge_signer =
+            field_str(&self.envelopes[21]["signatures"][0], "key_id").expect("signed").to_owned();
+        assert_eq!(authority, BTreeSet::from([keys.producer_1.key_id()]));
+        assert!(
+            !authority.contains(&challenge_signer),
+            "the challenge at entry 21 must be signed by a non-authority key"
+        );
+        assert_eq!(challenge_signer, keys.producer_2.key_id());
+        assert_eq!(
+            field_str(self.payload(22), "trigger").expect("propagation trigger"),
+            self.statement_id(21),
+            "entry 22 propagates over the challenge, which no verifier may traverse"
+        );
+        println!(
+            "  [ok] challenge at entry 21: valid producer-2 signature, not the `{DS_CUSTOMERS}` \
+             authority; entry 22 propagates over it (spec §2.3.3)"
         );
     }
 
@@ -569,8 +742,10 @@ impl Corpus {
     fn check_trees(&self) {
         for (label, root_hex) in [
             ("batch-tree", &self.batch_root),
+            ("wide-outputs-tree", &self.wide_outputs_root),
             ("input-set-tree", &self.input_set_root),
             ("disposition-tree", &self.affected_root),
+            ("challenge-disposition-tree", &self.challenge_affected_root),
         ] {
             let leaves = self.tree_leaves(root_hex);
             let bytes = leaf_bytes(leaves);
@@ -775,6 +950,35 @@ impl Corpus {
             ),
             "signatures": [],
         });
+        // A statement anchored after manifest v2, signed by the key v2's snapshot dropped.
+        let dropped = signed(
+            "ingestion",
+            &self.manifest_id(23),
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": self.records.c_d,
+                "origin": "batch:2026-08-16/customers-05",
+            }),
+            &keys.producer_2,
+        );
+        write_json(
+            &malformed.join("signed-by-dropped-producer-key.json"),
+            &json!({
+                "name": "signed-by-dropped-producer-key",
+                "expect": "reject: core spec §7.2 — \"A manifest's producer `keys` array is the \
+                           complete producer-key snapshot effective from that manifest's entry \
+                           index: it discards the prior snapshot\". Manifest v2 at entry 23 \
+                           declares only producer-1, so producer-2 — added by the `key` \
+                           statement at entry 9 — is not in the key set as of any entry index \
+                           at or after 23. The Ed25519 signature is mathematically valid; the \
+                           key is simply no longer entitled to make it.",
+                "signed_by": keys.producer_2.key_id(),
+                "manifest": self.manifest_id(23),
+                "key_set_at_entry_24": [ keys.producer_1.key_id() ],
+                "envelope": dropped,
+            }),
+        );
+
         write_json(
             &malformed.join("unsigned-statement.json"),
             &json!({
@@ -786,15 +990,17 @@ impl Corpus {
         );
     }
 
+    // A flat list of tree-vector writes, one per committed tree; splitting adds no clarity.
+    #[allow(clippy::too_many_lines)]
     fn write_merkle(&self, root: &Path) {
         let merkle = root.join("vectors").join("merkle");
         let leaves = self.log_leaves();
-        let cp20 = self.anchor("cp20");
+        let cp25 = self.anchor("cp25");
         let proof_3 = inclusion_proof(&leaves, 3).expect("entry 3 is in the log");
         write_json(
             &merkle.join("log-tree.json"),
             &json!({
-                "description": "AHL log tree over the 20-entry toy corpus. Leaves are the \
+                "description": "AHL log tree over the 25-entry toy corpus. Leaves are the \
                                 anchored entry bytes JCS(envelope) in entry-index order and \
                                 are never sorted (core spec §2.5, §1.2).",
                 "adaptor": { "id": ADAPTOR_ID, "hash": self.adaptor_hash },
@@ -818,10 +1024,10 @@ impl Corpus {
                     .collect::<Vec<_>>(),
                 "inclusion": {
                     "leaf_index": 3,
-                    "tree_size": 20,
+                    "tree_size": 25,
                     "entry_id": entry_id(&self.envelopes[3]),
                     "path": proof_path_hex(&proof_3),
-                    "root": cp20.root(),
+                    "root": cp25.root(),
                 },
             }),
         );
@@ -833,6 +1039,19 @@ impl Corpus {
                  `ahl-leaf-v2` objects, record-sorted and duplicate-free; leaf bytes are \
                  JCS(leaf).",
                 &self.batch_root,
+                "outputs_root",
+                "outputs_count",
+                Some(LEAF_FORMAT),
+            ),
+        );
+        write_json(
+            &merkle.join("wide-outputs-tree.json"),
+            &self.tree_vector(
+                "Batch derivation output tree of entry 10 (core spec §2.5). Each `ahl-leaf-v2` \
+                 leaf commits its input set by ROOT rather than inline, so the leaf's `inputs` \
+                 is the wide-input form and the input-set tree below is a second committed \
+                 tree. Receipt format §3's `input_members` applies exactly to this shape.",
+                &self.wide_outputs_root,
                 "outputs_root",
                 "outputs_count",
                 Some(LEAF_FORMAT),
@@ -858,6 +1077,20 @@ impl Corpus {
                  (core spec §2.3.4, §2.5). Leaves are record-sorted disposition objects; \
                  leaf bytes are JCS(leaf).",
                 &self.affected_root,
+                "affected_root",
+                "affected_count",
+                None,
+            ),
+        );
+
+        write_json(
+            &merkle.join("challenge-disposition-tree.json"),
+            &self.tree_vector(
+                "Disposition tree committed by the propagation statement at entry 22. The \
+                 tree itself is well formed; the propagation it belongs to names a CHALLENGE \
+                 as its trigger (core spec §2.3.3), so no `propagation-complete` receipt over \
+                 it can verify — see receipts/propagation-complete-challenge-trigger-must-fail.ahl.",
+                &self.challenge_affected_root,
                 "affected_root",
                 "affected_count",
                 None,
@@ -903,21 +1136,21 @@ impl Corpus {
 
     fn range_proof_vector(&self) -> Value {
         let leaves = self.log_leaves();
-        let cp20 = self.anchor("cp20");
+        let cp25 = self.anchor("cp25");
         let hashes: Vec<_> = leaves.iter().map(|l| leaf_hash(l)).collect();
         let cases = [
-            (0u64, 20u64, "the complete corpus prefix — carries no subtree hashes at all"),
+            (0u64, 25u64, "the complete corpus prefix — carries no subtree hashes at all"),
             (3, 7, "a proper interior sub-range"),
             (6, 7, "a width-1 range, which is an inclusion proof in a different serialization"),
-            (19, 20, "the trailing entry"),
+            (24, 25, "the trailing entry"),
         ];
         json!({
-            "description": "Authenticated range proofs over the 20-entry log tree under cp20 \
+            "description": "Authenticated range proofs over the 25-entry log tree under cp25 \
                             (core spec §3 contract item 5, receipt format §4.2, adaptor profile \
                             §8). Each proof establishes that the listed entries are exactly and \
                             completely the leaf set of the range under the checkpoint root.",
             "adaptor": { "id": ADAPTOR_ID, "hash": self.adaptor_hash },
-            "checkpoint": { "name": cp20.name, "tree_size": 20, "root": cp20.root() },
+            "checkpoint": { "name": cp25.name, "tree_size": 25, "root": cp25.root() },
             "serialization": "base64 of: \"AHLRP1\" || tree_size:u64be || from_index:u64be || \
                               to_index:u64be || node_count:u32be || node_count x 32 raw bytes",
             "cases": cases
@@ -950,9 +1183,9 @@ impl Corpus {
             &json!({
                 "description": "Signed log checkpoints and their witness cosignatures (core spec \
                                 §1.2, §3.3). Signing rules are pinned by the adaptor profile. \
-                                cp20 is cosigned by witness-2 because manifest v2, anchored at \
-                                entry 18, replaced the witness key set in full (§7.2) and is the \
-                                manifest version active for tree_size 20.",
+                                cp25 is cosigned by witness-2 because manifest v2, anchored at \
+                                entry 23, replaced the witness key set in full (§7.2) and is the \
+                                manifest version active for tree_size 25.",
                 "adaptor": { "id": ADAPTOR_ID, "hash": self.adaptor_hash },
                 "log": { "log_id": self.log_id, "operator": LOG_OPERATOR, "key_id": keys.log_1.key_id() },
                 "checkpoints": self
@@ -997,7 +1230,7 @@ impl Corpus {
             let trigger = self.payload(case.trigger_index);
             let mut vector = json!({
                 "description": format!(
-                    "Revocation closure `{}` over the 20-entry toy corpus (core spec §5.1, §5.3), \
+                    "Revocation closure `{}` over the 25-entry toy corpus (core spec §5.1, §5.3), \
                      evaluated at the checkpoint committing the trigger.",
                     case.name
                 ),
@@ -1031,7 +1264,7 @@ impl Corpus {
     }
 }
 
-/// A corpus index as a `usize`. The corpus has twenty entries, so this never truncates; the
+/// A corpus index as a `usize`. The corpus has twenty-five entries, so this never truncates; the
 /// checked form keeps the generator honest on 32-bit targets rather than relying on that.
 fn at(index: u64) -> usize {
     usize::try_from(index).expect("corpus indices fit in usize")
@@ -1109,7 +1342,8 @@ fn closure_cases(r: &Records) -> Vec<ClosureCase> {
                 scores(&r.s3),
                 scores(&r.s4),
                 scores(&r.s1p),
-                scores(&r.w),
+                scores(&r.w1),
+                scores(&r.w2),
             ]),
             note: format!(
                 "The correction at entry 12 supersedes the correction at entry 6, which had \
@@ -1117,16 +1351,17 @@ fn closure_cases(r: &Records) -> Vec<ClosureCase> {
                  original A *and every prior superseded replacement*, here A2 — but never its \
                  own replacement A3 ({}). Seeding A2 is what pulls in S1' (entry 7) and W \
                  (entry 10); seeding only A would silently leave both outside the affected set, \
-                 and seeding A3 would be wrong in the other direction. W is reached through the \
-                 input-set tree of entry 10, so the closure is only computable by a verifier \
-                 holding the committed leaf material (§3.5).",
+                 and seeding A3 would be wrong in the other direction. W1 and W2 are reached \
+                 only through *two* committed trees — the outputs tree of the batch at entry \
+                 10 and the input-set tree its leaves commit — so this closure is computable \
+                 solely by a verifier holding the published leaf material (§3.5).",
                 r.c_a3
             ),
         },
         ClosureCase {
             name: "non-retroactive-retraction",
             trigger_index: 17,
-            through_size: 18,
+            through_size: 19,
             expected_seeds: vec![customers(&r.c_c)],
             expected_affected: vec![scores(&r.e2)],
             note: format!(
@@ -1139,6 +1374,30 @@ fn closure_cases(r: &Records) -> Vec<ClosureCase> {
                  affected. All three consume the retracted record C, so only the scope rule \
                  separates them.",
                 r.e1, r.e3, r.e2
+            ),
+        },
+        ClosureCase {
+            name: "retraction-after-correction",
+            trigger_index: 18,
+            through_size: 19,
+            expected_seeds: vec![customers(&r.c_a)],
+            expected_affected: sorted(vec![
+                scores(&r.s1),
+                scores(&r.s2),
+                scores(&r.s3),
+                scores(&r.s4),
+            ]),
+            note: format!(
+                "Record A was corrected twice earlier in the corpus — to A2 at entry 6 and to \
+                 A3 ({}) at entry 12 — and is now RETRACTED outright at entry 18. Core spec \
+                 §5.1: \"For a retraction on (ds, X), the seed set is exactly {{(ds, X)}} — \
+                 retractions never seed superseded replacements.\" So the seeds are {{A}} \
+                 alone, and the consumers of A2 — S1' ({}) at entry 7 and W1/W2 at entry 10 — \
+                 are NOT affected. Retracting A says nothing about A2: A2 is a separately \
+                 introduced record with its own history. Contrast `supersession-chain`, where \
+                 a *correction* of the same original does seed A2, because that correction \
+                 supersedes the one that produced it.",
+                r.c_a3, r.s1p
             ),
         },
     ]
@@ -1169,10 +1428,13 @@ impl Records {
             ),
             s4: plain(&json!({ "customer_id": "C-1001", "metric": "churn", "value_bp": 800 })),
             s1p: plain(&json!({ "customer_id": "C-1001", "model": "risk-v4.2", "score": 698 })),
-            w: plain(&json!({ "customer_id": "C-1001", "model": "portfolio-v1", "score": 640 })),
+            w1: plain(&json!({ "customer_id": "C-1001", "model": "portfolio-v1", "score": 640 })),
+            w2: plain(&json!({ "customer_id": "C-1001", "model": "portfolio-v1", "score": 655 })),
             e1: plain(&json!({ "customer_id": "C-3003", "model": "risk-v4.2", "score": 501 })),
             e2: plain(&json!({ "customer_id": "C-3003", "model": "risk-v4.2", "score": 502 })),
             e3: plain(&json!({ "customer_id": "C-3003", "model": "risk-v4.2", "score": 503 })),
+            c_f: keyed(&json!({ "customer_id": "C-5005", "country": "PT", "segment": "retail" })),
+            h: plain(&json!({ "customer_id": "C-5005", "model": "risk-v4.2", "score": 421 })),
             c_a_bytes: jcs(&a),
             c_b_bytes: jcs(&b),
         }

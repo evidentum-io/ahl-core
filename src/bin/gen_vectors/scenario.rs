@@ -6,7 +6,7 @@ use std::path::Path;
 use ahl_core::{envelope, jcs, sha256_hex, TestKey, AHL_VERSION};
 use serde_json::{json, Value};
 
-use crate::text::{ADAPTOR_DOC, KEYS_README};
+use crate::text::{ADAPTOR_DOC, CORPUS_README, KEYS_README};
 
 // ---------------------------------------------------------------------------
 // Committed constants — the entire entropy budget of this generator
@@ -93,6 +93,11 @@ impl Keys {
     }
 }
 
+/// Publish the corpus README alongside the vectors it describes.
+pub fn write_corpus_readme(root: &Path) {
+    write_text(&root.join("README.md"), CORPUS_README);
+}
+
 pub fn write_and_load_keys(root: &Path) -> Keys {
     let dir = root.join("keys");
     write_text(&dir.join("README.md"), KEYS_README);
@@ -165,14 +170,12 @@ pub fn manifest(
     predecessor_entry_id: Option<&str>,
 ) -> Value {
     let (witness_key, witness_id) = keys.witness_for(entry_index);
-    let producer_keys = if entry_index == 0 {
-        vec![keys.producer_1.key_object(0)]
-    } else {
-        // Producer keys accumulate through `key` statements (spec §2.3.6); the manifest
-        // restates the resulting set. Log and witness key sets, by contrast, are *replaced*
-        // in full by each manifest version (spec §7.2).
-        vec![keys.producer_1.key_object(0), keys.producer_2.key_object(9)]
-    };
+    // Spec §7.2: a manifest's producer `keys` array is the complete producer-key snapshot
+    // effective from that manifest's entry index — it *discards* the prior snapshot, and later
+    // `key` statements modify it until the next manifest version. Version 2 therefore drops
+    // the key the `key` statement at entry 9 added: from entry 23 onward, `producer-2` signs
+    // nothing, even though an earlier manifest version once knew it.
+    let producer_keys = vec![keys.producer_1.key_object(entry_index)];
 
     let mut payload = json!({
         "ahl_version": AHL_VERSION,
@@ -199,7 +202,14 @@ pub fn manifest(
                 "canonicalization": CANONICALIZATION,
                 "commitment_mode": "keyed",
                 "key_access": "authorized-verifiers-only",
-                "authority": PRODUCER_1,
+                // Spec §1.2 defines the dataset authority as "the key set entitled to issue
+                // triggers", so it is carried as a key set rather than a bare producer id.
+                // Only `producer-1` may retract a `customers` record; a trigger signed by any
+                // other key anchors as a challenge (§2.3.3) and is never traversed.
+                "authority": {
+                    "producer": PRODUCER_1,
+                    "key_ids": [ keys.producer_1.key_id() ],
+                },
             },
             DS_SCORES: {
                 "canonicalization": CANONICALIZATION,

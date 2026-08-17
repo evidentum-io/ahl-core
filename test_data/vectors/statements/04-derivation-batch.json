@@ -1,14 +1,14 @@
 {
-  "entry_id": "sha256:80235850b35e6139adc606839fa5141ff158420193ea32ee8e5c54a3c498c1f2",
+  "entry_id": "sha256:195676ba52ad3096ee0b6ea4ee7bc1035cad54c30cbb73187a0bbb051ef674e5",
   "entry_index": 4,
   "envelope": {
     "payload": {
       "ahl_version": "0.3",
       "issued_at": "2026-08-16T12:00:00Z",
       "leaf_format": "ahl-leaf-v2",
-      "manifest": "sha256:5754bada444abfafbd141c1eec9483ce1e4b2e089748ce4f06a64aeb5d6c50f3",
+      "manifest": "sha256:55df7588fe4cfad02a53a2b5cf0dcb710a153918ac717294ab39fc064900ce13",
       "outputs_count": 3,
-      "outputs_root": "sha256:e2b28a7f873d19d26d922f8a06cdbac454dd3be370aaa055551f6204ef4ef06c",
+      "outputs_root": "sha256:78d43d6659df91e5c953b388de06aa68a1612918c61b9f4fd683feff29b20dc1",
       "pipeline": "scoring-v1",
       "producer": "producer-1",
       "transform": {
@@ -30,9 +30,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:EWrWYyyo9JMxYIqRXrJUnzjE5B7Fdv95Xi0LEi8HEtFXqtsycLh33utwa/skyXLVG7+dTUYhAEG+6buswoheBA=="
+        "sig": "base64:1k/YWHguRl+H5f37zWnTgoMHCTlOfDwoNiP1WCkvDlRKXkH3hzTxLC2Ycxv2LY0vpKu5D4Anh/N+NA+6wv+9AQ=="
       }
     ]
   },
-  "statement_id": "sha256:66996186f21d4a1a44e0956bbc1502f7007693cf2ff9084862e192e8cbef8ce3"
+  "statement_id": "sha256:71b945112385909e3fb908eda2b1e5be3e51930cd243397ee664dc33a1d70d7f"
 }

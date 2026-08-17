@@ -27,6 +27,7 @@ use corpus::Corpus;
 
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
+    scenario::write_corpus_readme(&root);
     let keys = scenario::write_and_load_keys(&root);
     let dataset_key = scenario::load_dataset_key(&root);
     let adaptor_hash = scenario::write_and_hash_adaptor(&root);

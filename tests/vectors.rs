@@ -16,17 +16,19 @@ use std::path::{Path, PathBuf};
 
 use ahl_core::bitemporal::{Scope, ValidTime};
 use ahl_core::closure::{affected_set, RecordRef, TreeMaterial};
-use ahl_core::receipt::{verify_receipt, Limits, ReceiptError, TrustPolicy};
+use ahl_core::receipt::{
+    verify_receipt, AdaptorCapabilities, AdaptorProfile, Limits, ReceiptError, TrustPolicy,
+};
 use ahl_core::tree::ValidatedLeafSet;
 use ahl_core::{
     checkpoint_signing_bytes, cosignature_bytes, decode_pubkey, entry_id, field_str, hash_hex, jcs,
     leaf_hash, parse_hash_hex, proof_from_hex, range_proof, sha256_hex, statement_id, tree_root,
     verify_envelope, verify_inclusion_proof, verify_signature,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 
-/// The twenty statement vectors, in entry-index order.
-const STATEMENT_FILES: [&str; 20] = [
+/// The twenty-five statement vectors, in entry-index order.
+const STATEMENT_FILES: [&str; 25] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -37,7 +39,7 @@ const STATEMENT_FILES: [&str; 20] = [
     "07-derivation-s1-prime.json",
     "08-propagation.json",
     "09-key-add-producer-2.json",
-    "10-derivation-wide-inputs.json",
+    "10-derivation-batch-wide-inputs.json",
     "11-ingestion-customers-a3.json",
     "12-correction-a-to-a3-superseding.json",
     "13-ingestion-customers-c.json",
@@ -45,18 +47,29 @@ const STATEMENT_FILES: [&str; 20] = [
     "15-derivation-e2-open-interval.json",
     "16-derivation-e3-closed-past-interval.json",
     "17-retraction-c-non-retroactive.json",
-    "18-manifest-v2-witness-rotation.json",
-    "19-ingestion-customers-d-under-v2.json",
+    "18-retraction-a-original-after-correction.json",
+    "19-ingestion-customers-f.json",
+    "20-derivation-h-from-f.json",
+    "21-challenge-retraction-f-unauthorized.json",
+    "22-propagation-over-challenge.json",
+    "23-manifest-v2-rotate-witness-drop-key.json",
+    "24-ingestion-customers-d-under-v2.json",
 ];
 
-/// The three published closure scenarios.
-const CLOSURE_FILES: [&str; 3] =
-    ["toy-corpus.json", "supersession-chain.json", "non-retroactive-retraction.json"];
+/// The four published closure scenarios.
+const CLOSURE_FILES: [&str; 4] = [
+    "toy-corpus.json",
+    "supersession-chain.json",
+    "non-retroactive-retraction.json",
+    "retraction-after-correction.json",
+];
 
-const TREE_VECTORS: [(&str, &str, &str); 3] = [
+const TREE_VECTORS: [(&str, &str, &str); 5] = [
     ("batch-tree.json", "outputs_root", "outputs_count"),
+    ("wide-outputs-tree.json", "outputs_root", "outputs_count"),
     ("input-set-tree.json", "input_set_root", "input_set_count"),
     ("disposition-tree.json", "affected_root", "affected_count"),
+    ("challenge-disposition-tree.json", "affected_root", "affected_count"),
 ];
 
 fn test_data() -> PathBuf {
@@ -98,7 +111,7 @@ fn key_set(vectors: &[Value]) -> BTreeMap<String, String> {
             );
         }
     };
-    for index in [0usize, 18] {
+    for index in [0usize, 23] {
         let manifest = &vectors[index]["envelope"]["payload"];
         absorb(&manifest["keys"]);
         absorb(&manifest["log"]["keys"]);
@@ -160,21 +173,21 @@ fn statement_and_entry_ids_are_reproducible() {
 fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
     let vectors = statement_vectors();
     let m1 = field_str(&vectors[0], "statement_id").expect("vector carries statement_id");
-    let m2 = field_str(&vectors[18], "statement_id").expect("vector carries statement_id");
+    let m2 = field_str(&vectors[23], "statement_id").expect("vector carries statement_id");
 
     // A manifest statement declares no `manifest` member (spec §2.2, receipt §2.3).
-    for index in [0usize, 18] {
+    for index in [0usize, 23] {
         assert!(
             vectors[index]["envelope"]["payload"].get("manifest").is_none(),
             "a manifest statement must not declare a `manifest` member"
         );
     }
     for (index, vector) in vectors.iter().enumerate() {
-        if index == 0 || index == 18 {
+        if index == 0 || index == 23 {
             continue;
         }
         // The manifest version id is the manifest statement's *statement id* (spec §2.3.5).
-        let expected = if index < 18 { m1 } else { m2 };
+        let expected = if index < 23 { m1 } else { m2 };
         assert_eq!(
             field_str(&vector["envelope"]["payload"], "manifest")
                 .expect("payload carries manifest"),
@@ -189,7 +202,7 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
 fn the_manifest_chain_links_by_entry_id_and_rotates_the_witness_set() {
     let vectors = statement_vectors();
     let genesis = &vectors[0]["envelope"];
-    let successor = &vectors[18]["envelope"]["payload"];
+    let successor = &vectors[23]["envelope"]["payload"];
 
     assert!(
         genesis["payload"].get("predecessor").is_none(),
@@ -455,7 +468,7 @@ fn checkpoints_and_witness_cosignatures_verify_under_the_active_manifest() {
         // Format §2.2: the active manifest is the one with the greatest entry index smaller
         // than the checkpoint's tree size.
         let tree_size = cp["tree_size"].as_u64().expect("tree_size");
-        let expected = if tree_size > 18 { 18 } else { 0 };
+        let expected = if tree_size > 23 { 23 } else { 0 };
         assert_eq!(
             entry["active_manifest_entry_index"].as_u64(),
             Some(expected),
@@ -484,7 +497,7 @@ fn checkpoints_and_witness_cosignatures_verify_under_the_active_manifest() {
         );
         // The witness must be the one the active manifest version declares.
         let tree_size = cp["tree_size"].as_u64().expect("tree_size");
-        assert_eq!(witness_id, if tree_size > 18 { "witness-2" } else { "witness-1" });
+        assert_eq!(witness_id, if tree_size > 23 { "witness-2" } else { "witness-1" });
     }
 }
 
@@ -632,21 +645,28 @@ fn supersession_seeds_the_original_and_the_superseded_replacement_only() {
             .expect("record")
             .to_owned(),
     );
-    let w = (
-        "scores".to_owned(),
-        field_str(&vectors[10]["envelope"]["payload"]["outputs"][0], "record")
-            .expect("record")
-            .to_owned(),
-    );
+    // W1 and W2 are batch outputs whose leaves commit their input set by root, so reaching
+    // them requires walking two committed trees.
+    let wide: BTreeSet<RecordRef> =
+        read_json(&test_data().join("vectors").join("merkle").join("wide-outputs-tree.json"))
+            ["leaves"]
+            .as_array()
+            .expect("leaves")
+            .iter()
+            .map(|leaf| {
+                ("scores".to_owned(), field_str(leaf, "record").expect("record").to_owned())
+            })
+            .collect();
+    assert_eq!(wide.len(), 2);
     assert!(closure.affected.contains(&s1p), "S1' consumed the superseded replacement");
     assert!(
-        closure.affected.contains(&w),
-        "W consumed the superseded replacement through an input-set tree"
+        wide.is_subset(&closure.affected),
+        "the batch outputs consumed the superseded replacement through an input-set tree"
     );
 
-    // Seeding only the original would miss both — the regression this vector exists for.
+    // Seeding only the original would miss all three — the regression this vector exists for.
     let seeds_only_original = affected_set(&envelopes, &tree_material(), 6, 13).expect("corpus");
-    assert!(!seeds_only_original.affected.contains(&w));
+    assert!(wide.is_disjoint(&seeds_only_original.affected));
 }
 
 #[test]
@@ -693,9 +713,13 @@ fn closure_rejects_tampered_committed_tree_material() {
     // Drop a leaf from the input-set tree: the count no longer matches the anchored
     // `input_set_count`, so the closure must fail rather than silently shrink.
     let mut trees = tree_material();
-    let root = field_str(&vectors[10]["envelope"]["payload"]["inputs"], "input_set_root")
-        .expect("input_set_root")
-        .to_owned();
+    let root = field_str(
+        &read_json(&test_data().join("vectors").join("merkle").join("input-set-tree.json")),
+        "input_set_root",
+    )
+    .expect("input_set_root")
+    .to_owned();
+    assert!(vectors[10]["envelope"]["payload"].get("outputs_root").is_some());
     trees.get_mut(&root).expect("input-set material").pop();
     assert!(
         affected_set(&envelopes, &trees, 12, 13).is_err(),
@@ -752,7 +776,20 @@ fn trust_policy() -> TrustPolicy {
             .as_object()
             .expect("adaptor profiles")
             .iter()
-            .map(|(id, hash)| (id.clone(), hash.as_str().expect("hash").to_owned()))
+            .map(|(id, profile)| {
+                let capabilities = &profile["capabilities"];
+                (
+                    id.clone(),
+                    AdaptorProfile {
+                        hash: field_str(profile, "hash").expect("profile hash").to_owned(),
+                        capabilities: AdaptorCapabilities {
+                            checkpoint_raw: capabilities["checkpoint_raw"] == Value::Bool(true),
+                            consistency_proofs: capabilities["consistency_proofs"]
+                                == Value::Bool(true),
+                        },
+                    },
+                )
+            })
             .collect(),
         dataset_keys: BTreeMap::from([(
             "customers".to_owned(),
@@ -784,7 +821,7 @@ fn the_receipt_index_lists_every_receipt_on_disk() {
         .filter(|name| Path::new(name).extension().is_some_and(|ext| ext == "ahl"))
         .collect();
     assert_eq!(listed, on_disk, "the index and the directory must agree");
-    assert!(on_disk.len() >= 18, "one positive and one negative vector per registry claim type");
+    assert!(on_disk.len() >= 23, "one positive and one negative vector per registry claim type");
 }
 
 #[test]
@@ -882,6 +919,20 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             error,
             ReceiptError::GovernanceStateNotCurrent { target_index: 10, entry_index: 9, .. }
         ),
+        "statement-anchored-dropped-producer-key-must-fail.ahl" => {
+            matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
+        }
+        "trigger-effective-unauthorized-issuer-must-fail.ahl"
+        | "propagation-complete-challenge-trigger-must-fail.ahl" => {
+            matches!(error, ReceiptError::TriggerNotAuthorized { entry_index: 21, .. })
+        }
+        "governance-state-short-range-must-fail.ahl" => matches!(
+            error,
+            ReceiptError::GovernanceRangeNotComplete { got_from: 0, got_to: 6, tree_size: 25 }
+        ),
+        "governance-state-key-subject-must-fail.ahl" => {
+            matches!(error, ReceiptError::GovernanceSubjectNotManifest { .. })
+        }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };
     assert!(fired, "{name}: expected rejection by {rule}, got: {error}");
@@ -905,7 +956,7 @@ fn every_negative_receipt_is_rejected_by_the_rule_it_names() {
         assert_eq!(error.to_string(), field_str(entry, "reason").expect("reason"));
         rejected += 1;
     }
-    assert!(rejected >= 9, "every registry claim type needs a negative vector, got {rejected}");
+    assert!(rejected >= 14, "every registry claim type needs a negative vector, got {rejected}");
 }
 
 #[test]
@@ -970,7 +1021,7 @@ fn the_adaptor_profile_hash_is_pinned_by_both_manifest_versions_and_by_receipts(
         .expect("adaptor profile document is published alongside the vectors");
     let hash = sha256_hex(&bytes);
 
-    for index in [0usize, 18] {
+    for index in [0usize, 23] {
         let adaptor = &vectors[index]["envelope"]["payload"]["log"]["adaptor"];
         assert_eq!(field_str(adaptor, "id").expect("adaptor id"), "ahl-test-log-v1");
         assert_eq!(
@@ -989,4 +1040,568 @@ fn the_adaptor_profile_hash_is_pinned_by_both_manifest_versions_and_by_receipts(
             "{name}: every receipt carries the pinned profile hash (spec §6.5)"
         );
     }
+}
+
+/// Smallest work budget at which `receipt` stops failing with `LimitExceeded`.
+///
+/// The work counter increments once per signature check, proof check and tree opening, so this
+/// is a deterministic measure of how much verification a receipt actually cost.
+fn work_cost(receipt: &Value, policy: &TrustPolicy) -> u64 {
+    for budget in 1..2000u64 {
+        let scoped = TrustPolicy {
+            limits: Limits { max_work_units: budget, ..policy.limits },
+            ..policy.clone()
+        };
+        match verify_receipt(receipt, &scoped) {
+            Err(ReceiptError::LimitExceeded("verification work budget")) => {}
+            _ => return budget,
+        }
+    }
+    panic!("receipt did not complete within the probe range");
+}
+
+#[test]
+fn a_duplicated_embedded_receipt_is_verified_exactly_once() {
+    let policy = trust_policy();
+    let (_, receipt) = read_receipt("trigger-declared-valid.ahl");
+
+    // The valid receipt embeds two *distinct* introduction receipts.
+    let introduction = receipt["claim_material"]["introduction"].clone();
+    let replacement = receipt["claim_material"]["replacement_introduction"].clone();
+    assert_ne!(introduction["subject"]["entry_id"], replacement["subject"]["entry_id"]);
+    let distinct_cost = work_cost(&receipt, &policy);
+
+    // Point both slots at the same embedded receipt. Format §3.1: "Duplicate embedded receipts
+    // (same entry id) MUST be verified once and referenced thereafter."
+    let mut duplicated = receipt;
+    duplicated["claim_material"]["replacement_introduction"] = introduction.clone();
+    let duplicate_cost = work_cost(&duplicated, &policy);
+
+    assert!(
+        duplicate_cost < distinct_cost,
+        "the duplicate must be served from the cache, not re-verified \
+         (distinct {distinct_cost} units, duplicated {duplicate_cost})"
+    );
+
+    // Verifying the embedded receipt on its own costs the difference, which is exactly the
+    // work the duplicate would have cost a verifier without the cache.
+    let embedded_cost = work_cost(&introduction, &policy);
+    assert_eq!(
+        distinct_cost - duplicate_cost,
+        embedded_cost,
+        "the saving must equal one full verification of the embedded receipt"
+    );
+
+    // It is still rejected — by the §2.3 record rule, reached only *after* the cached lookup,
+    // which is what proves the cache short-circuited the recursion rather than the checks.
+    assert!(matches!(
+        verify_receipt(&duplicated, &policy),
+        Err(ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. })
+    ));
+}
+
+#[test]
+fn adaptor_capability_gaps_are_reported_as_profile_limitations() {
+    let policy = trust_policy();
+    let (_, valid) = read_receipt("statement-anchored-valid.ahl");
+
+    // The corpus profile defines no binary checkpoint framing and no consistency-proof
+    // serialization (adaptor profile §7), so receipts needing either are rejected — but as a
+    // limitation of that profile, named, not as a blanket rule of the container format.
+    let mut with_raw = valid.clone();
+    with_raw["anchoring"]["checkpoint"]["raw"] = Value::String("base64:AAAA".to_owned());
+    assert!(matches!(
+        verify_receipt(&with_raw, &policy),
+        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
+    ));
+
+    let mut with_later = valid;
+    with_later["anchoring"]["later_checkpoint"] = json_checkpoint();
+    assert!(matches!(
+        verify_receipt(&with_later, &policy),
+        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
+    ));
+
+    // A profile that declared the capability would get past the limitation check; nothing in
+    // this tranche can then supply a verifiable proof, so it fails on the proof instead.
+    let mut permissive = trust_policy();
+    permissive.adaptor_profiles.insert(
+        "ahl-test-log-v1".to_owned(),
+        AdaptorProfile {
+            hash: policy.adaptor_profiles["ahl-test-log-v1"].hash.clone(),
+            capabilities: AdaptorCapabilities { checkpoint_raw: true, consistency_proofs: true },
+        },
+    );
+    assert!(matches!(
+        verify_receipt(&with_later, &permissive),
+        Err(ReceiptError::ConsistencyPathInvalid)
+    ));
+}
+
+/// A structurally plausible later checkpoint, used only to trip capability checks.
+fn json_checkpoint() -> Value {
+    let file = read_json(&test_data().join("vectors").join("checkpoints").join("checkpoints.json"));
+    file["checkpoints"].as_array().expect("checkpoints").last().expect("cp25")["checkpoint"].clone()
+}
+
+#[test]
+fn the_challenge_trigger_is_anchored_but_never_authorised() {
+    let vectors = statement_vectors();
+    let manifest = &vectors[0]["envelope"]["payload"];
+    let authority: BTreeSet<String> = manifest["datasets"]["customers"]["authority"]["key_ids"]
+        .as_array()
+        .expect("the dataset authority is a key set (spec §1.2)")
+        .iter()
+        .map(|k| k.as_str().expect("key id").to_owned())
+        .collect();
+
+    // The challenge is a real, well-signed statement — that is what makes it a challenge
+    // rather than a malformed object (spec §2.3.3).
+    let keys = key_set(&vectors);
+    assert!(verify_envelope(&vectors[21]["envelope"], |key_id| keys.get(key_id).cloned())
+        .expect("well-formed envelope"));
+    let signer =
+        field_str(&vectors[21]["envelope"]["signatures"][0], "key_id").expect("key_id").to_owned();
+    assert!(!authority.contains(&signer), "the challenge must not be signed by the authority");
+
+    // And the propagation at entry 22 names it, so a completeness claim over that propagation
+    // is exactly the thing a verifier must refuse.
+    assert_eq!(
+        field_str(&vectors[22]["envelope"]["payload"], "trigger").expect("trigger"),
+        field_str(&vectors[21], "statement_id").expect("statement_id")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Receipt rejection rules, one mutation each
+// ---------------------------------------------------------------------------
+//
+// Every rule below is reachable from a *valid* vector by a single targeted mutation, so each
+// case isolates one rule rather than tripping several at once. These complement the receipt
+// vectors on disk: the vectors are the portable conformance artifacts, these are the unit
+// coverage of the branches a well-formed corpus never reaches.
+
+/// Apply `mutate` to a named valid receipt and assert the rejection it must produce.
+fn assert_rejects(
+    base: &str,
+    mutate: impl FnOnce(&mut Value),
+    check: impl FnOnce(&ReceiptError) -> bool,
+    rule: &str,
+) {
+    let policy = trust_policy();
+    let (_, mut receipt) = read_receipt(base);
+    mutate(&mut receipt);
+    let error = verify_receipt(&receipt, &policy)
+        .err()
+        .unwrap_or_else(|| panic!("{rule}: mutated {base} must be rejected, but verified"));
+    assert!(check(&error), "{rule}: wrong rule fired for {base}: {error}");
+}
+
+/// Flip one character of a family string, keeping the encoding well formed.
+///
+/// `sha256:`/`hmac-sha256:` values are hex, `base64:` values are base64 — in both cases the
+/// substitution stays inside the alphabet, so the failure reported is the cryptographic one
+/// rather than a decoding error.
+fn corrupt(value: &mut Value) {
+    let text = value.as_str().expect("family string").to_owned();
+    // The FIRST body character: in base64 the final data character carries only part of a
+    // byte, so substituting there can produce an invalid trailing symbol rather than a
+    // different value.
+    let at = text.find(':').map_or(0, |i| i + 1);
+    assert!(at < text.len(), "the value must have a body to corrupt");
+    let mut bytes = text.into_bytes();
+    bytes[at] = if bytes[at] == b'a' { b'b' } else { b'a' };
+    *value = Value::String(String::from_utf8(bytes).expect("ascii substitution"));
+}
+
+#[test]
+fn version_and_identifier_rules_reject() {
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["ahl_receipt_version"] = Value::String("2".to_owned()),
+        |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_receipt_version", .. }),
+        "§5 step 1 — receipt version",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["spec_version"] = Value::String("0.4.0".to_owned()),
+        |e| matches!(e, ReceiptError::UnsupportedVersion { field: "spec_version", .. }),
+        "§5 step 1 — spec version",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["subject"]["statement_id"]),
+        |e| matches!(e, ReceiptError::IdentifierMismatch { field: "statement_id" }),
+        "§5 step 1 — statement id recomputation",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["subject"]["entry_id"]),
+        |e| matches!(e, ReceiptError::IdentifierMismatch { field: "entry_id" }),
+        "§5 step 1 — entry id recomputation",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["subject"]["entry_index"] = json!(9_999),
+        |e| matches!(e, ReceiptError::EntryIndexBeyondCheckpoint { .. }),
+        "§5 step 3 — entry_index < tree_size",
+    );
+}
+
+#[test]
+fn anchoring_rules_reject() {
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["anchoring"]["checkpoint"]["signature"]),
+        |e| matches!(e, ReceiptError::CheckpointSignatureInvalid),
+        "§5 step 3 — checkpoint signature",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["anchoring"]["witnesses"][0]["cosignature"]),
+        |e| matches!(e, ReceiptError::WitnessCosignatureInvalid { .. }),
+        "§5 step 3 — witness cosignature",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["anchoring"]["inclusion_path"][0]),
+        |e| matches!(e, ReceiptError::InclusionPathInvalid { what: "subject" }),
+        "§5 step 3 — inclusion path",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["governance"]["chain"][0]["inclusion_path"][0]),
+        |e| matches!(e, ReceiptError::InclusionPathInvalid { what: "governance chain hop" }),
+        "§5 step 4 — chain hop anchoring",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["envelope"]["signatures"][0]["sig"]),
+        // The envelope digest changes with the signature, so the identifier check fires first —
+        // which is itself the point: an envelope cannot be edited without breaking its ids.
+        |e| matches!(e, ReceiptError::IdentifierMismatch { .. }),
+        "§2.1 — the envelope is digest-bound",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["keys"]["log"][0]["key_id"]),
+        |e| matches!(e, ReceiptError::KeyNotBound { .. }),
+        "adaptor §3 — key ids are recomputed from the public key",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["keys"]["log"][0]["binding"]["entry_index"] = json!(7),
+        |e| matches!(e, ReceiptError::KeyNotBound { entry_index: 7, .. }),
+        "§2.2 — log keys bind to the manifest active for the checkpoint",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["keys"]["log"][0]["source"] = Value::String("local-policy".to_owned()),
+        |e| matches!(e, ReceiptError::KeyNotBound { .. }),
+        "§2.2 — local-policy source is witness-only",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["anchoring"]["checkpoint"]["log_id"]),
+        |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
+        "adaptor §5 — checkpoint log_id matches the active manifest",
+    );
+}
+
+#[test]
+fn governance_chain_rules_reject() {
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["governance"]["chain"] = json!([]),
+        |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
+        "§2.3.5 — the chain starts at genesis",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["governance"]["chain"][0]["envelope"]["payload"]["predecessor"] = json!("sha256:00"),
+        |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
+        "§2.3.5 — the genesis manifest has no predecessor",
+    );
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| {
+            r["governance"]["chain"][2]["envelope"]["payload"]
+                .as_object_mut()
+                .expect("manifest payload")
+                .remove("predecessor");
+        },
+        |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
+        "§2.3.5 — a non-genesis manifest references its predecessor",
+    );
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| corrupt(&mut r["governance"]["chain"][2]["envelope"]["payload"]["predecessor"]),
+        |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
+        "§2.3.5 — the predecessor reference is the predecessor's entry id",
+    );
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| r["governance"]["chain"].as_array_mut().expect("chain").swap(0, 1),
+        |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
+        "§2.3.5 — chain hops ascend by entry index",
+    );
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| r["governance"]["chain"][1]["envelope"]["payload"]["action"] = json!("revoke"),
+        |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
+        "§2.3.6 — key actions are add or retire",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| corrupt(&mut r["governance"]["genesis_entry_id"]),
+        |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
+        "§5 step 4 — the anchor must digest the carried genesis envelope",
+    );
+}
+
+#[test]
+fn cross_field_consistency_rules_reject() {
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["claim"]["assurance"]["witnessed"] = json!(false),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "witnessed" }),
+        "§2.3 — witnessed iff a cosignature verifies",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["claim"]["assurance"]["continued_history"] = json!(true),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "continued_history" }),
+        "§2.3 — continued_history iff a consistency proof verifies",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| {
+            r["claim"]["record_subject"] = json!({ "dataset": "customers", "record": "sha256:00" });
+        },
+        |e| matches!(e, ReceiptError::RecordSubjectMismatch { .. }),
+        "§3 — record_subject is absent for statement-anchored",
+    );
+    assert_rejects(
+        "record-ingested-valid.ahl",
+        |r| {
+            r["claim"].as_object_mut().expect("claim").remove("record_subject");
+        },
+        |e| matches!(e, ReceiptError::RecordSubjectMismatch { .. }),
+        "§3 — record_subject is required for record-*",
+    );
+    assert_rejects(
+        "record-ingested-valid.ahl",
+        |r| corrupt(&mut r["claim"]["record_subject"]["record"]),
+        |e| matches!(e, ReceiptError::RecordSubjectMismatch { .. }),
+        "§2.3 — record_subject matches the subject envelope",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| {
+            r["subject"].as_object_mut().expect("subject").remove("manifest");
+        },
+        |e| matches!(e, ReceiptError::SubjectManifestPresence { .. }),
+        "§2.3 — subject.manifest present for every non-manifest subject",
+    );
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| r["subject"]["manifest"] = json!("sha256:00"),
+        |e| matches!(e, ReceiptError::SubjectManifestPresence { .. }),
+        "§2.3 — subject.manifest absent for manifest subjects",
+    );
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| r["claim"]["type"] = json!("not-a-registry-type"),
+        |e| matches!(e, ReceiptError::Malformed(_)),
+        "§3 — claim.type must be a registry id",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        // A type §4 does not permit in declared mode.
+        |r| r["claim"]["type"] = json!("propagation-complete"),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "governance" }),
+        "§4 — declared mode is limited to the compact claim types",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| {
+            r["claim"]["assurance"]["governance"] = json!("assumed");
+            r["governance"]["currency"]["mode"] = json!("assumed");
+        },
+        |e| matches!(e, ReceiptError::Malformed(_)),
+        "§4 — governance mode is declared or enumerated",
+    );
+    assert_rejects(
+        "trigger-declared-valid.ahl",
+        |r| r["claim"]["assurance"]["competing_triggers"] = json!("enumerated"),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "competing_triggers" }),
+        "§2.3 — competing_triggers enumerated only with the §3 range",
+    );
+    assert_rejects(
+        "record-ingested-valid.ahl",
+        |r| r["claim"]["assurance"]["content_binding"] = json!("none"),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "content_binding" }),
+        "§2.1 — content evidence absent iff content_binding is none",
+    );
+}
+
+#[test]
+fn claim_material_rules_reject() {
+    assert_rejects(
+        "trigger-effective-valid.ahl",
+        |r| r["claim_material"]["checkpoint_C"]["tree_size"] = json!(13),
+        |e| {
+            matches!(
+                e,
+                ReceiptError::CheckpointNotBound { field: "claim_material.checkpoint_C", .. }
+            )
+        },
+        "§3 — checkpoint_C is the receipt's verified checkpoint",
+    );
+    assert_rejects(
+        "trigger-effective-valid.ahl",
+        |r| {
+            r["claim_material"]["checkpoint_C"]
+                .as_object_mut()
+                .expect("checkpoint")
+                .remove("root_hash");
+        },
+        |e| matches!(e, ReceiptError::CheckpointNotBound { member, .. } if member == "root_hash"),
+        "§2.3.4 — a corpus checkpoint carries log_id, tree_size and root_hash",
+    );
+    assert_rejects(
+        "propagation-complete-valid.ahl",
+        |r| r["claim_material"]["corpus_checkpoint"]["log_id"] = json!("sha256:00"),
+        |e| {
+            matches!(
+                e,
+                ReceiptError::CheckpointNotBound { field: "claim_material.corpus_checkpoint", .. }
+            )
+        },
+        "§3 — propagation-complete's corpus_checkpoint is the verified checkpoint",
+    );
+    assert_rejects(
+        "propagation-complete-valid.ahl",
+        |r| corrupt(&mut r["envelope"]["payload"]["trigger"]),
+        // Editing the payload changes the statement id, which is checked first.
+        |e| matches!(e, ReceiptError::IdentifierMismatch { .. }),
+        "§2.1 — the payload is digest-bound",
+    );
+    assert_rejects(
+        "propagation-complete-valid.ahl",
+        |r| {
+            r["claim_material"].as_object_mut().expect("material").remove("trigger");
+        },
+        |e| matches!(e, ReceiptError::ClaimMaterialMissing { field: "trigger", .. }),
+        "§3 — propagation-complete requires an embedded trigger-effective receipt",
+    );
+    assert_rejects(
+        "disposition-declared-valid.ahl",
+        |r| {
+            r["claim_material"].as_object_mut().expect("material").remove("disposition_leaf");
+        },
+        |e| matches!(e, ReceiptError::ClaimMaterialMissing { field: "disposition_leaf", .. }),
+        "§3 — disposition claims carry the leaf they open",
+    );
+    assert_rejects(
+        "record-derived-valid.ahl",
+        |r| corrupt(&mut r["claim_material"]["output"]["record"]),
+        |e| matches!(e, ReceiptError::RecordSubjectMismatch { .. }),
+        "§3 — record_subject matches claim_material.output",
+    );
+    assert_rejects(
+        "record-derived-valid.ahl",
+        |r| {
+            corrupt(&mut r["claim_material"]["batch_leaf"]["record"]);
+            corrupt(&mut r["claim_material"]["output"]["record"]);
+            corrupt(&mut r["claim"]["record_subject"]["record"]);
+        },
+        |e| matches!(e, ReceiptError::InclusionPathInvalid { what: "batch output leaf" }),
+        "§3 — batch_leaf must open outputs_root",
+    );
+    assert_rejects(
+        "record-derived-valid.ahl",
+        |r| corrupt(&mut r["claim_material"]["input_members"][0]["input_path"][0]),
+        |e| matches!(e, ReceiptError::InclusionPathInvalid { what: "input-set member" }),
+        "§3 — input_members open the leaf's input_set_root",
+    );
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| r["claim_material"]["target_index"] = json!(1),
+        |e| matches!(e, ReceiptError::EmbeddedOrderingViolation { what: "governance subject", .. }),
+        "§3 — subject.entry_index <= target_index",
+    );
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| r["claim_material"]["target_index"] = json!(99),
+        |e| matches!(e, ReceiptError::GovernanceRangeNotComplete { .. }),
+        "§3/§4 — the enumeration must reach the target index",
+    );
+}
+
+#[test]
+fn enumeration_rules_reject() {
+    assert_rejects(
+        "trigger-effective-valid.ahl",
+        |r| {
+            r["governance"]["currency"]["material"]["entries"]
+                .as_array_mut()
+                .expect("entries")
+                .pop();
+        },
+        |e| matches!(e, ReceiptError::RangeProofInvalid { what: "governance", .. }),
+        "§4.2 — the carried entry count equals the range width",
+    );
+    assert_rejects(
+        "trigger-effective-valid.ahl",
+        |r| r["governance"]["currency"]["material"]["entries"][2]["entry_index"] = json!(99),
+        |e| matches!(e, ReceiptError::RangeProofInvalid { what: "governance", .. }),
+        "§4.2 — entries are in index order with no gaps",
+    );
+    assert_rejects(
+        "trigger-effective-valid.ahl",
+        |r| r["governance"]["currency"]["material"]["range"]["to_index"] = json!(7),
+        |e| matches!(e, ReceiptError::RangeProofInvalid { what: "governance", .. }),
+        "§4.2 — the range proof covers the declared range",
+    );
+    assert_rejects(
+        "trigger-effective-valid.ahl",
+        |r| {
+            r["governance"]["currency"]["material"]["entries"][2]["envelope"]["payload"]
+                ["issued_at"] = json!("2000-01-01T00:00:00Z");
+        },
+        |e| matches!(e, ReceiptError::RangeProofInvalid { what: "governance", .. }),
+        "§4.2 — a substituted entry does not open the checkpoint root",
+    );
+    assert_rejects(
+        "trigger-effective-valid.ahl",
+        |r| {
+            let range = r["claim_material"]["competing"]["corpus_range"].clone();
+            r["governance"]["currency"]["material"] = range;
+        },
+        |e| matches!(e, ReceiptError::GovernanceRangeNotComplete { got_from: 1, .. }),
+        "§4 — enumerated governance covers exactly [0, tree_size(C))",
+    );
+}
+
+#[test]
+fn the_governing_trigger_must_be_the_subject() {
+    // Re-point the competing enumeration at a checkpoint whose range contains a *later*
+    // trigger for the same record; the subject then no longer governs.
+    let policy = trust_policy();
+    let (_, valid) = read_receipt("trigger-effective-valid.ahl");
+    let mut receipt = valid;
+    // Drop the subject's own entry from the enumeration so no trigger for the record is found.
+    let entries = receipt["claim_material"]["competing"]["corpus_range"]["entries"]
+        .as_array_mut()
+        .expect("entries");
+    for entry in entries.iter_mut() {
+        if entry["entry_index"] == json!(6) {
+            entry["envelope"]["payload"]["type"] = json!("ingestion");
+        }
+    }
+    assert!(
+        matches!(verify_receipt(&receipt, &policy), Err(ReceiptError::RangeProofInvalid { .. })),
+        "editing an enumerated entry must break the range proof before anything else"
+    );
 }

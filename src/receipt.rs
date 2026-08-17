@@ -70,6 +70,43 @@ impl Default for Limits {
     }
 }
 
+/// What a locally possessed adaptor profile document defines.
+///
+/// Core spec §3 item 6 forbids verification from depending on knowledge outside the profile
+/// document, so the *absence* of a definition is a property of the profile, not of the
+/// verifier. These flags carry that distinction into the code: a receipt using material the
+/// pinned profile never defines is rejected as an adaptor limitation, with the profile named,
+/// rather than as though the format itself forbade it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdaptorCapabilities {
+    /// The profile defines a binary checkpoint framing, so `anchoring.checkpoint.raw` can be
+    /// parsed and compared against the JSON object (format §5 step 2).
+    pub checkpoint_raw: bool,
+    /// The profile defines a consistency-proof serialization, so `anchoring.later_checkpoint`
+    /// plus `consistency_path` can be verified and `assurance.continued_history` claimed.
+    pub consistency_proofs: bool,
+}
+
+/// A locally possessed adaptor profile: the hash of the document plus what it defines.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdaptorProfile {
+    /// SHA-256 of the published profile document, as `sha256:<hex>`.
+    pub hash: String,
+    /// What the document defines. Anything not listed here is unusable *under this profile*.
+    pub capabilities: AdaptorCapabilities,
+}
+
+impl AdaptorProfile {
+    /// A profile that defines only what the corpus adaptor `ahl-test-log-v1` defines.
+    #[must_use]
+    pub const fn minimal(hash: String) -> Self {
+        Self {
+            hash,
+            capabilities: AdaptorCapabilities { checkpoint_raw: false, consistency_proofs: false },
+        }
+    }
+}
+
 /// The verifier's locally configured trust policy (format §1 design rule 1).
 ///
 /// Nothing in this struct may be taken from the receipt: that is the whole point of the trust
@@ -81,8 +118,8 @@ pub struct TrustPolicy {
     pub genesis_entry_id: String,
     /// The published producer key fingerprints of the genesis manifest.
     pub genesis_key_ids: BTreeSet<String>,
-    /// Locally possessed adaptor profiles: profile id to profile document hash.
-    pub adaptor_profiles: BTreeMap<String, String>,
+    /// Locally possessed adaptor profiles, by profile id.
+    pub adaptor_profiles: BTreeMap<String, AdaptorProfile>,
     /// Dataset HMAC keys this verifier is authorized to hold (`keyed-authorized` binding only).
     pub dataset_keys: BTreeMap<String, Vec<u8>>,
     /// Witness key ids trusted by local policy rather than through the manifest chain.
@@ -169,9 +206,70 @@ pub enum ReceiptError {
         id: String,
     },
 
-    /// The receipt carries material the pinned adaptor profile forbids.
-    #[error("adaptor profile violation: {0}")]
-    AdaptorViolation(&'static str),
+    /// The receipt carries material the pinned adaptor profile does not define.
+    ///
+    /// This is a limitation of the profile, not of the container format: another profile that
+    /// defines the capability would make the same receipt verifiable.
+    #[error("adaptor profile `{id}` does not define {capability}, which this receipt requires")]
+    AdaptorCapabilityUnsupported {
+        /// The pinned profile id.
+        id: String,
+        /// What the receipt needed the profile to define.
+        capability: &'static str,
+    },
+
+    /// A claim's checkpoint is not the receipt's own verified `anchoring.checkpoint` (§3).
+    ///
+    /// A "governs" or "complete" claim may only rest on a checkpoint whose signature, witness
+    /// cosignature and inclusion path this verifier actually checked.
+    #[error(
+        "`{field}` is not the receipt's verified anchoring checkpoint: `{member}` differs \
+         (self-supplied checkpoints cannot ground this claim)"
+    )]
+    CheckpointNotBound {
+        /// The claim-material member carrying the unverified checkpoint.
+        field: &'static str,
+        /// The first checkpoint member that differs.
+        member: String,
+    },
+
+    /// Enumerated governance currency does not cover exactly `[0, tree_size(C))` (§4).
+    #[error(
+        "enumerated governance covers [{got_from}, {got_to}) but §4 requires exactly \
+         [0, {tree_size}) — a narrower range can hide a later governance statement"
+    )]
+    GovernanceRangeNotComplete {
+        /// Lower bound carried.
+        got_from: u64,
+        /// Upper bound carried.
+        got_to: u64,
+        /// Tree size of the receipt's verified checkpoint.
+        tree_size: u64,
+    },
+
+    /// The trigger is not signed by the record's authority, so it is a challenge (spec §2.3.3).
+    #[error(
+        "trigger at entry index {entry_index} is signed by {signed_by}, which is not the \
+         authority for `{record}`; spec §2.3.3 anchors it as a challenge, never traversed"
+    )]
+    TriggerNotAuthorized {
+        /// Entry index of the unauthorized trigger.
+        entry_index: u64,
+        /// The record whose authority was required.
+        record: String,
+        /// The key ids that actually signed.
+        signed_by: String,
+    },
+
+    /// A `governance-state` receipt's subject is not a manifest statement (§3).
+    #[error(
+        "`governance-state` subject must be a manifest statement, got `{statement_type}` \
+         (key state is composed from the manifest plus later key statements)"
+    )]
+    GovernanceSubjectNotManifest {
+        /// The subject statement's type.
+        statement_type: String,
+    },
 
     /// The checkpoint signature did not verify (§5 step 3).
     #[error("checkpoint signature did not verify")]
@@ -445,13 +543,15 @@ struct Budget {
     limits: Limits,
     work: u64,
     embedded: usize,
-    /// Entry ids of embedded receipts already verified: duplicates are verified once (§3.1).
-    seen: BTreeSet<String>,
+    /// Verdicts of embedded receipts already verified, keyed by entry id. Format §3.1:
+    /// "Duplicate embedded receipts (same entry id) MUST be verified once and referenced
+    /// thereafter" — so this is consulted *before* recursing, not merely recorded after.
+    verified: BTreeMap<String, Verdict>,
 }
 
 impl Budget {
     const fn new(limits: Limits) -> Self {
-        Self { limits, work: 0, embedded: 0, seen: BTreeSet::new() }
+        Self { limits, work: 0, embedded: 0, verified: BTreeMap::new() }
     }
 
     const fn spend(&mut self, units: u64) -> Result<()> {
@@ -496,18 +596,67 @@ struct Governance<'a> {
     events: Vec<KeyEvent>,
 }
 
+/// One producer key in force at some entry index, with the governance statement that put it
+/// there — the index a receipt's `keys.producer[].binding` must name (format §2.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundKey {
+    pubkey: String,
+    bound_at: u64,
+}
+
 impl<'a> Governance<'a> {
-    /// The producer key set as of `index` (spec §2.3.6: key set as of the entry index).
-    fn producer_keys_at(&self, index: u64) -> BTreeMap<String, String> {
+    /// The governance statement whose producer-key snapshot is in force *at* `index`.
+    ///
+    /// Spec §2.2 resolves "the manifest version active at entry index i" as the manifest with
+    /// the greatest entry index **smaller** than i — which is also what §2.3.5 needs, since a
+    /// manifest statement is signed under its *predecessor*'s state. The genesis manifest is
+    /// the one statement validated by its own snapshot, so index 0 falls back to it.
+    fn snapshot_manifest(&self, index: u64) -> Option<(u64, &'a Value)> {
+        self.manifests
+            .iter()
+            .rfind(|(mi, _)| *mi < index)
+            .or_else(|| self.manifests.first())
+            .copied()
+    }
+
+    /// The producer key set in force at `index`, with each key's binding index.
+    ///
+    /// Spec §7.2: "A manifest's producer `keys` array is the complete producer-key snapshot
+    /// effective from that manifest's entry index: it discards the prior snapshot; later `key`
+    /// statements then modify it in entry order until the next manifest version." So this is
+    /// *not* a union across manifest versions — a key a later manifest omits is gone, and a
+    /// signature by it no longer validates.
+    fn producer_keys_at(&self, index: u64) -> BTreeMap<String, BoundKey> {
         let mut keys = BTreeMap::new();
-        for event in self.events.iter().filter(|e| e.entry_index <= index) {
+        let Some((snapshot_index, manifest)) = self.snapshot_manifest(index) else {
+            return keys;
+        };
+        for (key_id, pubkey) in key_objects(manifest).unwrap_or_default() {
+            keys.insert(key_id, BoundKey { pubkey, bound_at: snapshot_index });
+        }
+        // Only transitions anchored after that snapshot and at or before `index` apply; an
+        // earlier `key` statement was already folded into (or discarded by) the snapshot.
+        for event in
+            self.events.iter().filter(|e| e.entry_index > snapshot_index && e.entry_index <= index)
+        {
             if event.added {
-                keys.insert(event.key_id.clone(), event.pubkey.clone());
+                keys.insert(
+                    event.key_id.clone(),
+                    BoundKey { pubkey: event.pubkey.clone(), bound_at: event.entry_index },
+                );
             } else {
                 keys.remove(&event.key_id);
             }
         }
         keys
+    }
+
+    /// `key_id -> pubkey` at `index`, for signature resolution.
+    fn producer_pubkeys_at(&self, index: u64) -> BTreeMap<String, String> {
+        self.producer_keys_at(index)
+            .into_iter()
+            .map(|(key_id, bound)| (key_id, bound.pubkey))
+            .collect()
     }
 
     /// The manifest version active for a checkpoint of size `tree_size` (format §2.2: the
@@ -577,9 +726,10 @@ fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance
                     _ => {}
                 }
                 previous_manifest_entry_id = Some(entry_id(envelope));
-                for (key_id, pubkey) in key_objects(payload)? {
-                    events.push(KeyEvent { entry_index: index, key_id, pubkey, added: true });
-                }
+                // The manifest's `keys` array is a *snapshot*, not a set of add events
+                // (spec §7.2). It is read at resolution time by `producer_keys_at`, which
+                // discards whatever the prior manifest declared.
+                key_objects(payload)?;
                 manifests.push((index, payload));
             }
             "key" => {
@@ -646,16 +796,17 @@ struct Anchoring {
     continued_history: bool,
 }
 
-/// Locate a key object in the manifest version claimed by `binding.entry_index` (§2.2).
-fn bind_key(
+/// Bind a log or witness key to a key object in the manifest version active for the checkpoint
+/// being verified (format §2.2). A key a later manifest replaced cannot validate that
+/// checkpoint, because `active_index` is fixed by the checkpoint's `tree_size`.
+fn bind_log_or_witness_key(
     governance: &Governance<'_>,
     entry: &Value,
     group: &str,
     active_index: u64,
 ) -> Result<String> {
     let key_id = text(entry, "key_id")?.to_owned();
-    let source = text(entry, "source")?;
-    if source == "local-policy" {
+    if text(entry, "source")? == "local-policy" {
         // Permitted only for witness keys the verifier already trusts (§2.2).
         return if group == "witness" {
             Ok(text(entry, "pubkey")?.to_owned())
@@ -677,16 +828,14 @@ fn bind_key(
             entry_index: binding_index,
         })?;
 
-    let declared: Vec<(String, String)> = match group {
-        "log" => key_objects(obj(manifest, "log")?)?,
-        "witness" => {
-            let mut all = Vec::new();
-            for witness in array(manifest, "witnesses")? {
-                all.extend(key_objects(witness)?);
-            }
-            all
+    let declared: Vec<(String, String)> = if group == "log" {
+        key_objects(obj(manifest, "log")?)?
+    } else {
+        let mut all = Vec::new();
+        for witness in array(manifest, "witnesses")? {
+            all.extend(key_objects(witness)?);
         }
-        _ => key_objects(manifest)?,
+        all
     };
     let pubkey = text(entry, "pubkey")?;
     declared
@@ -694,6 +843,32 @@ fn bind_key(
         .find(|(id, key)| id == &key_id && key == pubkey)
         .map(|(_, key)| key)
         .ok_or(ReceiptError::KeyNotBound { key_id, entry_index: binding_index })
+}
+
+/// Bind every producer key the receipt lists to the key set in force at the subject's entry
+/// index, under the §7.2 snapshot rule.
+///
+/// Format §2 calls the producer block "derived from governance chain; listed for convenience,
+/// verified against it" — so the check is against the derived set, not against a manifest key
+/// object directly. A key that a later manifest's snapshot dropped is absent from that set, so
+/// listing it here fails even though an older manifest once declared it.
+fn bind_producer_keys(
+    receipt: &Value,
+    governance: &Governance<'_>,
+    subject_index: u64,
+) -> Result<()> {
+    let in_force = governance.producer_keys_at(subject_index);
+    for entry in array(obj(receipt, "keys")?, "producer")? {
+        check_key_id(entry)?;
+        let key_id = text(entry, "key_id")?.to_owned();
+        let binding_index = number(obj(entry, "binding")?, "entry_index")?;
+        match in_force.get(&key_id) {
+            Some(bound)
+                if bound.pubkey == text(entry, "pubkey")? && bound.bound_at == binding_index => {}
+            _ => return Err(ReceiptError::KeyNotBound { key_id, entry_index: binding_index }),
+        }
+    }
+    Ok(())
 }
 
 /// Recompute a key id from its public key rather than trusting the carried value
@@ -710,15 +885,19 @@ fn check_key_id(entry: &Value) -> Result<()> {
 fn verify_checkpoint(
     receipt: &Value,
     governance: &Governance<'_>,
+    profile: &AdaptorProfile,
+    profile_id: &str,
     budget: &mut Budget,
 ) -> Result<Anchoring> {
     let anchoring = obj(receipt, "anchoring")?;
     let checkpoint = obj(anchoring, "checkpoint")?;
-    if checkpoint.get("raw").is_some() {
-        // The corpus adaptor profile defines no binary checkpoint framing (§5).
-        return Err(ReceiptError::AdaptorViolation(
-            "`anchoring.checkpoint.raw` is forbidden by adaptor profile ahl-test-log-v1",
-        ));
+    // Whether these are usable is a property of the pinned profile document, not of this
+    // verifier: `ahl-test-log-v1` defines neither, so receipts under it may carry neither.
+    if checkpoint.get("raw").is_some() && !profile.capabilities.checkpoint_raw {
+        return Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: profile_id.to_owned(),
+            capability: "a binary checkpoint framing for `anchoring.checkpoint.raw`",
+        });
     }
     let tree_size = number(checkpoint, "tree_size")?;
     let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
@@ -737,7 +916,7 @@ fn verify_checkpoint(
         check_key_id(entry)?;
         log_keys.insert(
             text(entry, "key_id")?.to_owned(),
-            bind_key(governance, entry, "log", active_index)?,
+            bind_log_or_witness_key(governance, entry, "log", active_index)?,
         );
     }
     let mut witness_keys = BTreeMap::new();
@@ -745,7 +924,7 @@ fn verify_checkpoint(
         check_key_id(entry)?;
         witness_keys.insert(
             text(entry, "key_id")?.to_owned(),
-            bind_key(governance, entry, "witness", active_index)?,
+            bind_log_or_witness_key(governance, entry, "witness", active_index)?,
         );
     }
 
@@ -783,11 +962,18 @@ fn verify_checkpoint(
     }
 
     // `continued_history` requires a later checkpoint plus a verifying consistency proof.
+    // A profile that defines no consistency-proof serialization cannot supply one, so the
+    // claim is unverifiable *under that profile* — reject rather than accept it unchecked.
     let continued_history = anchoring.get("later_checkpoint").is_some();
+    if continued_history && !profile.capabilities.consistency_proofs {
+        return Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: profile_id.to_owned(),
+            capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
+        });
+    }
     if continued_history {
-        // The corpus adaptor profile exercises no consistency proofs; a receipt claiming
-        // continued history under it cannot be checked, so it is rejected rather than accepted
-        // on the strength of an unverifiable field.
+        // A profile that does declare the capability still owes an actual verified proof;
+        // no such profile exists in this tranche, so nothing can reach acceptance here.
         return Err(ReceiptError::ConsistencyPathInvalid);
     }
 
@@ -961,15 +1147,17 @@ fn verify_nested(
     // --- §5 step 2: adaptor profile -------------------------------------------------
     let adaptor = obj(obj(receipt, "anchoring")?, "adaptor")?;
     let adaptor_id = text(adaptor, "id")?;
-    if policy.adaptor_profiles.get(adaptor_id).map(String::as_str) != Some(text(adaptor, "hash")?) {
-        return Err(ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() });
-    }
+    let profile = policy
+        .adaptor_profiles
+        .get(adaptor_id)
+        .filter(|profile| profile.hash == text(adaptor, "hash").unwrap_or_default())
+        .ok_or_else(|| ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() })?;
 
     // --- §5 step 4 (chain structure first: key binding depends on it) ---------------
     let governance = read_chain(receipt, policy)?;
 
     // --- §5 step 3: checkpoint, keys, cosignatures, inclusion -----------------------
-    let anchoring = verify_checkpoint(receipt, &governance, budget)?;
+    let anchoring = verify_checkpoint(receipt, &governance, profile, adaptor_id, budget)?;
     if subject_index >= anchoring.tree_size {
         return Err(ReceiptError::EntryIndexBeyondCheckpoint {
             entry_index: subject_index,
@@ -1002,6 +1190,9 @@ fn verify_nested(
         verify_envelope_at(hop_envelope, &governance, index, budget)?;
     }
     verify_envelope_at(envelope, &governance, subject_index, budget)?;
+    // Every producer key the receipt lists must be in force at the subject's entry index under
+    // the §7.2 snapshot rule, bound to the governance statement that put it there (§2.2).
+    bind_producer_keys(receipt, &governance, subject_index)?;
 
     // --- §2.1 / §4: governance currency ---------------------------------------------
     let claim = obj(receipt, "claim")?;
@@ -1051,6 +1242,7 @@ fn verify_nested(
         receipt,
         policy,
         governance: &governance,
+        anchoring_checkpoint: obj(obj(receipt, "anchoring")?, "checkpoint")?,
         payload,
         subject_index,
         claim_type: &claim_type,
@@ -1086,7 +1278,7 @@ fn verify_envelope_at(
     index: u64,
     budget: &mut Budget,
 ) -> Result<()> {
-    let keys = governance.producer_keys_at(index);
+    let keys = governance.producer_pubkeys_at(index);
     budget.spend(1)?;
     if crate::verify_envelope(envelope, |key_id| keys.get(key_id).cloned())? {
         Ok(())
@@ -1106,6 +1298,20 @@ fn verify_governance_enumeration(
     let material = obj(currency, "material")?;
     let enumeration =
         verify_enumeration(material, &anchoring.root, anchoring.tree_size, "governance", budget)?;
+
+    // Format §4: enumerated currency is an authenticated range over **exactly**
+    // `[0, tree_size(C))`, where C is the receipt's verified checkpoint. Anything narrower
+    // proves nothing about authority: a receipt that enumerated only `[0, 1)` could hide a
+    // later key retirement and validate a signature with a key the corpus had already retired.
+    // Claim types that name a checkpoint bind it field-exact to `anchoring.checkpoint` (§3),
+    // so `anchoring.tree_size` is `tree_size(C)` for every enumerated claim type.
+    if enumeration.from_index != 0 || enumeration.to_index != anchoring.tree_size {
+        return Err(ReceiptError::GovernanceRangeNotComplete {
+            got_from: enumeration.from_index,
+            got_to: enumeration.to_index,
+            tree_size: anchoring.tree_size,
+        });
+    }
 
     let presented: BTreeSet<u64> = governance.manifests.iter().map(|(index, _)| *index).collect();
     let mut presented_all = presented;
@@ -1175,6 +1381,9 @@ struct ClaimCtx<'a> {
     receipt: &'a Value,
     policy: &'a TrustPolicy,
     governance: &'a Governance<'a>,
+    /// The checkpoint this receipt already verified in §5 step 3 — signature, witness
+    /// cosignature and inclusion path. Claim checkpoints bind to it (§3).
+    anchoring_checkpoint: &'a Value,
     payload: &'a Value,
     subject_index: u64,
     claim_type: &'a str,
@@ -1374,10 +1583,17 @@ fn verify_embedded(
 ) -> Result<Embedded> {
     let embedded =
         ctx.material()?.get(slot).filter(|v| v.is_object()).ok_or_else(|| ctx.missing(slot))?;
-    // Duplicate embedded receipts are verified once and referenced thereafter (§3.1).
+    // Duplicate embedded receipts are verified once and referenced thereafter (§3.1). The
+    // cache is consulted before recursing, so a receipt that carries the same embedded receipt
+    // in two slots costs one verification, not two — a correctness rule with a DoS edge.
     let key = entry_id(obj(embedded, "envelope")?);
-    let verdict = verify_nested(embedded, ctx.policy, budget, ctx.depth + 1)?;
-    budget.seen.insert(key);
+    let verdict = if let Some(cached) = budget.verified.get(&key) {
+        cached.clone()
+    } else {
+        let verdict = verify_nested(embedded, ctx.policy, budget, ctx.depth + 1)?;
+        budget.verified.insert(key, verdict.clone());
+        verdict
+    };
 
     if !permitted.contains(&verdict.claim_type.as_str()) {
         return Err(ReceiptError::EmbeddedClaimTypeMismatch {
@@ -1457,9 +1673,92 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
     Scope::from_payload(ctx.payload)?;
 
     if kind == "trigger-effective" {
+        // "Effective" is exactly the authority claim: an unauthorized trigger is a challenge
+        // (spec §2.3.3) and can never be effective, however well anchored it is.
+        verify_trigger_authority(ctx, &introduction)?;
         verify_competing_triggers(ctx, introduction.entry_index, budget)?;
     } else if ctx.assurance.competing_triggers != "not-checked" {
         return Err(ReceiptError::AssuranceMismatch { field: "competing_triggers" });
+    }
+    Ok(())
+}
+
+/// Bind a claim-material checkpoint to the receipt's own verified `anchoring.checkpoint`.
+///
+/// Format §3: "`checkpoint_C` (and `propagation-complete`'s `corpus_checkpoint`) MUST equal,
+/// field-exact, the receipt's verified `anchoring.checkpoint`". Without this a receipt could
+/// fabricate a checkpoint — never signature-checked, never witnessed, never used for an
+/// inclusion proof — and ground a "governs" or "complete" claim on it. The three §2.3.4
+/// members must be present, and every member the carried object does declare must agree.
+fn bind_checkpoint(ctx: &ClaimCtx<'_>, carried: &Value, field: &'static str) -> Result<u64> {
+    let carried =
+        carried.as_object().ok_or_else(|| ReceiptError::Malformed(format!("`{field}` object")))?;
+    let verified = ctx
+        .anchoring_checkpoint
+        .as_object()
+        .ok_or_else(|| ReceiptError::Malformed("`anchoring.checkpoint` object".to_owned()))?;
+
+    for member in ["log_id", "tree_size", "root_hash"] {
+        if !carried.contains_key(member) {
+            return Err(ReceiptError::CheckpointNotBound { field, member: member.to_owned() });
+        }
+    }
+    for (member, value) in carried {
+        if verified.get(member) != Some(value) {
+            return Err(ReceiptError::CheckpointNotBound { field, member: member.clone() });
+        }
+    }
+    number(ctx.anchoring_checkpoint, "tree_size")
+}
+
+/// The key ids that signed the subject envelope.
+fn signing_key_ids(ctx: &ClaimCtx<'_>) -> Result<BTreeSet<String>> {
+    array(obj(ctx.receipt, "envelope")?, "signatures")?
+        .iter()
+        .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
+        .collect()
+}
+
+/// Spec §2.3.3: a trigger is effective only if signed by the record's authority — the dataset
+/// authority for ingested records, the producer of the introducing derivation for derived ones.
+/// Triggers from any other key anchor as **challenges**: surfaced, never traversed.
+fn verify_trigger_authority(ctx: &ClaimCtx<'_>, introduction: &Embedded) -> Result<()> {
+    let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
+    let authority: BTreeSet<String> = if introduction.verdict.claim_type == "record-ingested" {
+        let (_, manifest) =
+            ctx.governance.snapshot_manifest(ctx.subject_index).ok_or_else(|| {
+                ReceiptError::GovernanceChainInvalid("no manifest governs the trigger".to_owned())
+            })?;
+        // §7.2 declares the dataset authority; §1.2 defines it as a *key set*, so the corpus
+        // manifest carries it as `{producer, key_ids}` (see the adaptor profile note).
+        let declared = obj(obj(manifest, "datasets")?, dataset)?;
+        let authority = declared.get("authority").ok_or_else(|| {
+            ReceiptError::GovernanceChainInvalid(format!(
+                "dataset `{dataset}` declares no authority, so an ingestion into it is invalid \
+                 (spec §7.2)"
+            ))
+        })?;
+        array(authority, "key_ids")?
+            .iter()
+            .map(|id| {
+                id.as_str().map(str::to_owned).ok_or_else(|| {
+                    ReceiptError::Malformed("`authority.key_ids` element".to_owned())
+                })
+            })
+            .collect::<Result<_>>()?
+    } else {
+        // A derived record's authority is the producer of the introducing derivation; in the
+        // closed-corpus core that is the producer key set in force at the introduction.
+        ctx.governance.producer_keys_at(introduction.entry_index).into_keys().collect()
+    };
+
+    let signers = signing_key_ids(ctx)?;
+    if signers.is_disjoint(&authority) {
+        return Err(ReceiptError::TriggerNotAuthorized {
+            entry_index: ctx.subject_index,
+            record: record.clone(),
+            signed_by: signers.into_iter().collect::<Vec<_>>().join(", "),
+        });
     }
     Ok(())
 }
@@ -1475,9 +1774,10 @@ fn verify_competing_triggers(
         return Err(ReceiptError::AssuranceMismatch { field: "competing_triggers" });
     }
     let material = ctx.material()?;
-    let checkpoint_c = obj(material, "checkpoint_C")?;
-    let tree_size = number(checkpoint_c, "tree_size")?;
-    let root = parse_hash_hex(text(checkpoint_c, "root_hash")?)?;
+    // C must be the receipt's own verified checkpoint (§3), not a self-supplied one.
+    let tree_size =
+        bind_checkpoint(ctx, obj(material, "checkpoint_C")?, "claim_material.checkpoint_C")?;
+    let root = parse_hash_hex(text(ctx.anchoring_checkpoint, "root_hash")?)?;
     let competing = obj(material, "competing")?;
     let range_material = obj(competing, "corpus_range")?;
 
@@ -1581,6 +1881,10 @@ fn verify_disposition(
 }
 
 /// `propagation-complete` (§3): the anchored affected set equals the recomputable closure.
+// The completeness claim has the longest precondition list in the registry — checkpoint
+// binding, prefix enumeration, tree material, trigger effectiveness, closure — and each step
+// consumes the previous one's output; splitting it would only scatter that chain.
+#[allow(clippy::too_many_lines)]
 fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
     ctx.require_subject_type("propagation")?;
     if ctx.assurance.governance != "enumerated" {
@@ -1592,9 +1896,27 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
         .filter(|v| v.is_object())
         .ok_or_else(|| ctx.missing("corpus_prefix"))?;
 
-    let checkpoint = obj(ctx.payload, "corpus_checkpoint")?;
-    let tree_size = number(checkpoint, "tree_size")?;
-    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
+    // C must be the receipt's own verified checkpoint (§3), not a self-supplied one.
+    let tree_size = bind_checkpoint(
+        ctx,
+        material.get("corpus_checkpoint").ok_or_else(|| ctx.missing("corpus_checkpoint"))?,
+        "claim_material.corpus_checkpoint",
+    )?;
+    let root = parse_hash_hex(text(ctx.anchoring_checkpoint, "root_hash")?)?;
+
+    // The statement's own declared checkpoint (spec §2.3.4) must commit the trigger and must
+    // not reach past C. Recomputing at C rather than at the declared checkpoint is sound — and
+    // strictly stronger — because post-trigger consumption is prohibited, so the closure is
+    // stable across every checkpoint committing the trigger (spec §2.3.4, §5.2).
+    let declared = obj(ctx.payload, "corpus_checkpoint")?;
+    let declared_size = number(declared, "tree_size")?;
+    if declared_size > tree_size {
+        return Err(ReceiptError::CheckpointNotBound {
+            field: "envelope.payload.corpus_checkpoint",
+            member: "tree_size".to_owned(),
+        });
+    }
+
     let prefix = verify_enumeration(prefix_material, &root, tree_size, "corpus prefix", budget)?;
     if prefix.from_index != 0 || prefix.to_index != tree_size {
         return Err(ReceiptError::RangeProofInvalid {
@@ -1631,17 +1953,46 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
         detail: source.to_string(),
     })?;
 
-    // Locate the trigger inside the enumerated prefix and recompute the closure.
-    let trigger_statement = text(ctx.payload, "trigger")?;
-    let trigger_index = prefix
-        .entries
-        .iter()
-        .position(|envelope| statement_id(envelope).ok().as_deref() == Some(trigger_statement))
-        .ok_or_else(|| {
-            ReceiptError::ClosureMismatch(
-                "the corpus prefix does not contain the trigger the propagation names".to_owned(),
-            )
-        })?;
+    // §3: an embedded `trigger-effective` receipt is REQUIRED — challenges are never traversed.
+    // Locating "some statement with that id" is not enough: a trigger signed by a key that is
+    // not the record's authority anchors as a challenge (spec §2.3.3), and a closure seeded
+    // from one would be meaningless. Only a receipt that survived the authority and
+    // competing-trigger checks establishes that this trigger governs.
+    let trigger_statement = text(ctx.payload, "trigger")?.to_owned();
+    let trigger =
+        verify_embedded(ctx, "trigger", "trigger-effective", &["trigger-effective"], budget)?;
+    if trigger.verdict.subject_statement_id != trigger_statement {
+        return Err(ReceiptError::EmbeddedSubjectMismatch {
+            what: "trigger",
+            got: trigger.verdict.subject_statement_id,
+            want: trigger_statement,
+        });
+    }
+    // §2.3: trigger index ≤ propagation index.
+    if trigger.entry_index > ctx.subject_index {
+        return Err(ReceiptError::EmbeddedOrderingViolation {
+            what: "trigger",
+            inner: trigger.entry_index,
+            outer: ctx.subject_index,
+        });
+    }
+    // The declared checkpoint must commit the trigger's entry (spec §2.3.4).
+    if declared_size <= trigger.entry_index {
+        return Err(ReceiptError::CheckpointNotBound {
+            field: "envelope.payload.corpus_checkpoint",
+            member: "tree_size".to_owned(),
+        });
+    }
+
+    let trigger_index = usize::try_from(trigger.entry_index)
+        .map_err(|_| ReceiptError::Malformed("trigger entry index".to_owned()))?;
+    if prefix.entries.get(trigger_index).and_then(|e| statement_id(e).ok()).as_deref()
+        != Some(trigger_statement.as_str())
+    {
+        return Err(ReceiptError::ClosureMismatch(
+            "the corpus prefix does not carry the proven trigger at its own entry index".to_owned(),
+        ));
+    }
 
     budget.spend(u64::try_from(prefix.entries.len()).unwrap_or(u64::MAX))?;
     let closure = affected_set(&prefix.entries, &trees, trigger_index, prefix.entries.len())
@@ -1682,12 +2033,24 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
 }
 
 /// `governance-state` (§3): the manifest/key state at a target index is exactly the chain.
+///
+/// The subject is a **manifest** statement; key state is composed from that manifest plus
+/// later `key` statements, so a `key` statement is never a `governance-state` subject.
+///
+/// Range composition. This claim type carries no schema-local range: its `claim_material` is
+/// only `{target_index}`, so the top-level §4 material *is* the absence proof. §4 fixes that
+/// material at exactly `[0, tree_size(C))` for the receipt's verified checkpoint C, which is
+/// checked once for every enumerated receipt in [`verify_governance_enumeration`]. What
+/// remains type-specific is that the range must actually *reach* the target: `target_index`
+/// must be committed by C, i.e. `target_index < tree_size(C)`. Otherwise a receipt could
+/// enumerate a short prefix and assert a governance state at an index that prefix never
+/// covered.
 fn verify_governance_state(ctx: &ClaimCtx<'_>) -> Result<()> {
     let subject_type = statement_type(ctx.payload)?;
-    if !matches!(subject_type, "manifest" | "key") {
-        return Err(ReceiptError::Malformed(format!(
-            "`governance-state` requires a manifest or key subject, got `{subject_type}`"
-        )));
+    if subject_type != "manifest" {
+        return Err(ReceiptError::GovernanceSubjectNotManifest {
+            statement_type: subject_type.to_owned(),
+        });
     }
     if ctx.assurance.governance != "enumerated" {
         return Err(ReceiptError::AssuranceMismatch { field: "governance" });
@@ -1702,17 +2065,16 @@ fn verify_governance_state(ctx: &ClaimCtx<'_>) -> Result<()> {
     }
     let enumeration = ctx.enumeration.ok_or_else(|| ctx.missing("governance.currency.material"))?;
 
-    // The §4 material must cover exactly `(subject.entry_index, target_index]`.
-    if enumeration.from_index != ctx.subject_index + 1 || enumeration.to_index != target_index + 1 {
-        return Err(ReceiptError::RangeProofInvalid {
-            what: "governance state range",
-            detail: format!(
-                "must cover ({}, {target_index}], got [{}, {})",
-                ctx.subject_index, enumeration.from_index, enumeration.to_index
-            ),
+    // The enumeration is already pinned to `[0, tree_size(C))`; it must cover the target.
+    if target_index >= enumeration.to_index {
+        return Err(ReceiptError::GovernanceRangeNotComplete {
+            got_from: enumeration.from_index,
+            got_to: enumeration.to_index,
+            tree_size: target_index + 1,
         });
     }
-    for index in enumeration.from_index..enumeration.to_index {
+    // Absence of any governance statement in `(subject.entry_index, target_index]`.
+    for index in (ctx.subject_index + 1)..=target_index {
         let Some(envelope) = enumeration.at(index) else { continue };
         let kind = statement_type(payload_of(envelope)?)?;
         if matches!(kind, "manifest" | "key") {

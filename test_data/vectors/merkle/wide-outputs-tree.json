@@ -1,0 +1,47 @@
+{
+  "adaptor": {
+    "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e",
+    "id": "ahl-test-log-v1"
+  },
+  "description": "Batch derivation output tree of entry 10 (core spec §2.5). Each `ahl-leaf-v2` leaf commits its input set by ROOT rather than inline, so the leaf's `inputs` is the wide-input form and the input-set tree below is a second committed tree. Receipt format §3's `input_members` applies exactly to this shape.",
+  "inclusion": {
+    "leaf": {
+      "dataset": "scores",
+      "inputs": {
+        "input_set_count": 3,
+        "input_set_root": "sha256:ac95e675b5a251efc76a680ac548446904ac7d1afc786488ed63d82d9b9f1047"
+      },
+      "record": "sha256:2fa4f863cc3d704bd6db36bcb152e8fbbc3773cc36f5594074cecd9c016916b0"
+    },
+    "leaf_index": 0,
+    "path": [
+      "sha256:76de046486d2d0c029dcd857ddaaf990ddb379c36857bd2f6b25fed26b604316"
+    ],
+    "root": "sha256:4ebd25e67e0f7081ddead5808219a1d74e220ce579e66b810fce5477e7fbe48e",
+    "tree_size": 2
+  },
+  "leaf_format": "ahl-leaf-v2",
+  "leaf_rule": "sha256(0x00 || JCS(leaf))",
+  "leaves": [
+    {
+      "dataset": "scores",
+      "inputs": {
+        "input_set_count": 3,
+        "input_set_root": "sha256:ac95e675b5a251efc76a680ac548446904ac7d1afc786488ed63d82d9b9f1047"
+      },
+      "record": "sha256:2fa4f863cc3d704bd6db36bcb152e8fbbc3773cc36f5594074cecd9c016916b0"
+    },
+    {
+      "dataset": "scores",
+      "inputs": {
+        "input_set_count": 3,
+        "input_set_root": "sha256:ac95e675b5a251efc76a680ac548446904ac7d1afc786488ed63d82d9b9f1047"
+      },
+      "record": "sha256:5929597d694c6d57301d1d81edac6047f0676abc36fc7560d6ce0b74e5bd777c"
+    }
+  ],
+  "node_rule": "sha256(0x01 || left || right)",
+  "outputs_count": 2,
+  "outputs_root": "sha256:4ebd25e67e0f7081ddead5808219a1d74e220ce579e66b810fce5477e7fbe48e",
+  "sort_rule": "leaves sorted ascending by the UTF-8 bytes of the canonical `record` commitment string; non-canonical strings and duplicates are rejected (core spec §2.5)"
+}

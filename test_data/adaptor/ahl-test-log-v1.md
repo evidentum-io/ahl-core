@@ -63,7 +63,12 @@ This profile does not restrict such trees; it only fixes the ordering so two imp
 agree. `test_data/vectors/merkle/input-set-tree.json` is such a mixed tree.
 
 Batch output leaves use `leaf_format` `ahl-leaf-v2` (core spec §2.5):
-`{ "dataset", "record", "inputs": [ full derivation input objects ] }`.
+`{ "dataset", "record", "inputs": [ full derivation input objects ] }`. A leaf's `inputs` MAY
+instead be the wide-input form `{ "input_set_root", "input_set_count" }` (core spec §2.5), in
+which case the leaf commits its input set by root and the input-set tree is a second committed
+tree that must be published under §3.5. Receipt format §3 depends on this composition:
+`record-derived`'s `input_members` "applies ONLY when `batch_leaf.inputs` is the input-set
+form". The batch at entry 10 of the corpus is exactly that shape.
 
 Input-set leaves are full derivation input objects (core spec §2.3.2), carrying at least
 `dataset` and `record`.
@@ -92,6 +97,10 @@ the sibling member that carries it:
 | `governance.chain[].inclusion_path` | `governance.chain[].entry_index` | `anchoring.checkpoint.tree_size` |
 | `claim_material.leaf_path` | `claim_material.leaf_index` | `outputs_count` / `affected_count` of the subject payload |
 | `claim_material.input_members[].input_path` | `claim_material.input_members[].input_index` | `input_set_count` of the leaf's `inputs` |
+
+Receipt format §3 has since ratified `leaf_index` and `input_index` as members of the
+`record-derived` schema itself; the table above is retained because it also covers
+`disposition-declared`/`disposition-effective`, whose `leaf_path` opens `affected_root`.
 
 Verification is the standard RFC 6962 recomputation of the root from the leaf hash and the
 path, compared against the anchored root.
@@ -122,8 +131,29 @@ statement. Consequently:
 - **entry id** = `"sha256:" || hex(SHA-256(JCS(envelope)))`
 
 A non-genesis `manifest` statement references its predecessor manifest by **entry id** in the
-member `predecessor` (core spec §2.3.5 requires the reference and fixes it as an entry id, but
-does not name the member; this profile names it).
+member `predecessor` (core spec §2.3.5, which now names the member and makes it REQUIRED for
+non-genesis manifests and forbidden for the genesis manifest).
+
+### 4.1 Dataset authority
+
+Core spec §1.2 defines the dataset authority as "the key set entitled to issue triggers for
+the dataset's ingested records", and §7.2 requires the manifest to declare it without fixing
+its shape. Under this profile it is an object:
+
+```json
+"authority": { "producer": "<producer id>", "key_ids": [ "sha256:<hex>", ... ] }
+```
+
+A trigger for an ingested record of that dataset is **effective** only if at least one of its
+signatures is by a key id in `key_ids` (core spec §2.3.3). A trigger signed by any other key —
+including another valid key of the same producer — anchors as a **challenge**: it is surfaced
+by verification and never traversed by closure. `test_data/vectors/statements/21-*.json` is
+such a challenge, and the receipt vector `propagation-complete-challenge-trigger-must-fail.ahl`
+shows a completeness claim over it being rejected.
+
+For a *derived* record the authority is the producer of the introducing derivation (core spec
+§2.3.3); in the closed-corpus core that is the producer key set in force at the introduction's
+entry index, so this profile adds nothing.
 
 ## 5. Checkpoints
 
@@ -190,12 +220,25 @@ Checking refusal evidence:
 4. treat a verified refusal as evidence of log equivocation, not as a verdict about any
    particular statement (core spec §3.3 claim discipline).
 
-## 7. Consistency proofs
+## 7. Capabilities this profile does NOT define
 
-Not exercised by this tranche. Receipts under this profile therefore carry
-`assurance.continued_history: false` and omit `anchoring.later_checkpoint` and
-`anchoring.consistency_path`; a receipt that carries `later_checkpoint` under this profile
-MUST be rejected, because nothing in this profile can validate it.
+Core spec §3 item 6 forbids verification from depending on knowledge outside the profile
+document, so the absence of a definition here is a **property of this profile**, not of the
+container format or of any verifier. Two capabilities the format allows are deliberately
+undefined in this revision:
+
+| capability | status under `ahl-test-log-v1` | consequence |
+| --- | --- | --- |
+| binary checkpoint framing (`anchoring.checkpoint.raw`) | **not defined** | a receipt carrying `raw` under this profile MUST be rejected — there is no framing to parse it against, so the §5-step-2 "parses to the same values" check cannot be performed |
+| consistency-proof serialization (`anchoring.later_checkpoint` + `consistency_path`) | **not defined** | a receipt claiming `assurance.continued_history: true` under this profile MUST be rejected; receipts under it carry `continued_history: false` and omit both members |
+
+A conformant verifier reports these as limitations of the pinned profile, naming it — another
+profile that defined either capability would make the same receipt verifiable without any
+change to the verifier. Both are candidates for a future revision of this document, which
+would carry a new profile hash and therefore a new manifest version.
+
+Consistency proofs between checkpoints are otherwise a core-spec §3 contract item; nothing
+here weakens that requirement for production adaptors.
 
 ## 8. Authenticated enumeration
 

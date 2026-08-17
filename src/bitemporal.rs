@@ -209,6 +209,60 @@ mod tests {
     }
 
     #[test]
+    fn unparseable_timestamps_name_their_field() {
+        assert!(matches!(
+            parse_rfc3339("valid_time", "not a time"),
+            Err(AhlError::Timestamp { ref field, .. }) if field == "valid_time"
+        ));
+        assert!(matches!(
+            ValidTime::from_payload(&json!({ "valid_time": "2026-13-45" })),
+            Err(AhlError::Timestamp { .. })
+        ));
+        assert!(matches!(
+            ValidTime::from_payload(&json!({ "valid_time": { "from": "x", "to": null } })),
+            Err(AhlError::Timestamp { .. })
+        ));
+        assert!(matches!(
+            ValidTime::from_payload(&json!({
+                "valid_time": { "from": "2026-08-16T12:00:00Z", "to": "nope" }
+            })),
+            Err(AhlError::Timestamp { ref field, .. }) if field == "valid_time.to"
+        ));
+        assert!(matches!(
+            Scope::from_payload(
+                &json!({ "scope": { "effective_from": "x", "retroactive": true } })
+            ),
+            Err(AhlError::Timestamp { .. })
+        ));
+    }
+
+    #[test]
+    fn ill_shaped_valid_times_are_rejected() {
+        // Absent, wrong JSON type, missing bound, and an absent (rather than null) upper bound.
+        for payload in [
+            json!({}),
+            json!({ "valid_time": 42 }),
+            json!({ "valid_time": { "to": null } }),
+            json!({ "valid_time": { "from": "2026-08-16T12:00:00Z" } }),
+            json!({ "valid_time": { "from": "2026-08-16T12:00:00Z", "to": 7 } }),
+        ] {
+            assert!(matches!(ValidTime::from_payload(&payload), Err(AhlError::Field(_))));
+        }
+    }
+
+    #[test]
+    fn ill_shaped_scopes_are_rejected() {
+        for payload in [
+            json!({ "scope": {} }),
+            json!({ "scope": { "effective_from": "2026-08-16T12:00:00Z" } }),
+            json!({ "scope": { "retroactive": true } }),
+            json!({ "scope": { "effective_from": "2026-08-16T12:00:00Z", "retroactive": "yes" } }),
+        ] {
+            assert!(matches!(Scope::from_payload(&payload), Err(AhlError::Field(_))));
+        }
+    }
+
+    #[test]
     fn a_scopeless_trigger_is_rejected_not_defaulted() {
         assert!(matches!(
             Scope::from_payload(&json!({ "type": "retraction" })),

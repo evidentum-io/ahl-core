@@ -181,10 +181,14 @@ pub fn edges(
 
 /// The closure seeds of the trigger anchored at `trigger_index` (spec §5.1).
 ///
-/// Always contains the trigger's own record. For a trigger on `X`, it additionally contains the
-/// replacement of every *earlier* correction that also named `X` — those replacements are
-/// superseded by this trigger, and records derived from them must not escape. The trigger's own
-/// replacement is never a seed.
+/// A **retraction** on `(ds, X)` seeds exactly `{(ds, X)}` — never a superseded replacement.
+/// Retracting `X` asserts nothing about a record `X'` that an earlier correction introduced in
+/// its place: `X'` is a separately introduced record with its own history, and reaching its
+/// consumers through a retraction of `X` would invalidate work the retraction never spoke about.
+///
+/// A **correction** on `(ds, X)` seeds `X` plus the replacement of every *earlier* correction
+/// that also named `X` — those replacements are superseded by this one, so records derived from
+/// them must not escape the closure. A correction never seeds its own replacement.
 ///
 /// # Errors
 ///
@@ -195,16 +199,24 @@ pub fn trigger_seeds(envelopes: &[Value], trigger_index: usize) -> AhlResult<BTr
         .get(trigger_index)
         .and_then(payload_of)
         .ok_or_else(|| AhlError::Field(format!("envelope at entry index {trigger_index}")))?;
-    match statement_type(payload) {
-        Some("retraction" | "correction") => {}
-        _ => return Err(AhlError::Field(format!("trigger type at entry index {trigger_index}"))),
-    }
+    let Some(kind @ ("retraction" | "correction")) = statement_type(payload) else {
+        return Err(AhlError::Field(format!("trigger type at entry index {trigger_index}")));
+    };
 
     let dataset = field_str(payload, "dataset")?;
     let record = field_str(payload, "record")?;
     let own_replacement = payload.get("replacement").and_then(Value::as_str);
 
     let mut seeds = BTreeSet::from([(dataset.to_owned(), record.to_owned())]);
+
+    // Spec §5.1: "For a retraction on (ds, X), the seed set is exactly {(ds, X)} — retractions
+    // never seed superseded replacements." A retraction of X says nothing about a record X'
+    // that an earlier correction produced: X' is a different record, separately introduced,
+    // and its consumers are not within this trigger's reach.
+    if kind == "retraction" {
+        return Ok(seeds);
+    }
+
     for earlier in envelopes.iter().take(trigger_index).filter_map(payload_of) {
         if statement_type(earlier) != Some("correction") {
             continue;
@@ -389,6 +401,31 @@ mod tests {
     }
 
     #[test]
+    fn a_retraction_seeds_exactly_its_own_record() {
+        // Spec §5.1: retractions never seed superseded replacements, however many corrections
+        // of the same original precede them.
+        let log = vec![correction("x", "xold"), correction("x", "xmid"), retraction("x", T0, true)];
+        assert_eq!(trigger_seeds(&log, 2).expect("trigger"), refs(&["x"]));
+    }
+
+    #[test]
+    fn a_retraction_after_a_correction_does_not_reach_the_replacement_consumers() {
+        let log = vec![
+            correction("x", "xnew"),     // 0: x was corrected to xnew
+            derivation("s1", &["x"]),    // 1: consumed the original
+            derivation("s2", &["xnew"]), // 2: consumed the replacement
+            retraction("x", T0, true),   // 3: the ORIGINAL is now retracted outright
+        ];
+        let closure = affected_set(&log, &TreeMaterial::new(), 3, log.len()).expect("corpus");
+        assert_eq!(closure.seeds, refs(&["x"]));
+        assert_eq!(
+            closure.affected,
+            refs(&["s1"]),
+            "retracting x says nothing about xnew, so s2 stays out of the affected set"
+        );
+    }
+
+    #[test]
     fn seeds_are_not_members_of_the_affected_set() {
         let log = vec![correction("x", "xold"), correction("x", "xnew")];
         let closure = affected_set(&log, &TreeMaterial::new(), 1, log.len()).expect("corpus");
@@ -533,6 +570,38 @@ mod tests {
             affected_set(&log, &TreeMaterial::new(), 1, log.len()),
             Err(AhlError::MissingTreeMaterial(_))
         ));
+    }
+
+    #[test]
+    fn entries_without_a_payload_are_skipped_rather_than_failing() {
+        let log = vec![
+            json!({ "not_an_envelope": true }),
+            derivation("r1", &["r0"]),
+            retraction("r0", T0, true),
+        ];
+        let closure = affected_set(&log, &TreeMaterial::new(), 2, log.len()).expect("corpus");
+        assert_eq!(closure.affected, refs(&["r1"]));
+    }
+
+    #[test]
+    fn malformed_derivations_are_reported_by_field() {
+        let log = vec![
+            json!({ "payload": { "type": "derivation", "valid_time": T0, "outputs": [] } }),
+            retraction("r0", T0, true),
+        ];
+        assert!(matches!(edges(&log, &TreeMaterial::new(), 2), Err(AhlError::Field(_))));
+
+        let missing_outputs =
+            vec![json!({ "payload": { "type": "derivation", "valid_time": T0, "inputs": [] } })];
+        assert!(matches!(
+            edges(&missing_outputs, &TreeMaterial::new(), 1),
+            Err(AhlError::Field(_))
+        ));
+
+        let missing_count = vec![json!({
+            "payload": { "type": "derivation", "valid_time": T0, "outputs_root": commitment(1) }
+        })];
+        assert!(matches!(edges(&missing_count, &TreeMaterial::new(), 1), Err(AhlError::Field(_))));
     }
 
     #[test]

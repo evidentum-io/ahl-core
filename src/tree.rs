@@ -132,6 +132,23 @@ mod tests {
     }
 
     #[test]
+    fn a_validated_leaf_set_remembers_the_root_it_opens() {
+        let leaves = good();
+        let root = root_of(&leaves);
+        let set = ValidatedLeafSet::open(&root, 3, leaves).expect("valid material");
+        assert_eq!(set.root(), root);
+    }
+
+    #[test]
+    fn a_leaf_without_a_record_is_rejected() {
+        let leaves = vec![json!({ "dataset": "d" })];
+        assert!(matches!(
+            ValidatedLeafSet::open(&root_of(&leaves), 1, leaves),
+            Err(AhlError::Field(_))
+        ));
+    }
+
+    #[test]
     fn a_missing_leaf_is_rejected_by_the_count_before_the_root() {
         let leaves = good();
         let root = root_of(&leaves);

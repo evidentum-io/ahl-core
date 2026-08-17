@@ -1,14 +1,18 @@
 {
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:203add746b5eb8f99f7c8f5a879e0041d69323305573b67f1e37542f76630344",
+    "root_hash": "sha256:70e93ebd471886da34b0a9a7ee19bc3df17400ae28b5e775c78739426bdd4787",
     "tree_size": 13
   },
-  "description": "Revocation closure `supersession-chain` over the 20-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
+  "description": "Revocation closure `supersession-chain` over the 25-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",
       "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
+    },
+    {
+      "dataset": "scores",
+      "record": "sha256:2fa4f863cc3d704bd6db36bcb152e8fbbc3773cc36f5594074cecd9c016916b0"
     },
     {
       "dataset": "scores",
@@ -41,7 +45,7 @@
       "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510"
     }
   ],
-  "note": "The correction at entry 12 supersedes the correction at entry 6, which had replaced A with A2. Core spec §5.1: the later correction's seeds are the original A *and every prior superseded replacement*, here A2 — but never its own replacement A3 (hmac-sha256:72f6f4c6c0a09ac7610d6ce218218c3e8623a8b2bb502f41821d99af2ab82670). Seeding A2 is what pulls in S1' (entry 7) and W (entry 10); seeding only A would silently leave both outside the affected set, and seeding A3 would be wrong in the other direction. W is reached through the input-set tree of entry 10, so the closure is only computable by a verifier holding the committed leaf material (§3.5).",
+  "note": "The correction at entry 12 supersedes the correction at entry 6, which had replaced A with A2. Core spec §5.1: the later correction's seeds are the original A *and every prior superseded replacement*, here A2 — but never its own replacement A3 (hmac-sha256:72f6f4c6c0a09ac7610d6ce218218c3e8623a8b2bb502f41821d99af2ab82670). Seeding A2 is what pulls in S1' (entry 7) and W (entry 10); seeding only A would silently leave both outside the affected set, and seeding A3 would be wrong in the other direction. W1 and W2 are reached only through *two* committed trees — the outputs tree of the batch at entry 10 and the input-set tree its leaves commit — so this closure is computable solely by a verifier holding the published leaf material (§3.5).",
   "trigger": {
     "dataset": "customers",
     "entry_index": 12,
@@ -51,7 +55,7 @@
       "effective_from": "2026-08-16T12:00:00Z",
       "retroactive": true
     },
-    "statement_id": "sha256:5ebc60a140ca819f150a7191c7751ca14ee1b6a4da619a33f8f0c4436dcb0542",
+    "statement_id": "sha256:6f6bd36120a64ce5e91e08b557e2bc0a151add3ff5e1eaecabdc1a5e55177719",
     "type": "correction"
   }
 }
