@@ -35,3 +35,10 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# `syn` resolves to both 2.x and 3.x: `serde_derive` has moved to syn 3, while `thiserror` 1.x
+# still uses syn 2 — and `thiserror` 1.x arrives both directly and through `atl-core`, which is
+# a read-only sibling pinned by revision. Nothing in this crate can reconcile that, so the lint
+# is allowed here, visibly, rather than left as a standing CI failure. Revisit when the pinned
+# `atl-core` revision moves to `thiserror` 2.
+multiple_crate_versions = "allow"
