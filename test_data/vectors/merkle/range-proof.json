@@ -1,61 +1,64 @@
 {
   "adaptor": {
-    "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e",
+    "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa",
     "id": "ahl-test-log-v1"
   },
   "cases": [
     {
-      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABkAAAAAAAAAAAAAAAAAAAAZAAAAAA==",
+      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAAAAAAAAAAAAAcAAAAAA==",
       "entry_ids": [
-        "sha256:8e65b4c7491243ed79690156de5967342d1b10f0691a3329fbb5231ff6cb058a",
-        "sha256:6c9df4726a20afdd6a2aca161ba6f09d63953592eb58fb42c8e6abb82da1f4c8",
-        "sha256:93ce8ad274e7bdb74d6d0c3c971950878385778bcfcfc720b00f4587246a7ec5",
-        "sha256:b13e01004b14e3a0f465e5707ff9ff9a29f801cf5d0e6b383bede33733bb7777",
-        "sha256:195676ba52ad3096ee0b6ea4ee7bc1035cad54c30cbb73187a0bbb051ef674e5",
-        "sha256:18e149adf5ba73643150c4fb5e1a422bf70d3f1dd9ca1e6adbf0ece1e8787afc",
-        "sha256:85309c449cbba78e0eb0d9542af20c8952db736985a377fc8402eee41afc16ce",
-        "sha256:9a038a76d167941acda6489916c2fef5c72affd48d620dc68e65e03dba39256e",
-        "sha256:d113cc8a816dc02b3a13839f4323d185d3088b1310f77b102da3372fd64f8f5d",
-        "sha256:83d78dead4d16e3e4a5815cc6f06dd66085be512f655ad6766d0c4af58522bc4",
-        "sha256:20a4ecd5bea5d1eb5af1b455be19b1d186475eada7a3d3ac1744e2cfb31912d1",
-        "sha256:6c50b1fe067d7b626bc07da33e8d2f11c70a2e2ebc2b5b763f18de80025fd55c",
-        "sha256:88145f26a5c03d5a216bcbf5b0f809ff936d366111313c45201060d3823cd518",
-        "sha256:26740629734f9e048284751e1ba70d677f79cb09f8b9049ce825d32a5a3456f7",
-        "sha256:f24868cd12a076c95f4915c7cdb6659df1eb214e3b23c45a500261e1f9bb36b8",
-        "sha256:8da5d1ed982f01e3fdb3c85b31d0e14e8247d4a750dbe38f819174948a5a9581",
-        "sha256:741e175cc23fe513d5239b92214defb072837ca1bb167363ab2d95655e741428",
-        "sha256:bfb7e2fda98d34bb1e22309a7fba4226b104b539a9ff2b4c990de301e267580a",
-        "sha256:b0845b812ee632b20f997287e9166c1594c6042a1897cea6662f5a16cd256e42",
-        "sha256:7b3d59c7029f8007d6b8802e37fac2a30e5ec689f55bea387df600d8abd6a373",
-        "sha256:5dabbb4070ffd0ede327abf94631112b9e78e99a147ac6976fb37450185072a3",
-        "sha256:97ce31f47cfb27f9c272fcb0eb4a1cb89cbe673a9d527cfb0f98ea5c6c507b9b",
-        "sha256:36ee6ba2c5c558e454a5b438ad3e11a4815c4bf2ec61a6a74f2d8809c16b0c93",
-        "sha256:46ec5575423fcfda584dc07eb2f18f9ec082edccda6c105b4960f7af1d5db0bb",
-        "sha256:c39a81ad1687543cbfa847486f0b7a7539b24199b192d21bdfc8178912580976"
+        "sha256:be129d9d262de65c47eaad8d978ef54e87d5e1388182df53e036102816210a49",
+        "sha256:1c261e46b147202dbc2db0aceb5c5422d3c1f48c74b1f11fa9e84d838ba7b857",
+        "sha256:9f5d496e704252dbf6b6237457ba0173bba23591fd8957a8d229daa6e98ee88e",
+        "sha256:cdc46f74aed33c582a66148979641450db7d13977be5f6562f0fbc279b92ef04",
+        "sha256:165c94289ebc6ee9c1f839713e650baf210456561ab926674df87ed84c274bd8",
+        "sha256:ddfb641b323a1bbc12efb7a9dd95e06a31034cdac3559cd7bfb40f3eb8a9dcd3",
+        "sha256:4ba0feb09d3fee32515788224a5fc03bed14033adbf1178faef919f5d1630803",
+        "sha256:15bc064cd965d8e6063452db355db156dcc76900c9128e53605db7f10a4920b5",
+        "sha256:f17f25df50911a172e10407544895536c055d21164dcad14941d1aaca5256a7e",
+        "sha256:2560abc5576f1a64adb236674854c308b87c9899193bf47c339126b38cec2125",
+        "sha256:1b6a31908195534f1ee35059615e9c4d4c6f18d230580ad213245c7e5e802389",
+        "sha256:18d0dd72f725f342f147b213e1badd69ddb0eb10dd0e10be385e11383ddc8bc2",
+        "sha256:fa08c7fdce895e5bc760b878441602f3588d587fc951f29b8a57e96719900cfa",
+        "sha256:184f3c071c8999a54c64f27b4719a78d352554db4a85096489a5c0f5872dd536",
+        "sha256:144cd766850d0ddcba25ef1b822bffd974eccf939d330475fec7926561c19645",
+        "sha256:c06722279778ef175aeaa65d73f7ba7d588341c6ad940853eb6f70be7ef4091a",
+        "sha256:ec8b88ab07168045b27013930d8877111f7054d67d1d2825bdb6c243dea337ba",
+        "sha256:d06b756657fa21cf1b9e608e964c6436f0e3f7ffdbf052575219d7b1963b3c24",
+        "sha256:5ba5e8945157579e65bd35c16f74565c2249b13b8a9f260292302e9bfb29460a",
+        "sha256:d170b467ee908cf801ae349d18cceaae1c506d60da2695f2bbe23a2ea4caed17",
+        "sha256:c51cced033c06a03424d01349270439d66b438c678224bd8e8a8e6d1e7d21310",
+        "sha256:baff0e56d6225d44a8fd2bdd1dd2550d27ee346a05092626db82fd2caf1dd8a2",
+        "sha256:fc6abeaf538fb23bccd38874682cf03b60acf3e6d98bcab841ae189f2bcaf5a6",
+        "sha256:df5c860ea71c6777de2437cf7556756f6404f7282b65f5933ec01ce3540cb362",
+        "sha256:be6b72857329e52ddc2a30469d3e5c64f2e87e4989e8261dd97e95bfc1bc43c1",
+        "sha256:e7f043099a538a08ea588d7e19c5684e50901208b3033cb3ca149e0416f772ba",
+        "sha256:694dea42f11eb0fcc8439954d01b20ebf852f18b445580c2496e1cd362efb68d",
+        "sha256:cf6a0dc7958cbac8d97125c065c73527d2e425658947119066b4525200f61e80"
       ],
       "node_count": 0,
       "nodes": [],
       "note": "the complete corpus prefix — carries no subtree hashes at all",
       "range": {
         "from_index": 0,
-        "to_index": 25
+        "to_index": 28
       }
     },
     {
-      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABkAAAAAAAAAAwAAAAAAAAAHAAAABXyS5FVX44R5ZdejF7X+gnzLdgR2sBLUztNczVCR5McszLvhZS+l6r6Q0mi7aVPseJFwR9I0mI5AgNmPUy//+X8eicLA9wuBIUcYvkmv2qTAhMtOivhC2pYRItgVgi8whQiRuYOr5V7apJZ52OEsLcZjX6aepBabjfK8WT83sD3NpA/SgbGIyPi6DDp6Mqj48EiZsxriVUUYoEPp1mtWgFA=",
+      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAAAwAAAAAAAAAHAAAABeuFwBEDtpBAthbX7Yo3FQRMCr1H3lPONmkbLGzCfIUq7ysKevbc1iD1NWy2CMtZGAXUoK1jUQ7UZltTR4jRv1kWmGmEVRsCKJ7r65soGwTnPO3wTE5W/Nx+/L4XUKsgSXz4/iNpllhSE9vL51h6oXzLVe5TjqiuKxfJQ1yJ4B+7GPOWi3prDyWO1zXDz1oRWb9qBxxi23vyg0PafB+aGUI=",
       "entry_ids": [
-        "sha256:b13e01004b14e3a0f465e5707ff9ff9a29f801cf5d0e6b383bede33733bb7777",
-        "sha256:195676ba52ad3096ee0b6ea4ee7bc1035cad54c30cbb73187a0bbb051ef674e5",
-        "sha256:18e149adf5ba73643150c4fb5e1a422bf70d3f1dd9ca1e6adbf0ece1e8787afc",
-        "sha256:85309c449cbba78e0eb0d9542af20c8952db736985a377fc8402eee41afc16ce"
+        "sha256:cdc46f74aed33c582a66148979641450db7d13977be5f6562f0fbc279b92ef04",
+        "sha256:165c94289ebc6ee9c1f839713e650baf210456561ab926674df87ed84c274bd8",
+        "sha256:ddfb641b323a1bbc12efb7a9dd95e06a31034cdac3559cd7bfb40f3eb8a9dcd3",
+        "sha256:4ba0feb09d3fee32515788224a5fc03bed14033adbf1178faef919f5d1630803"
       ],
       "node_count": 5,
       "nodes": [
-        "sha256:7c92e45557e3847965d7a317b5fe827ccb760476b012d4ced35ccd5091e4c72c",
-        "sha256:ccbbe1652fa5eabe90d268bb6953ec78917047d234988e4080d98f532ffff97f",
-        "sha256:1e89c2c0f70b81214718be49afdaa4c084cb4e8af842da961122d815822f3085",
-        "sha256:0891b983abe55edaa49679d8e12c2dc6635fa69ea4169b8df2bc593f37b03dcd",
-        "sha256:a40fd281b188c8f8ba0c3a7a32a8f8f04899b31ae2554518a043e9d66b568050"
+        "sha256:eb85c01103b69040b616d7ed8a3715044c0abd47de53ce36691b2c6cc27c852a",
+        "sha256:ef2b0a7af6dcd620f5356cb608cb591805d4a0ad63510ed4665b534788d1bf59",
+        "sha256:16986984551b02289eebeb9b281b04e73cedf04c4e56fcdc7efcbe1750ab2049",
+        "sha256:7cf8fe236996585213dbcbe7587aa17ccb55ee538ea8ae2b17c9435c89e01fbb",
+        "sha256:18f3968b7a6b0f258ed735c3cf5a1159bf6a071c62db7bf28343da7c1f9a1942"
       ],
       "note": "a proper interior sub-range",
       "range": {
@@ -64,17 +67,17 @@
       }
     },
     {
-      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABkAAAAAAAAABgAAAAAAAAAHAAAABTHqFSYlikMBZBBAqMWYgRISP3mP/EEbPjF7MSqbc0/l1g2Q6bHFWtwoHD1DOk+obokgeWIPvezmW24VPODm+rYeicLA9wuBIUcYvkmv2qTAhMtOivhC2pYRItgVgi8whQiRuYOr5V7apJZ52OEsLcZjX6aepBabjfK8WT83sD3NpA/SgbGIyPi6DDp6Mqj48EiZsxriVUUYoEPp1mtWgFA=",
+      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAABgAAAAAAAAAHAAAABRh8dNDYm/KCYREHA432Vh62nKbWo5ReOkmnRJtf4s6YWuTeHTyUV5C8g41qDOS4Q/kClwCj8hRbk27A1oyDeyYWmGmEVRsCKJ7r65soGwTnPO3wTE5W/Nx+/L4XUKsgSXz4/iNpllhSE9vL51h6oXzLVe5TjqiuKxfJQ1yJ4B+7GPOWi3prDyWO1zXDz1oRWb9qBxxi23vyg0PafB+aGUI=",
       "entry_ids": [
-        "sha256:85309c449cbba78e0eb0d9542af20c8952db736985a377fc8402eee41afc16ce"
+        "sha256:4ba0feb09d3fee32515788224a5fc03bed14033adbf1178faef919f5d1630803"
       ],
       "node_count": 5,
       "nodes": [
-        "sha256:31ea1526258a4301641040a8c5988112123f798ffc411b3e317b312a9b734fe5",
-        "sha256:d60d90e9b1c55adc281c3d433a4fa86e892079620fbdece65b6e153ce0e6fab6",
-        "sha256:1e89c2c0f70b81214718be49afdaa4c084cb4e8af842da961122d815822f3085",
-        "sha256:0891b983abe55edaa49679d8e12c2dc6635fa69ea4169b8df2bc593f37b03dcd",
-        "sha256:a40fd281b188c8f8ba0c3a7a32a8f8f04899b31ae2554518a043e9d66b568050"
+        "sha256:187c74d0d89bf282611107038df6561eb69ca6d6a3945e3a49a7449b5fe2ce98",
+        "sha256:5ae4de1d3c945790bc838d6a0ce4b843f9029700a3f2145b936ec0d68c837b26",
+        "sha256:16986984551b02289eebeb9b281b04e73cedf04c4e56fcdc7efcbe1750ab2049",
+        "sha256:7cf8fe236996585213dbcbe7587aa17ccb55ee538ea8ae2b17c9435c89e01fbb",
+        "sha256:18f3968b7a6b0f258ed735c3cf5a1159bf6a071c62db7bf28343da7c1f9a1942"
       ],
       "note": "a width-1 range, which is an inclusion proof in a different serialization",
       "range": {
@@ -83,28 +86,30 @@
       }
     },
     {
-      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABkAAAAAAAAAGAAAAAAAAAAZAAAAAnkrZ74nZiw4/hhpG9fbe64rQDD626P0HI1xlmv8RYQzxC6HebhES66qj2CgmBeNQWuG/TADOhDuVtVAh2/xwt4=",
+      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAAGwAAAAAAAAAcAAAABOBy0i8sjaxWfsle15oznzc3HcCAMouW+God4PdyLttje/nB2wPjU1bVj/Wgc7HgJZtU/0vo2lRMGeIEFRdIQ95MRnb/F3c3/stpkrTtouOoKcelYNRBOoHdo6GnAbJuszcIAYcGnKM2AilxoO2wCostarQrbqMCagSDhBY4HCjp",
       "entry_ids": [
-        "sha256:c39a81ad1687543cbfa847486f0b7a7539b24199b192d21bdfc8178912580976"
+        "sha256:cf6a0dc7958cbac8d97125c065c73527d2e425658947119066b4525200f61e80"
       ],
-      "node_count": 2,
+      "node_count": 4,
       "nodes": [
-        "sha256:792b67be27662c38fe18691bd7db7bae2b4030fadba3f41c8d71966bfc458433",
-        "sha256:c42e8779b8444baeaa8f60a098178d416b86fd30033a10ee56d540876ff1c2de"
+        "sha256:e072d22f2c8dac567ec95ed79a339f37371dc080328b96f86a1de0f7722edb63",
+        "sha256:7bf9c1db03e35356d58ff5a073b1e0259b54ff4be8da544c19e20415174843de",
+        "sha256:4c4676ff177737fecb6992b4eda2e3a829c7a560d4413a81dda3a1a701b26eb3",
+        "sha256:37080187069ca336022971a0edb00a8b2d6ab42b6ea3026a04838416381c28e9"
       ],
       "note": "the trailing entry",
       "range": {
-        "from_index": 24,
-        "to_index": 25
+        "from_index": 27,
+        "to_index": 28
       }
     }
   ],
   "checkpoint": {
-    "name": "cp25",
-    "root": "sha256:86ff9ecbf8cca7984a51d827c3fc648e5c752a1cc5d8fbcb018b9529ab29fe56",
-    "tree_size": 25
+    "name": "cp28",
+    "root": "sha256:625cd2123984bdf25ac5ff2a575e3ef5472a99f6e751f9716d2451f1c4593ec8",
+    "tree_size": 28
   },
-  "description": "Authenticated range proofs over the 25-entry log tree under cp25 (core spec §3 contract item 5, receipt format §4.2, adaptor profile §8). Each proof establishes that the listed entries are exactly and completely the leaf set of the range under the checkpoint root.",
+  "description": "Authenticated range proofs over the 28-entry log tree under cp28 (core spec §3 contract item 5, receipt format §4.2, adaptor profile §8). Each proof establishes that the listed entries are exactly and completely the leaf set of the range under the checkpoint root.",
   "negative": {
     "expect": "reject: substituting, reordering, dropping or adding any entry in the carried range changes the recomputed root, and a carried leaf count other than `to_index - from_index` is rejected structurally"
   },

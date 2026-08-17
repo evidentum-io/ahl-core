@@ -7,13 +7,13 @@
           "checkpoint_raw": false,
           "consistency_proofs": false
         },
-        "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e"
+        "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa"
       }
     },
     "dataset_keys": {
       "customers": "test_data/keys/dataset_customers.key — held only by an authorized verifier; never packaged in a receipt"
     },
-    "genesis_entry_id": "sha256:8e65b4c7491243ed79690156de5967342d1b10f0691a3329fbb5231ff6cb058a",
+    "genesis_entry_id": "sha256:be129d9d262de65c47eaad8d978ef54e87d5e1388182df53e036102816210a49",
     "genesis_key_ids": [
       "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
     ],
@@ -106,8 +106,22 @@
       "claim_type": "trigger-effective",
       "expect": "reject",
       "file": "trigger-effective-unauthorized-issuer-must-fail.ahl",
-      "reason": "trigger at entry index 21 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
+      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "spec §2.3.3 — a trigger not signed by the record's authority is a challenge"
+    },
+    {
+      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "trigger-effective",
+      "embedded_receipts": 1,
+      "expect": "accept",
+      "file": "trigger-effective-later-challenge-ignored.ahl"
+    },
+    {
+      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "trigger-effective",
+      "embedded_receipts": 1,
+      "expect": "accept",
+      "file": "trigger-effective-derived-rotated-key.ahl"
     },
     {
       "boundary": "the subject propagation statement dispositions the named record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
@@ -148,14 +162,21 @@
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-missing-leaf-must-fail.ahl",
-      "reason": "tree material for `sha256:78d43d6659df91e5c953b388de06aa68a1612918c61b9f4fd683feff29b20dc1` is invalid: commits 3 leaves, 2 carried",
+      "reason": "tree material for `sha256:e7d5c31308ceff47b34c2f8f4dce9b90f2f54197c27e32432b2bd8625e3ae51a` is invalid: commits 3 leaves, 2 carried",
       "rule": "spec §2.5/§3.5 — committed tree material must open its anchored root and count"
     },
     {
       "claim_type": "propagation-complete",
       "expect": "reject",
+      "file": "propagation-complete-past-declared-checkpoint-must-fail.ahl",
+      "reason": "`claim_material.corpus_checkpoint` does not match the checkpoint this claim must rest on: `tree_size` differs",
+      "rule": "spec §2.3.4 / receipt §3 — completeness is defined at the propagation's declared checkpoint D, never at a later one"
+    },
+    {
+      "claim_type": "propagation-complete",
+      "expect": "reject",
       "file": "propagation-complete-challenge-trigger-must-fail.ahl",
-      "reason": "trigger at entry index 21 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
+      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "receipt §3 / spec §2.3.3 — propagation-complete must embed a trigger-effective receipt; challenges are never traversed"
     },
     {
@@ -176,7 +197,7 @@
       "claim_type": "governance-state",
       "expect": "reject",
       "file": "governance-state-short-range-must-fail.ahl",
-      "reason": "enumerated governance covers [0, 6) but §4 requires exactly [0, 25) — a narrower range can hide a later governance statement",
+      "reason": "enumerated governance covers [0, 6) but §4 requires exactly [0, 28) — a narrower range can hide a later governance statement",
       "rule": "receipt §4 — enumerated governance must cover exactly [0, tree_size(C))"
     },
     {

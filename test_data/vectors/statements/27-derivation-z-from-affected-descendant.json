@@ -1,23 +1,24 @@
 {
-  "entry_id": "sha256:c06722279778ef175aeaa65d73f7ba7d588341c6ad940853eb6f70be7ef4091a",
-  "entry_index": 15,
+  "entry_id": "sha256:cf6a0dc7958cbac8d97125c065c73527d2e425658947119066b4525200f61e80",
+  "entry_index": 27,
   "envelope": {
     "payload": {
       "ahl_version": "0.3",
       "inputs": [
         {
-          "dataset": "customers",
-          "record": "hmac-sha256:1efd18a919cf85ddc216d57e1d78bc13321bfa14ba62aa1649eea13c2a811127",
+          "dataset": "scores",
+          "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5",
           "role": "feature",
-          "statement": "sha256:ab2bbe388a09f49c573bdc99726d2a1942edf3082ea6421378525c6cb2e9bc6e"
+          "statement": "sha256:7aeba90c3dea5563a1a178bf3f6ea028775ec4e72e8aeb4572ec782c312aca80"
         }
       ],
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:1b10dc0239d2b159786b9152e9e68558a4097e9d02fc07fe89b2cbbfc4329e72",
+      "manifest": "sha256:13cf07de8b693d2371f32402749b48427bf127f2fb934a3593d282ef388775ff",
       "outputs": [
         {
           "dataset": "scores",
-          "record": "sha256:bf90b471d24713c16ef7cd945651ed9bd755cf7769eef4b58da51c61bf53d810"
+          "locator": "urn:ahl-test:scores/Z",
+          "record": "sha256:6ee610208c48df3f7f4389ddbfec8e48586fb8203ae742c4a0463df1d07769ed"
         }
       ],
       "pipeline": "scoring-v1",
@@ -36,17 +37,14 @@
         }
       },
       "type": "derivation",
-      "valid_time": {
-        "from": "2026-09-01T00:00:00Z",
-        "to": null
-      }
+      "valid_time": "2026-08-16T12:00:00Z"
     },
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:lUgcyHwqjCgxDXYzn9Y8thWB2WscoSS2Hd7XG3Ukkk1ZU1ZPO9Tp785l6/pO0nrouCgxVn37V6LgVqwYmeEDBQ=="
+        "sig": "base64:Uatu2dqfTSHAs7zfA/LNfT+042ovh1tWVePEmowxYSdcubAxItR0M1SWNV6joWls9E3U+r2/UgY2QM27YomlAQ=="
       }
     ]
   },
-  "statement_id": "sha256:f2ecf2fa4e6f6d46d068e5e86c289715a444391aaabafce34c39af9068fd0530"
+  "statement_id": "sha256:9955144ce94e21f63d61e96b5322f936e52d94ab5241473c4340edd32ea3c4a1"
 }

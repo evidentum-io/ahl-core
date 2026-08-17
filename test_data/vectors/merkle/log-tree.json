@@ -1,201 +1,224 @@
 {
   "adaptor": {
-    "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e",
+    "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa",
     "id": "ahl-test-log-v1"
   },
-  "description": "AHL log tree over the 25-entry toy corpus. Leaves are the anchored entry bytes JCS(envelope) in entry-index order and are never sorted (core spec §2.5, §1.2).",
+  "description": "AHL log tree over the 28-entry toy corpus. Leaves are the anchored entry bytes JCS(envelope) in entry-index order and are never sorted (core spec §2.5, §1.2).",
   "entries": [
     {
-      "entry_id": "sha256:8e65b4c7491243ed79690156de5967342d1b10f0691a3329fbb5231ff6cb058a",
+      "entry_id": "sha256:be129d9d262de65c47eaad8d978ef54e87d5e1388182df53e036102816210a49",
       "entry_index": 0,
-      "leaf_hash": "sha256:b6c5fc9ad68447e59e621068b4659b0397550dd192bd0f3ab78cd25c40cf440d",
+      "leaf_hash": "sha256:7a4f19873eb2d74d4d36a1462f09727b0d426809f37e4c314cf5d3743113e656",
       "name": "00-manifest-genesis"
     },
     {
-      "entry_id": "sha256:6c9df4726a20afdd6a2aca161ba6f09d63953592eb58fb42c8e6abb82da1f4c8",
+      "entry_id": "sha256:1c261e46b147202dbc2db0aceb5c5422d3c1f48c74b1f11fa9e84d838ba7b857",
       "entry_index": 1,
-      "leaf_hash": "sha256:2bca64b6ba0e2ad247598c07fe1678b9a95c556d7b1c082b670f689008ca58c0",
+      "leaf_hash": "sha256:58f27104c933e0c065c190392ba1781a28e0b5ef58217addc407a0ad3f4e06f0",
       "name": "01-ingestion-customers-a"
     },
     {
-      "entry_id": "sha256:93ce8ad274e7bdb74d6d0c3c971950878385778bcfcfc720b00f4587246a7ec5",
+      "entry_id": "sha256:9f5d496e704252dbf6b6237457ba0173bba23591fd8957a8d229daa6e98ee88e",
       "entry_index": 2,
-      "leaf_hash": "sha256:ccbbe1652fa5eabe90d268bb6953ec78917047d234988e4080d98f532ffff97f",
+      "leaf_hash": "sha256:ef2b0a7af6dcd620f5356cb608cb591805d4a0ad63510ed4665b534788d1bf59",
       "name": "02-ingestion-customers-b"
     },
     {
-      "entry_id": "sha256:b13e01004b14e3a0f465e5707ff9ff9a29f801cf5d0e6b383bede33733bb7777",
+      "entry_id": "sha256:cdc46f74aed33c582a66148979641450db7d13977be5f6562f0fbc279b92ef04",
       "entry_index": 3,
-      "leaf_hash": "sha256:434577815793d08e7d49c20a14e89a910f4c0314020101e6115fc8d17f0e5ea9",
+      "leaf_hash": "sha256:0e01f39d15552a7cc3fa9cfe5882ddfec7edde7849a30ffd674f3d4e4c31abbd",
       "name": "03-derivation-s1"
     },
     {
-      "entry_id": "sha256:195676ba52ad3096ee0b6ea4ee7bc1035cad54c30cbb73187a0bbb051ef674e5",
+      "entry_id": "sha256:165c94289ebc6ee9c1f839713e650baf210456561ab926674df87ed84c274bd8",
       "entry_index": 4,
-      "leaf_hash": "sha256:f4da5fe4d810a70e3fd20e9715b3ef689f79f0ec07cfd60c9998e745f3d28ca1",
+      "leaf_hash": "sha256:d89e6a7f1dcce0bfed52b8da18a530d0fa8349b46dbf33160a37ff61722c4b2c",
       "name": "04-derivation-batch"
     },
     {
-      "entry_id": "sha256:18e149adf5ba73643150c4fb5e1a422bf70d3f1dd9ca1e6adbf0ece1e8787afc",
+      "entry_id": "sha256:ddfb641b323a1bbc12efb7a9dd95e06a31034cdac3559cd7bfb40f3eb8a9dcd3",
       "entry_index": 5,
-      "leaf_hash": "sha256:ab4a76ceeceeee0ec4c0f0e3728a3e936f0f9e02952437f8be51d9e10ab45679",
+      "leaf_hash": "sha256:1ebaa34d77d4758a9a574c6c01e1960104a08aa90b583a1fc10db283f5f44671",
       "name": "05-ingestion-customers-a2"
     },
     {
-      "entry_id": "sha256:85309c449cbba78e0eb0d9542af20c8952db736985a377fc8402eee41afc16ce",
+      "entry_id": "sha256:4ba0feb09d3fee32515788224a5fc03bed14033adbf1178faef919f5d1630803",
       "entry_index": 6,
-      "leaf_hash": "sha256:25e0eeb73bf47c52f3706118c515badafd305e3471c95aa1a35691f0d3130148",
+      "leaf_hash": "sha256:7bb3dabe7e9e19bcc2c0870fc7a1960f9df44bfdc46725c09f45d7affa095768",
       "name": "06-correction-a-to-a2"
     },
     {
-      "entry_id": "sha256:9a038a76d167941acda6489916c2fef5c72affd48d620dc68e65e03dba39256e",
+      "entry_id": "sha256:15bc064cd965d8e6063452db355db156dcc76900c9128e53605db7f10a4920b5",
       "entry_index": 7,
-      "leaf_hash": "sha256:1e89c2c0f70b81214718be49afdaa4c084cb4e8af842da961122d815822f3085",
+      "leaf_hash": "sha256:16986984551b02289eebeb9b281b04e73cedf04c4e56fcdc7efcbe1750ab2049",
       "name": "07-derivation-s1-prime"
     },
     {
-      "entry_id": "sha256:d113cc8a816dc02b3a13839f4323d185d3088b1310f77b102da3372fd64f8f5d",
+      "entry_id": "sha256:f17f25df50911a172e10407544895536c055d21164dcad14941d1aaca5256a7e",
       "entry_index": 8,
-      "leaf_hash": "sha256:3056657fc65f31e13644f6a45f7cfd52bb3f677d42a33a0dd6f283fad712393a",
+      "leaf_hash": "sha256:1b291bf9b610e2b91407343a61b02551baa9f9292331e4750fefb5219a4daed2",
       "name": "08-propagation"
     },
     {
-      "entry_id": "sha256:83d78dead4d16e3e4a5815cc6f06dd66085be512f655ad6766d0c4af58522bc4",
+      "entry_id": "sha256:2560abc5576f1a64adb236674854c308b87c9899193bf47c339126b38cec2125",
       "entry_index": 9,
-      "leaf_hash": "sha256:56d96f539049900e1ede8fc152525256385e73ea73afb0bda9ecf58610b2c377",
+      "leaf_hash": "sha256:a4e532efc02fb3a54bccb655e9e19edc73518e52b6cb0f7b6bf8da38d6512e54",
       "name": "09-key-add-producer-2"
     },
     {
-      "entry_id": "sha256:20a4ecd5bea5d1eb5af1b455be19b1d186475eada7a3d3ac1744e2cfb31912d1",
+      "entry_id": "sha256:1b6a31908195534f1ee35059615e9c4d4c6f18d230580ad213245c7e5e802389",
       "entry_index": 10,
-      "leaf_hash": "sha256:1647d5be593e621b66bed44b602169191333936a966fa740f3690de1590c49bd",
+      "leaf_hash": "sha256:b4819cd4a05a411af3b72ff4c4958f281cd72c461d1687b639cb3351e61259ff",
       "name": "10-derivation-batch-wide-inputs"
     },
     {
-      "entry_id": "sha256:6c50b1fe067d7b626bc07da33e8d2f11c70a2e2ebc2b5b763f18de80025fd55c",
+      "entry_id": "sha256:18d0dd72f725f342f147b213e1badd69ddb0eb10dd0e10be385e11383ddc8bc2",
       "entry_index": 11,
-      "leaf_hash": "sha256:8e2258906bf39de2b71082d652f17a4b0cd32167a2430b211568060e8611c235",
+      "leaf_hash": "sha256:542fa3caabee417acedb9ab406c7c21423f9261d03a57b91012add0503360064",
       "name": "11-ingestion-customers-a3"
     },
     {
-      "entry_id": "sha256:88145f26a5c03d5a216bcbf5b0f809ff936d366111313c45201060d3823cd518",
+      "entry_id": "sha256:fa08c7fdce895e5bc760b878441602f3588d587fc951f29b8a57e96719900cfa",
       "entry_index": 12,
-      "leaf_hash": "sha256:b5f184cb4b9611bab7fd045d0e40e40feb5124753e4929346ac8853c2edb2a9e",
+      "leaf_hash": "sha256:06ec4a88a45e5b822da8ad360de2d261cfb50aac64ba64b8e5e1f1fd476b3b2b",
       "name": "12-correction-a-to-a3-superseding"
     },
     {
-      "entry_id": "sha256:26740629734f9e048284751e1ba70d677f79cb09f8b9049ce825d32a5a3456f7",
+      "entry_id": "sha256:184f3c071c8999a54c64f27b4719a78d352554db4a85096489a5c0f5872dd536",
       "entry_index": 13,
-      "leaf_hash": "sha256:96c262cdd7374ad6084eb5cb362ba386d746fe4086caf225e12d087f25bf1dbd",
+      "leaf_hash": "sha256:a684d9a5fcd0fae0e5b4024678fe10591319ad5c2ddb6bbf0a331c3093f963bc",
       "name": "13-ingestion-customers-c"
     },
     {
-      "entry_id": "sha256:f24868cd12a076c95f4915c7cdb6659df1eb214e3b23c45a500261e1f9bb36b8",
+      "entry_id": "sha256:144cd766850d0ddcba25ef1b822bffd974eccf939d330475fec7926561c19645",
       "entry_index": 14,
-      "leaf_hash": "sha256:baa0c4f78aa32d894e0e67ddd6f8384efb9f67897dd6f4eae16d857978a0179d",
+      "leaf_hash": "sha256:3f10a38e46db3a75a3570607d787ff74875b6980a177f62b8fef5cc602ccd397",
       "name": "14-derivation-e1-point-past"
     },
     {
-      "entry_id": "sha256:8da5d1ed982f01e3fdb3c85b31d0e14e8247d4a750dbe38f819174948a5a9581",
+      "entry_id": "sha256:c06722279778ef175aeaa65d73f7ba7d588341c6ad940853eb6f70be7ef4091a",
       "entry_index": 15,
-      "leaf_hash": "sha256:3c3f39efb5b149dae0766c65ef79f013df208e0b6c6027fb9eb1b0e7b8ac13d3",
+      "leaf_hash": "sha256:8efcb645d3c5d347da39c7fb89ed6249740fb9183743b16b013c494fe5eb3b40",
       "name": "15-derivation-e2-open-interval"
     },
     {
-      "entry_id": "sha256:741e175cc23fe513d5239b92214defb072837ca1bb167363ab2d95655e741428",
+      "entry_id": "sha256:ec8b88ab07168045b27013930d8877111f7054d67d1d2825bdb6c243dea337ba",
       "entry_index": 16,
-      "leaf_hash": "sha256:f474a8c3162ce5c81348142e202d3846da474d14d85afd62ed84a83ab23e18bf",
+      "leaf_hash": "sha256:b2e4af5587b270573e99e3d58db60eaa7c6b9c9a20142a935534b2180990ab18",
       "name": "16-derivation-e3-closed-past-interval"
     },
     {
-      "entry_id": "sha256:bfb7e2fda98d34bb1e22309a7fba4226b104b539a9ff2b4c990de301e267580a",
+      "entry_id": "sha256:d06b756657fa21cf1b9e608e964c6436f0e3f7ffdbf052575219d7b1963b3c24",
       "entry_index": 17,
-      "leaf_hash": "sha256:e864b024cecb588ee662dd805e2024482382ae92520fe6194ed12559074e5517",
+      "leaf_hash": "sha256:1dd854edfaf020126d4ce9f70a87c173687dafb0fbe1d74cb28799c43d1e1e0b",
       "name": "17-retraction-c-non-retroactive"
     },
     {
-      "entry_id": "sha256:b0845b812ee632b20f997287e9166c1594c6042a1897cea6662f5a16cd256e42",
+      "entry_id": "sha256:5ba5e8945157579e65bd35c16f74565c2249b13b8a9f260292302e9bfb29460a",
       "entry_index": 18,
-      "leaf_hash": "sha256:2124bf90b19268fb90af3069b489dae0146e0d07148676886e5c37618763f0fd",
+      "leaf_hash": "sha256:972883d65cb0a5a88ce8636cae4af9e3273f99f31029b563f4412f8b30db68d3",
       "name": "18-retraction-a-original-after-correction"
     },
     {
-      "entry_id": "sha256:7b3d59c7029f8007d6b8802e37fac2a30e5ec689f55bea387df600d8abd6a373",
+      "entry_id": "sha256:d170b467ee908cf801ae349d18cceaae1c506d60da2695f2bbe23a2ea4caed17",
       "entry_index": 19,
-      "leaf_hash": "sha256:698583812d90ca45c7ef14ccf29c69dfe437475b22e8b2c415a220c8c0e1c1e6",
-      "name": "19-ingestion-customers-f"
+      "leaf_hash": "sha256:9f9ca0dc591fe3b0f89116eacb359093ca9d2e9c14b5f83021e4df3f07b4db99",
+      "name": "19-retraction-s1-prime-derived-authority"
     },
     {
-      "entry_id": "sha256:5dabbb4070ffd0ede327abf94631112b9e78e99a147ac6976fb37450185072a3",
+      "entry_id": "sha256:c51cced033c06a03424d01349270439d66b438c678224bd8e8a8e6d1e7d21310",
       "entry_index": 20,
-      "leaf_hash": "sha256:cc935e1984a87e3b7f6de7286de2f62c67782c26a6a9bb50dbd706d8f89d0269",
-      "name": "20-derivation-h-from-f"
+      "leaf_hash": "sha256:e53342d72b453e4866cbfc1bbf7a538bcca975e5e76b98fe90f7cdd2a1abcae1",
+      "name": "20-ingestion-customers-f"
     },
     {
-      "entry_id": "sha256:97ce31f47cfb27f9c272fcb0eb4a1cb89cbe673a9d527cfb0f98ea5c6c507b9b",
+      "entry_id": "sha256:baff0e56d6225d44a8fd2bdd1dd2550d27ee346a05092626db82fd2caf1dd8a2",
       "entry_index": 21,
-      "leaf_hash": "sha256:aeb4b887b0236390e66dedb5e89095bd36dcfb8426005faf4cd879374ee7a585",
-      "name": "21-challenge-retraction-f-unauthorized"
+      "leaf_hash": "sha256:0271d877a8317a37e744d74f7923bb43350dda5fb5067346d3bcabfbdb0beaeb",
+      "name": "21-derivation-h-from-f"
     },
     {
-      "entry_id": "sha256:36ee6ba2c5c558e454a5b438ad3e11a4815c4bf2ec61a6a74f2d8809c16b0c93",
+      "entry_id": "sha256:fc6abeaf538fb23bccd38874682cf03b60acf3e6d98bcab841ae189f2bcaf5a6",
       "entry_index": 22,
-      "leaf_hash": "sha256:f2712a7c784d326e269a74ca7d0910deadb3c624b09b786066c2d65ccc92f4d4",
-      "name": "22-propagation-over-challenge"
+      "leaf_hash": "sha256:f922d35fd882cfc725c6f24ef1429c91f98002a7c9a120a4453627c04edd9402",
+      "name": "22-retraction-f-authorized"
     },
     {
-      "entry_id": "sha256:46ec5575423fcfda584dc07eb2f18f9ec082edccda6c105b4960f7af1d5db0bb",
+      "entry_id": "sha256:df5c860ea71c6777de2437cf7556756f6404f7282b65f5933ec01ce3540cb362",
       "entry_index": 23,
-      "leaf_hash": "sha256:72703612b4079ddd03087688671f6401475dd456fe61c136d6283f77a9409bae",
-      "name": "23-manifest-v2-rotate-witness-drop-key"
+      "leaf_hash": "sha256:b6005f60cdb506ad7af95914f0d30b66cfd606321070a316776b2cbceb33638f",
+      "name": "23-challenge-retraction-f-unauthorized"
     },
     {
-      "entry_id": "sha256:c39a81ad1687543cbfa847486f0b7a7539b24199b192d21bdfc8178912580976",
+      "entry_id": "sha256:be6b72857329e52ddc2a30469d3e5c64f2e87e4989e8261dd97e95bfc1bc43c1",
       "entry_index": 24,
-      "leaf_hash": "sha256:02c27abb4e4575477b71c11a2610d79bb4eed1f72daccba8dae9ffe3e9957af8",
-      "name": "24-ingestion-customers-d-under-v2"
+      "leaf_hash": "sha256:e084d669563e46ef8cc252f1a36fc0835b188d7017936046e2d01b9a5e157e14",
+      "name": "24-propagation-over-challenge"
+    },
+    {
+      "entry_id": "sha256:e7f043099a538a08ea588d7e19c5684e50901208b3033cb3ca149e0416f772ba",
+      "entry_index": 25,
+      "leaf_hash": "sha256:8861ff519b59bd85224dbeec8340d2904073533d0958087326fd9cffb4bb353e",
+      "name": "25-manifest-v2-rotate-witness-drop-key"
+    },
+    {
+      "entry_id": "sha256:694dea42f11eb0fcc8439954d01b20ebf852f18b445580c2496e1cd362efb68d",
+      "entry_index": 26,
+      "leaf_hash": "sha256:37080187069ca336022971a0edb00a8b2d6ab42b6ea3026a04838416381c28e9",
+      "name": "26-ingestion-customers-d-under-v2"
+    },
+    {
+      "entry_id": "sha256:cf6a0dc7958cbac8d97125c065c73527d2e425658947119066b4525200f61e80",
+      "entry_index": 27,
+      "leaf_hash": "sha256:6b1780a0e5b93465e5f82eb6e4e5d7d236fadecea0f57a9f3c625d4acca546a3",
+      "name": "27-derivation-z-from-affected-descendant"
     }
   ],
   "inclusion": {
-    "entry_id": "sha256:b13e01004b14e3a0f465e5707ff9ff9a29f801cf5d0e6b383bede33733bb7777",
+    "entry_id": "sha256:cdc46f74aed33c582a66148979641450db7d13977be5f6562f0fbc279b92ef04",
     "leaf_index": 3,
     "path": [
-      "sha256:ccbbe1652fa5eabe90d268bb6953ec78917047d234988e4080d98f532ffff97f",
-      "sha256:7c92e45557e3847965d7a317b5fe827ccb760476b012d4ced35ccd5091e4c72c",
-      "sha256:994c2be803ab6827e310662cbeec98500b0af076cc54cca95aa7dc2583dfcc4d",
-      "sha256:0891b983abe55edaa49679d8e12c2dc6635fa69ea4169b8df2bc593f37b03dcd",
-      "sha256:a40fd281b188c8f8ba0c3a7a32a8f8f04899b31ae2554518a043e9d66b568050"
+      "sha256:ef2b0a7af6dcd620f5356cb608cb591805d4a0ad63510ed4665b534788d1bf59",
+      "sha256:eb85c01103b69040b616d7ed8a3715044c0abd47de53ce36691b2c6cc27c852a",
+      "sha256:10b4ff43453ed64c69387748486c989cbef76fcf8059dc2b307ba5248c2b8218",
+      "sha256:7cf8fe236996585213dbcbe7587aa17ccb55ee538ea8ae2b17c9435c89e01fbb",
+      "sha256:18f3968b7a6b0f258ed735c3cf5a1159bf6a071c62db7bf28343da7c1f9a1942"
     ],
-    "root": "sha256:86ff9ecbf8cca7984a51d827c3fc648e5c752a1cc5d8fbcb018b9529ab29fe56",
-    "tree_size": 25
+    "root": "sha256:625cd2123984bdf25ac5ff2a575e3ef5472a99f6e751f9716d2451f1c4593ec8",
+    "tree_size": 28
   },
   "leaf_rule": "sha256(0x00 || JCS(envelope))",
   "node_rule": "sha256(0x01 || left || right)",
   "roots": [
     {
       "name": "cp8",
-      "root": "sha256:c790e4225114cc7b6296e1131d45a4da82fc9a58c4e1842ecebf3c3f42daab3c",
+      "root": "sha256:4fa10b1ec76b605eb4dc21c8af0dae3e213aecf51549fb9b34765083ad1d382d",
       "tree_size": 8
     },
     {
       "name": "cp13",
-      "root": "sha256:70e93ebd471886da34b0a9a7ee19bc3df17400ae28b5e775c78739426bdd4787",
+      "root": "sha256:c2ca7fdb4a7eb50960ba0db9de67fc17103c24089635bb91d971e5da2d2be6c0",
       "tree_size": 13
     },
     {
-      "name": "cp19",
-      "root": "sha256:e87c070da42bc5ab8d4b2562f85030636051e9f65142e925d325d47d47b8ee37",
-      "tree_size": 19
+      "name": "cp20",
+      "root": "sha256:01b81a5d3ae19767a1f579c292e4c689f0575e6f9b63a8401038640d1140b20b",
+      "tree_size": 20
     },
     {
-      "name": "cp23",
-      "root": "sha256:0d6cfa42d4be9d0a92845d898130a97a9f69ffe8539bde509bb051369a8f85e2",
-      "tree_size": 23
+      "name": "cp24",
+      "root": "sha256:036ecbf7d99c09c560f498e4c015bb2e4c3e9d9b7cd5c846baf018d49e35adfa",
+      "tree_size": 24
     },
     {
       "name": "cp25",
-      "root": "sha256:86ff9ecbf8cca7984a51d827c3fc648e5c752a1cc5d8fbcb018b9529ab29fe56",
+      "root": "sha256:a3b1e480d11d90ce61d2b6b30d410a55987c2c276f313502a7f164ba5d2eb127",
       "tree_size": 25
+    },
+    {
+      "name": "cp28",
+      "root": "sha256:625cd2123984bdf25ac5ff2a575e3ef5472a99f6e751f9716d2451f1c4593ec8",
+      "tree_size": 28
     }
   ]
 }

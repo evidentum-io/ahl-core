@@ -289,9 +289,10 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let r = &corpus.records;
     let cp8 = corpus.anchor("cp8");
     let cp13 = corpus.anchor("cp13");
-    let cp19 = corpus.anchor("cp19");
-    let cp23 = corpus.anchor("cp23");
+    let cp20 = corpus.anchor("cp20");
+    let cp24 = corpus.anchor("cp24");
     let cp25 = corpus.anchor("cp25");
+    let cp28 = corpus.anchor("cp28");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -301,7 +302,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let statement_anchored = Spec {
         claim_type: "statement-anchored",
         subject_index: 3,
-        anchor: cp19,
+        anchor: cp20,
         chain: vec![0],
         record_subject: None,
         competing: "not-checked",
@@ -336,9 +337,9 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "statement-anchored-dropped-producer-key-must-fail.ahl",
         receipt: Spec {
             claim_type: "statement-anchored",
-            subject_index: 24,
-            anchor: cp25,
-            chain: vec![0, 9, 23],
+            subject_index: 26,
+            anchor: cp28,
+            chain: vec![0, 9, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -346,14 +347,14 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             currency_material: json!({}),
             claim_material: json!({}),
             producer_keys: Some(vec![
-                key_entry(&keys.producer_1, None, 23),
+                key_entry(&keys.producer_1, None, 25),
                 key_entry(&keys.producer_2, None, 9),
             ]),
-            note: "MUST FAIL. The subject is anchored at entry 24, after manifest version 2 at \
-                   entry 23. Core spec §7.2: a manifest's producer `keys` array is the complete \
+            note: "MUST FAIL. The subject is anchored at entry 26, after manifest version 2 at \
+                   entry 25. Core spec §7.2: a manifest's producer `keys` array is the complete \
                    snapshot effective from that manifest's entry index — it DISCARDS the prior \
                    snapshot. Version 2 lists only `producer-1`, so the key that the `key` \
-                   statement at entry 9 added is no longer in force at entry 24, and a receipt \
+                   statement at entry 9 added is no longer in force at entry 26, and a receipt \
                    that lists it as `manifest-chain`-bound is asserting a key state the \
                    governance chain does not support. A verifier that accumulated manifest key \
                    arrays additively would accept this — and would then also accept a signature \
@@ -373,7 +374,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         Spec {
             claim_type: "record-ingested",
             subject_index: 1,
-            anchor: cp19,
+            anchor: cp20,
             chain: vec![0],
             record_subject: customers(&r.c_a),
             competing: "not-checked",
@@ -426,7 +427,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         Spec {
             claim_type: "record-derived",
             subject_index: 10,
-            anchor: cp19,
+            anchor: cp20,
             chain: vec![0],
             record_subject: scores(&r.w1),
             competing: "not-checked",
@@ -537,8 +538,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     out.push(Vector {
         file: "trigger-declared-replacement-ordering-must-fail.ahl",
         receipt: trigger_declared(
-            cp19,
-            introduction(11, &r.c_a3, cp19),
+            cp20,
+            introduction(11, &r.c_a3, cp20),
             "MUST FAIL. The embedded `replacement_introduction` is the ingestion at entry 11, \
              but the correction it supports is anchored at entry 6. Core spec §2.3.3 requires a \
              correction's replacement to be introduced at an entry index no greater than the \
@@ -633,21 +634,21 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     // The challenge at entry 21: a well-anchored trigger from a non-authority key.
     let unauthorized_trigger = Spec {
         claim_type: "trigger-effective",
-        subject_index: 21,
-        anchor: cp23,
+        subject_index: 23,
+        anchor: cp25,
         chain: vec![0, 9],
         record_subject: customers(&r.c_f),
         competing: "enumerated",
         content_binding: "none",
         currency_mode: "enumerated",
-        currency_material: corpus.enumeration(0, 23, cp23),
+        currency_material: corpus.enumeration(0, 25, cp25),
         claim_material: json!({
-            "introduction": introduction(19, &r.c_f, cp23),
-            "checkpoint_C": cp23.checkpoint,
-            "competing": { "corpus_range": corpus.enumeration(19, 23, cp23) },
+            "introduction": introduction(20, &r.c_f, cp25),
+            "checkpoint_C": cp25.checkpoint,
+            "competing": { "corpus_range": corpus.enumeration(20, 25, cp25) },
         }),
         producer_keys: None,
-        note: "MUST FAIL. Every mechanical check passes: the retraction at entry 21 is anchored, \
+        note: "MUST FAIL. Every mechanical check passes: the retraction at entry 23 is anchored, \
                its signature verifies against a producer key in force at that index, the \
                enumeration is complete and the competing range is the introduction-fixed one. \
                It still cannot be effective, because core spec §2.3.3 makes effectiveness an \
@@ -662,8 +663,104 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: unauthorized_trigger.clone(),
         expect: Expect::Reject {
             rule: "spec §2.3.3 — a trigger not signed by the record's authority is a challenge",
-            matches: |e| matches!(e, ReceiptError::TriggerNotAuthorized { entry_index: 21, .. }),
+            matches: |e| matches!(e, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. }),
         },
+    });
+
+    // A valid, AUTHORIZED trigger on F at entry 22, enumerated over a range that also
+    // contains the later challenge at entry 23. The challenge must be filtered out before the
+    // greatest-entry-index selection, or it would wrongly govern.
+    out.push(Vector {
+        file: "trigger-effective-later-challenge-ignored.ahl",
+        receipt: Spec {
+            claim_type: "trigger-effective",
+            subject_index: 22,
+            anchor: cp25,
+            chain: vec![0, 9],
+            record_subject: customers(&r.c_f),
+            competing: "enumerated",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 25, cp25),
+            claim_material: json!({
+                "introduction": introduction(20, &r.c_f, cp25),
+                "checkpoint_C": cp25.checkpoint,
+                "competing": { "corpus_range": corpus.enumeration(20, 25, cp25) },
+            }),
+            producer_keys: None,
+            note: "Proves that the retraction at entry 22 — signed by the `customers` dataset \
+                   authority — governs record F at cp25, EVEN THOUGH a second trigger naming \
+                   the same record sits at the greater entry index 23. That later trigger is \
+                   signed by `producer-2`, which is not in the authority key set, so core spec \
+                   §2.3.3 anchors it as a challenge: \"surfaced by verification, never \
+                   traversed\". Effectiveness is therefore decided BEFORE the \
+                   greatest-entry-index rule is applied, not after. A verifier that selected \
+                   the governing trigger by index and only then checked authority would \
+                   conclude that entry 23 governs and reject this receipt — which would let \
+                   anyone able to get a statement anchored unseat the governing trigger of a \
+                   record they hold no authority over. The competing enumeration deliberately \
+                   spans [20, 25) so the challenge IS in range and IS seen."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    // A trigger on a DERIVED record, signed with a key added after the introduction.
+    out.push(Vector {
+        file: "trigger-effective-derived-rotated-key.ahl",
+        receipt: Spec {
+            claim_type: "trigger-effective",
+            subject_index: 19,
+            anchor: cp20,
+            chain: vec![0, 9],
+            record_subject: scores(&r.s1p),
+            competing: "enumerated",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 20, cp20),
+            claim_material: json!({
+                // S1' was introduced by a *derivation*, so the introduction proof is a
+                // `record-derived` receipt rather than a `record-ingested` one.
+                "introduction": Spec {
+                    claim_type: "record-derived",
+                    subject_index: 7,
+                    anchor: cp20,
+                    chain: vec![0],
+                    record_subject: scores(&r.s1p),
+                    competing: "not-checked",
+                    content_binding: "none",
+                    currency_mode: "declared",
+                    currency_material: json!({}),
+                    claim_material: json!({
+                        "output": { "dataset": DS_SCORES, "record": r.s1p },
+                    }),
+                    producer_keys: None,
+                    note: "Embedded introduction proof for a derived record: the unbatched \
+                           `record-derived` form, whose output must appear in the subject \
+                           derivation's `outputs` array."
+                        .to_owned(),
+                }
+                .build(corpus, keys),
+                "checkpoint_C": cp20.checkpoint,
+                "competing": { "corpus_range": corpus.enumeration(7, 20, cp20) },
+            }),
+            producer_keys: None,
+            note: "Proves that the retraction at entry 19 governs the DERIVED record S1' at \
+                   cp20. S1' was introduced by the derivation at entry 7, at which point the \
+                   producer key set held only `producer-1`; the `key` statement at entry 9 then \
+                   added `producer-2`, and this retraction is signed with that post-rotation \
+                   key. Core spec §2.3.3 resolves a derived record's authority as \"the \
+                   introducing producer's key set as of the trigger's entry index (not the \
+                   introduction index: key rotation between introduction and trigger \
+                   applies)\" — so the trigger is effective. A verifier that resolved the key \
+                   set at the introduction index would reject it as a challenge, silently \
+                   stripping the producer of the ability to retract its own outputs across a \
+                   routine key rotation."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
     });
 
     // --- disposition-declared ----------------------------------------------------
@@ -673,7 +770,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         Spec {
             claim_type: "disposition-declared",
             subject_index: 8,
-            anchor: cp19,
+            anchor: cp20,
             chain: vec![0],
             record_subject: scores(&r.s1),
             competing: "not-checked",
@@ -682,8 +779,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             currency_material: json!({}),
             claim_material: json!({
                 "trigger": trigger_declared(
-                    cp19,
-                    introduction(5, &r.c_a2, cp19),
+                    cp20,
+                    introduction(5, &r.c_a2, cp20),
                     "Embedded trigger proof for the correction the propagation names.",
                 ),
                 "disposition_leaf": corpus.tree_leaves(&corpus.affected_root)[s1_leaf],
@@ -823,8 +920,10 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         currency_mode: "enumerated",
         currency_material: corpus.enumeration(0, 13, cp13),
         claim_material: json!({
-            "corpus_checkpoint": cp13.checkpoint,
-            "corpus_prefix": corpus.enumeration(0, 13, cp13),
+            // D — the propagation's own declared checkpoint, a real earlier checkpoint,
+            // carried as its full signed object and authenticated against A (spec §2.3.4).
+            "corpus_checkpoint": cp8.checkpoint,
+            "corpus_prefix": corpus.enumeration(0, 8, cp13),
             "trees": trees_block(&prefix_root_refs, drop_batch_leaf),
             "trigger": trigger_effective(1, "Embedded trigger-effective proof, bounded by cp8."),
         }),
@@ -839,17 +938,21 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: propagation_complete(
             false,
             "Proves that the affected set anchored by the propagation statement at entry 8 \
-             equals the closure recomputable from the complete corpus prefix [0, 13) together \
-             with the leaf material of every committed tree that prefix references. C is the \
-             receipt's own verified checkpoint, carried field-exact as `corpus_checkpoint` \
-             (receipt §3); recomputing at C rather than at the statement's own declared \
-             checkpoint is sound and strictly stronger, because post-trigger consumption is \
-             prohibited and the closure is therefore stable across every checkpoint committing \
-             the trigger (core §2.3.4). The trigger itself is carried as an embedded \
-             `trigger-effective` receipt, so a challenge could never be traversed here. There \
-             is no compact form of this claim by construction (core §6.5). The boundary is \
-             emphatically relative: it establishes completeness *within the declared corpus*, \
-             not that the declared corpus is the organisation's real corpus (core §5.3).",
+             equals the closure recomputable at the propagation's OWN declared checkpoint D — \
+             cp8, tree size 8 — from the complete prefix [0, 8) plus the leaf material of \
+             every committed tree that prefix references. D is carried as a full signed \
+             checkpoint object and authenticated two ways: its log signature verifies under \
+             the manifest version active for its tree size, and its root is recomputed from \
+             the prefix, whose range proof is checked against A (cp13, the checkpoint this \
+             receipt is anchored under). That recomputation IS a consistency proof D→A: it \
+             establishes D as exactly the size-8 prefix of A. Completeness is claimed at D and \
+             nowhere later — the corpus itself shows why, since the derivation at entry 27 \
+             legally consumes an affected descendant and enlarges this trigger's closure past \
+             D (core §2.3.4). The trigger is carried as an embedded `trigger-effective` \
+             receipt, so a challenge could never be traversed here. There is no compact form \
+             of this claim by construction (core §6.5), and the boundary stays relative: \
+             complete *within the declared corpus*, not proof that the declared corpus is the \
+             organisation's real corpus (core §5.3).",
         ),
         expect: Expect::Accept,
     });
@@ -869,22 +972,87 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         },
     });
 
-    // Completeness over a challenge: the propagation at entry 22 names an unauthorized trigger.
+    // The reviewer's counterexample: grounding completeness at A instead of the declared D.
+    out.push(Vector {
+        file: "propagation-complete-past-declared-checkpoint-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "propagation-complete",
+            subject_index: 8,
+            anchor: cp28,
+            chain: vec![0, 9, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 28, cp28),
+            claim_material: json!({
+                // The attack: substitute the *anchoring* checkpoint for the propagation's own
+                // declared D, so the closure would be recomputed over the whole corpus.
+                "corpus_checkpoint": cp28.checkpoint,
+                "corpus_prefix": corpus.enumeration(0, 28, cp28),
+                "trees": trees_block(
+                    &[
+                        &corpus.batch_root,
+                        &corpus.wide_outputs_root,
+                        &corpus.input_set_root,
+                        &corpus.affected_root,
+                        &corpus.challenge_affected_root,
+                    ],
+                    false,
+                ),
+                "trigger": trigger_effective(1, "Embedded trigger-effective proof, bounded by cp8."),
+            }),
+            producer_keys: None,
+            note: "MUST FAIL — this is the counterexample that forced completeness to be \
+                   defined at D. The propagation at entry 8 declared corpus checkpoint D at \
+                   tree size 8, where the affected set of the entry-6 trigger is four records. \
+                   Later, the derivation at entry 27 consumed S2 — an already-affected \
+                   DESCENDANT of the triggered record, which core spec §2.3.2 permits, since \
+                   only the triggered record A itself may not be re-consumed — and produced Z. \
+                   So at cp28 the true closure is five records, and the anchored disposition \
+                   tree of four no longer matches. This receipt tries to ground the \
+                   completeness claim at the anchoring checkpoint cp28 rather than at D, which \
+                   would either fabricate a disagreement or, with a doctored disposition set, \
+                   assert completeness the producer never claimed. It is rejected because \
+                   `claim_material.corpus_checkpoint` must be the propagation's OWN declared \
+                   checkpoint (core §2.3.4, receipt §3): cp28's identity fields do not match \
+                   the `{log_id, tree_size, root_hash}` the statement itself declares. \
+                   Completeness never extends past D; the enlargement creates a fresh \
+                   propagation duty instead (core §5.2)."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "spec §2.3.4 / receipt §3 — completeness is defined at the propagation's \
+                   declared checkpoint D, never at a later one",
+            matches: |e| {
+                matches!(
+                    e,
+                    ReceiptError::CheckpointNotBound {
+                        field: "claim_material.corpus_checkpoint",
+                        ..
+                    }
+                )
+            },
+        },
+    });
+
+    // Completeness over a challenge: the propagation at entry 24 names an unauthorized trigger.
     out.push(Vector {
         file: "propagation-complete-challenge-trigger-must-fail.ahl",
         receipt: Spec {
             claim_type: "propagation-complete",
-            subject_index: 22,
-            anchor: cp23,
+            subject_index: 24,
+            anchor: cp25,
             chain: vec![0, 9],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 23, cp23),
+            currency_material: corpus.enumeration(0, 25, cp25),
             claim_material: json!({
-                "corpus_checkpoint": cp23.checkpoint,
-                "corpus_prefix": corpus.enumeration(0, 23, cp23),
+                "corpus_checkpoint": cp24.checkpoint,
+                "corpus_prefix": corpus.enumeration(0, 24, cp25),
                 "trees": trees_block(
                     &[
                         &corpus.batch_root,
@@ -898,9 +1066,10 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 "trigger": unauthorized_trigger,
             }),
             producer_keys: None,
-            note: "MUST FAIL. The propagation statement at entry 22 is well formed, correctly \
-                   anchored, and its disposition tree opens cleanly — but the trigger it names \
-                   at entry 21 is signed by a key that is not the dataset authority. Core spec \
+            note: "MUST FAIL. The propagation statement at entry 24 is well formed, correctly \
+                   anchored, its declared checkpoint D authenticates, and its disposition tree \
+                   opens cleanly — but the trigger it names at entry 23 is signed by a key that \
+                   is not the dataset authority. Core spec \
                    §2.3.3 anchors such a trigger as a **challenge**: surfaced by verification, \
                    never traversed. Receipt §3 therefore REQUIRES `propagation-complete` to \
                    carry an embedded `trigger-effective` receipt, and no such receipt can be \
@@ -913,7 +1082,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Reject {
             rule: "receipt §3 / spec §2.3.3 — propagation-complete must embed a \
                    trigger-effective receipt; challenges are never traversed",
-            matches: |e| matches!(e, ReceiptError::TriggerNotAuthorized { entry_index: 21, .. }),
+            matches: |e| matches!(e, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. }),
         },
     });
 
@@ -922,23 +1091,23 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "governance-state-valid.ahl",
         receipt: Spec {
             claim_type: "governance-state",
-            subject_index: 23,
-            anchor: cp25,
-            chain: vec![0, 9, 23],
+            subject_index: 25,
+            anchor: cp28,
+            chain: vec![0, 9, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 25, cp25),
-            claim_material: json!({ "target_index": 24 }),
+            currency_material: corpus.enumeration(0, 28, cp28),
+            claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
-            note: "Proves that manifest version 2, anchored at entry 23, is the governance \
-                   state active at entry index 24. The §4 material enumerates exactly \
-                   [0, 25) — the whole prefix of this receipt's verified checkpoint — and \
-                   contains no manifest or key statement in (23, 24], so nothing supersedes \
+            note: "Proves that manifest version 2, anchored at entry 25, is the governance \
+                   state active at entry index 26. The §4 material enumerates exactly \
+                   [0, 28) — the whole prefix of this receipt's verified checkpoint — and \
+                   contains no manifest or key statement in (25, 26], so nothing supersedes \
                    version 2 before the target. Version 2 replaced the witness key set in full \
                    and dropped `producer-2` from the producer snapshot (core §7.2), which is \
-                   why cp25 is cosigned by witness-2 while every earlier checkpoint is cosigned \
+                   why cp28 is cosigned by witness-2 while every earlier checkpoint is cosigned \
                    by witness-1."
                 .to_owned(),
         }
@@ -950,13 +1119,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 0,
-            anchor: cp19,
+            anchor: cp20,
             chain: vec![0, 9],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 19, cp19),
+            currency_material: corpus.enumeration(0, 20, cp20),
             claim_material: json!({ "target_index": 10 }),
             producer_keys: None,
             note: "MUST FAIL. The claim is that the genesis manifest is the governance state \
@@ -989,24 +1158,24 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 0,
-            anchor: cp25,
+            anchor: cp28,
             // The chain presents every governance statement; what the short enumeration fails
             // to prove is that these are the ONLY ones.
-            chain: vec![0, 9, 23],
+            chain: vec![0, 9, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 6, cp25),
+            currency_material: corpus.enumeration(0, 6, cp28),
             claim_material: json!({ "target_index": 5 }),
             producer_keys: None,
             note: "MUST FAIL. The enumeration over [0, 6) is authenticated and internally \
                    correct, and it does prove that no governance statement sits in (0, 5]. That \
-                   is exactly the trap: it says nothing about entries 6 through 24, where the \
-                   `key` statement at entry 9 and manifest version 2 at entry 23 — which drops \
+                   is exactly the trap: it says nothing about entries 6 through 27, where the \
+                   `key` statement at entry 9 and manifest version 2 at entry 25 — which drops \
                    a producer key — actually live. Receipt §4 therefore fixes enumerated \
                    currency at exactly [0, tree_size(C)) for the receipt's verified checkpoint \
-                   C, here [0, 25). A verifier that accepted any authenticated sub-range would \
+                   C, here [0, 28). A verifier that accepted any authenticated sub-range would \
                    let a receipt hide a later key retirement and validate signatures with a key \
                    the corpus had already discarded."
                 .to_owned(),
@@ -1020,7 +1189,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                     ReceiptError::GovernanceRangeNotComplete {
                         got_from: 0,
                         got_to: 6,
-                        tree_size: 25
+                        tree_size: 28
                     }
                 )
             },
@@ -1031,13 +1200,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 9,
-            anchor: cp19,
+            anchor: cp20,
             chain: vec![0, 9],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 19, cp19),
+            currency_material: corpus.enumeration(0, 20, cp20),
             claim_material: json!({ "target_index": 10 }),
             producer_keys: None,
             note: "MUST FAIL. The subject is the `key` statement at entry 9. Receipt §3 requires \

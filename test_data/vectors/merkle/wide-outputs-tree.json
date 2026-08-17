@@ -1,6 +1,6 @@
 {
   "adaptor": {
-    "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e",
+    "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa",
     "id": "ahl-test-log-v1"
   },
   "description": "Batch derivation output tree of entry 10 (core spec §2.5). Each `ahl-leaf-v2` leaf commits its input set by ROOT rather than inline, so the leaf's `inputs` is the wide-input form and the input-set tree below is a second committed tree. Receipt format §3's `input_members` applies exactly to this shape.",
@@ -9,15 +9,15 @@
       "dataset": "scores",
       "inputs": {
         "input_set_count": 3,
-        "input_set_root": "sha256:ac95e675b5a251efc76a680ac548446904ac7d1afc786488ed63d82d9b9f1047"
+        "input_set_root": "sha256:3c7e01dcfdc73cca9c6030d1acee992a1682f1f9beef3f539f41edd8227a1c33"
       },
       "record": "sha256:2fa4f863cc3d704bd6db36bcb152e8fbbc3773cc36f5594074cecd9c016916b0"
     },
     "leaf_index": 0,
     "path": [
-      "sha256:76de046486d2d0c029dcd857ddaaf990ddb379c36857bd2f6b25fed26b604316"
+      "sha256:a3b50e9d3a8f37d340a1002b9e637b5a2262dbe81f571cac380ae3bbe81c1321"
     ],
-    "root": "sha256:4ebd25e67e0f7081ddead5808219a1d74e220ce579e66b810fce5477e7fbe48e",
+    "root": "sha256:a6971f6e1a190eeaedfe7a0dc4e50d5a63a0ff7715059ad2e4474b477e46d78f",
     "tree_size": 2
   },
   "leaf_format": "ahl-leaf-v2",
@@ -27,7 +27,7 @@
       "dataset": "scores",
       "inputs": {
         "input_set_count": 3,
-        "input_set_root": "sha256:ac95e675b5a251efc76a680ac548446904ac7d1afc786488ed63d82d9b9f1047"
+        "input_set_root": "sha256:3c7e01dcfdc73cca9c6030d1acee992a1682f1f9beef3f539f41edd8227a1c33"
       },
       "record": "sha256:2fa4f863cc3d704bd6db36bcb152e8fbbc3773cc36f5594074cecd9c016916b0"
     },
@@ -35,13 +35,13 @@
       "dataset": "scores",
       "inputs": {
         "input_set_count": 3,
-        "input_set_root": "sha256:ac95e675b5a251efc76a680ac548446904ac7d1afc786488ed63d82d9b9f1047"
+        "input_set_root": "sha256:3c7e01dcfdc73cca9c6030d1acee992a1682f1f9beef3f539f41edd8227a1c33"
       },
       "record": "sha256:5929597d694c6d57301d1d81edac6047f0676abc36fc7560d6ce0b74e5bd777c"
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",
   "outputs_count": 2,
-  "outputs_root": "sha256:4ebd25e67e0f7081ddead5808219a1d74e220ce579e66b810fce5477e7fbe48e",
+  "outputs_root": "sha256:a6971f6e1a190eeaedfe7a0dc4e50d5a63a0ff7715059ad2e4474b477e46d78f",
   "sort_rule": "leaves sorted ascending by the UTF-8 bytes of the canonical `record` commitment string; non-canonical strings and duplicates are rejected (core spec §2.5)"
 }

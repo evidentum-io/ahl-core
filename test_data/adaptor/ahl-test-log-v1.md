@@ -136,24 +136,32 @@ non-genesis manifests and forbidden for the genesis manifest).
 
 ### 4.1 Dataset authority
 
-Core spec §1.2 defines the dataset authority as "the key set entitled to issue triggers for
-the dataset's ingested records", and §7.2 requires the manifest to declare it without fixing
-its shape. Under this profile it is an object:
+Core spec §7.2 now fixes the shape, and this profile carries it verbatim:
 
 ```json
 "authority": { "producer": "<producer id>", "key_ids": [ "sha256:<hex>", ... ] }
 ```
 
-A trigger for an ingested record of that dataset is **effective** only if at least one of its
-signatures is by a key id in `key_ids` (core spec §2.3.3). A trigger signed by any other key —
-including another valid key of the same producer — anchors as a **challenge**: it is surfaced
-by verification and never traversed by closure. `test_data/vectors/statements/21-*.json` is
-such a challenge, and the receipt vector `propagation-complete-challenge-trigger-must-fail.ahl`
-shows a completeness claim over it being rejected.
+`producer` MUST equal the manifest producer in core. A trigger for an ingested record of that
+dataset is **effective** only if at least one of its signatures is by a key id that is in
+`key_ids` **and** active at the trigger's own entry index (core spec §2.3.3, §7.2) — so a key
+the authority list names but a later manifest snapshot dropped no longer triggers.
 
-For a *derived* record the authority is the producer of the introducing derivation (core spec
-§2.3.3); in the closed-corpus core that is the producer key set in force at the introduction's
-entry index, so this profile adds nothing.
+A trigger signed by any other key — including another valid key of the same producer — anchors
+as a **challenge**: surfaced by verification, never traversed by closure, and never permitted
+to govern. Effectiveness is decided *before* the greatest-entry-index rule of core spec §2.3.3
+selects among competing triggers; a challenge at a greater entry index therefore cannot unseat
+an earlier authorized trigger. `test_data/vectors/statements/23-*.json` is such a challenge,
+sitting one index after the authorized retraction at entry 22:
+`trigger-effective-later-challenge-ignored.ahl` shows entry 22 still governing, and
+`propagation-complete-challenge-trigger-must-fail.ahl` shows a completeness claim over the
+challenge being rejected.
+
+For a *derived* record the authority is the introducing producer's key set **as of the
+trigger's entry index** — not the introduction index, so a key rotation between the two applies
+(core spec §2.3.3). `trigger-effective-derived-rotated-key.ahl` exercises exactly that: S1' is
+introduced at entry 7, `producer-2` is added at entry 9, and the retraction at entry 19 signed
+by `producer-2` is effective.
 
 ## 5. Checkpoints
 
@@ -239,6 +247,27 @@ would carry a new profile hash and therefore a new manifest version.
 
 Consistency proofs between checkpoints are otherwise a core-spec §3 contract item; nothing
 here weakens that requirement for production adaptors.
+
+### 7.1 Authenticating an earlier checkpoint without a consistency proof
+
+Receipt format §3 lets `propagation-complete` authenticate the propagation's declared
+checkpoint D "EITHER [by] a consistency proof D→`anchoring.checkpoint` OR [by] recomputation of
+D's prefix root from the enumerated prefix". Because this profile defines no consistency-proof
+serialization, only the second path is available under it — and it is sufficient:
+
+1. the receipt carries D as a full signed checkpoint object; its log signature is verified
+   against a key declared by the manifest version active for **D's** `tree_size` (§2.2), which
+   may be an earlier manifest version than the one active for A;
+2. the enumerated `corpus_prefix` covers `[0, tree_size(D))` and its §8 range proof is verified
+   against **A's** root at A's `tree_size` — so the entries are authenticated under the
+   checkpoint the verifier actually signature-checked and saw witness-cosigned;
+3. the root of those `tree_size(D)` leaves is recomputed by the §2 rule and compared to D's
+   `root_hash`.
+
+Steps 2 and 3 together establish that D is exactly the size-`tree_size(D)` prefix of A, which
+is precisely what an RFC 6962 consistency proof D→A asserts. The prefix is carried in full
+regardless — receipt format §3 states there is no compact completeness form — so a separate
+consistency proof would restate an already-proven fact in a second encoding.
 
 ## 8. Authenticated enumeration
 

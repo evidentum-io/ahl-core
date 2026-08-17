@@ -1,10 +1,10 @@
 {
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:70e93ebd471886da34b0a9a7ee19bc3df17400ae28b5e775c78739426bdd4787",
+    "root_hash": "sha256:c2ca7fdb4a7eb50960ba0db9de67fc17103c24089635bb91d971e5da2d2be6c0",
     "tree_size": 13
   },
-  "description": "Revocation closure `supersession-chain` over the 25-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
+  "description": "Revocation closure `supersession-chain` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",
@@ -55,7 +55,7 @@
       "effective_from": "2026-08-16T12:00:00Z",
       "retroactive": true
     },
-    "statement_id": "sha256:6f6bd36120a64ce5e91e08b557e2bc0a151add3ff5e1eaecabdc1a5e55177719",
+    "statement_id": "sha256:8e7efd40ec9acd565dd7273b7a2c8f9fd940839d566ab33d3ef103c7a76af0ee",
     "type": "correction"
   }
 }

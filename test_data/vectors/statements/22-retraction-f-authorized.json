@@ -1,4 +1,6 @@
 {
+  "entry_id": "sha256:fc6abeaf538fb23bccd38874682cf03b60acf3e6d98bcab841ae189f2bcaf5a6",
+  "entry_index": 22,
   "envelope": {
     "payload": {
       "ahl_version": "0.3",
@@ -7,17 +9,20 @@
       "manifest": "sha256:1b10dc0239d2b159786b9152e9e68558a4097e9d02fc07fe89b2cbbfc4329e72",
       "producer": "producer-1",
       "reason_code": "consent_withdrawn",
-      "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
+      "record": "hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757",
+      "scope": {
+        "effective_from": "2026-08-16T12:00:00Z",
+        "retroactive": true
+      },
       "type": "retraction",
       "valid_time": "2026-08-16T12:00:00Z"
     },
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:xca8KffY6nwQEI+YZ6EqkcS3FsC8JpVN/CgOb15F4WgOAWQWjO4xuSHm2vzrvWFIG7ZMl1n6NaLADF1WrvsHAw=="
+        "sig": "base64:a08B/Ub9AhiPDGd8sZuO+hezY1AuMVZ0de6T896Fg+/BfRd82kklQyJS5BXQW8GQp0Y7BfUEKbL4I7kk5hN/Aw=="
       }
     ]
   },
-  "expect": "reject: core spec §2.3.3 requires `scope` on every trigger — \"`scope` REQUIRED; scopeless triggers are malformed\"",
-  "name": "trigger-without-scope"
+  "statement_id": "sha256:2ed1722c8b27f03987b121667b005823c7f1d63817e46ded5bafb6c18814eef1"
 }

@@ -1,6 +1,6 @@
 {
-  "entry_id": "sha256:46ec5575423fcfda584dc07eb2f18f9ec082edccda6c105b4960f7af1d5db0bb",
-  "entry_index": 23,
+  "entry_id": "sha256:e7f043099a538a08ea588d7e19c5684e50901208b3033cb3ca149e0416f772ba",
+  "entry_index": 25,
   "envelope": {
     "payload": {
       "ahl_version": "0.3",
@@ -27,13 +27,13 @@
         {
           "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
           "pubkey": "base64:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=",
-          "valid_from_index": 23
+          "valid_from_index": 25
         }
       ],
       "level": "L3",
       "log": {
         "adaptor": {
-          "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e",
+          "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa",
           "id": "ahl-test-log-v1"
         },
         "checkpoint_cadence": "PT1H",
@@ -54,7 +54,7 @@
           "scoring-v1"
         ]
       },
-      "predecessor": "sha256:8e65b4c7491243ed79690156de5967342d1b10f0691a3329fbb5231ff6cb058a",
+      "predecessor": "sha256:be129d9d262de65c47eaad8d978ef54e87d5e1388182df53e036102816210a49",
       "producer": "producer-1",
       "properties": {
         "reproducible_reconstruction": false
@@ -74,7 +74,7 @@
             {
               "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
               "pubkey": "base64:iodf/x6zhFFXes1a/uQFRWVo3XyJ4JCGOgVXvHr0nxc=",
-              "valid_from_index": 23
+              "valid_from_index": 25
             }
           ],
           "witness_id": "witness-2"
@@ -84,9 +84,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:669B6o8PFwW4bJEAG7Rax1/yxGpilDE/rGyYyao3M/jaCRq3QpVcoB5RQy0JOCWppHaCj4pVj8g3rN5b2y+WBw=="
+        "sig": "base64:Mb2iD1WVhT6mWXWvYZWT6i9a4ReC8ol75UqhAPdMo3kIcURxv7245XgRDY7QoMo06JyZrRwVggcirGBKVZkiCA=="
       }
     ]
   },
-  "statement_id": "sha256:8b0539601cba27e1364794471cc2f934a8c634be1a3aa4fdffd30cfdb110ea28"
+  "statement_id": "sha256:13cf07de8b693d2371f32402749b48427bf127f2fb934a3593d282ef388775ff"
 }

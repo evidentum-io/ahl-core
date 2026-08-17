@@ -1,10 +1,10 @@
 {
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:e87c070da42bc5ab8d4b2562f85030636051e9f65142e925d325d47d47b8ee37",
-    "tree_size": 19
+    "root_hash": "sha256:01b81a5d3ae19767a1f579c292e4c689f0575e6f9b63a8401038640d1140b20b",
+    "tree_size": 20
   },
-  "description": "Revocation closure `retraction-after-correction` over the 25-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
+  "description": "Revocation closure `retraction-after-correction` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",
@@ -38,7 +38,7 @@
       "effective_from": "2026-08-16T12:00:00Z",
       "retroactive": true
     },
-    "statement_id": "sha256:03305a654c8de340be7af9ac709caeb962a022cb007034fa05b98ccdc6ab2105",
+    "statement_id": "sha256:6d73c67415b9555616c3752a297a1390622b15110250052c1a93338665ef7a65",
     "type": "retraction"
   }
 }

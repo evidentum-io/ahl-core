@@ -3,10 +3,10 @@
   "affected_root": "sha256:f95cf435ac16619e5231b9b21d1237aae07fbebd972a373efae748a4dbeb754d",
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:4fa10b1ec76b605eb4dc21c8af0dae3e213aecf51549fb9b34765083ad1d382d",
-    "tree_size": 8
+    "root_hash": "sha256:625cd2123984bdf25ac5ff2a575e3ef5472a99f6e751f9716d2451f1c4593ec8",
+    "tree_size": 28
   },
-  "description": "Revocation closure `toy-corpus` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
+  "description": "Revocation closure `descendant-enlargement-past-declared-checkpoint` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",
@@ -15,6 +15,10 @@
     {
       "dataset": "scores",
       "record": "sha256:54805948541052fc8111ac220cbdd5bcb3892e9899ffb96697b76aa7b7d42798"
+    },
+    {
+      "dataset": "scores",
+      "record": "sha256:6ee610208c48df3f7f4389ddbfec8e48586fb8203ae742c4a0463df1d07769ed"
     },
     {
       "dataset": "scores",
@@ -54,7 +58,7 @@
       "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510"
     }
   ],
-  "note": "The derivation at entry 7 produces S1' (sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c) from the replacement A2 and is therefore NOT affected: closure traverses (dataset, record) edges only (core spec §2.3.2), and S1' never consumed the corrected record. It appears in the corpus solely as the `successor_statement` of the `recomputed` disposition of S1. This trigger is the first correction of A, so its seed set is just {A}: a correction never seeds its own replacement (§5.1).",
+  "note": "The SAME trigger as `toy-corpus`, recomputed at a much later checkpoint. At the propagation's declared checkpoint D (tree size 8) the affected set is four records; here it is five, because the derivation at entry 27 consumed S2 — an already-affected descendant — and produced Z (sha256:6ee610208c48df3f7f4389ddbfec8e48586fb8203ae742c4a0463df1d07769ed). Core spec §2.3.2 bars re-consuming the triggered record A itself, but says nothing about its descendants, so entry 27 is perfectly legal. Closure is therefore NOT stable across checkpoints, and §2.3.4 defines completeness at D only: the propagation at entry 8 remains complete at D, and the enlargement creates a fresh propagation duty (§5.2) rather than retroactively invalidating it. A `propagation-complete` receipt grounded at any checkpoint later than D would be claiming something the producer never asserted and cannot support.",
   "trigger": {
     "dataset": "customers",
     "entry_index": 6,

@@ -1,6 +1,6 @@
 {
   "adaptor": {
-    "hash": "sha256:8cc9a62a66f29e28e8abd73299e3734dfa5217387a2bdc1e7de87feb8c346e6e",
+    "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa",
     "id": "ahl-test-log-v1"
   },
   "description": "Input-set tree committed by the wide-input derivation at entry 10 (core spec §2.5). Leaves are full derivation input objects. The tree mixes commitment modes, so both `hmac-sha256:` records precede the `sha256:` one under the UTF-8 byte ordering of the family string.",
@@ -9,37 +9,37 @@
       "dataset": "customers",
       "record": "hmac-sha256:04de2effaa7ad9f21761b7338449a4aba8c9edb59a90fd96236c31fdcd8ab46d",
       "role": "reference",
-      "statement": "sha256:745c117d47cc2b8adfb31b812a5876fc499b1ff985923a964e5a0c36d9ae5c90"
+      "statement": "sha256:939f1c1358227b5c86ca12167927b06f5d867b19eeab99737dad78dc667ac882"
     },
     "leaf_index": 0,
     "path": [
-      "sha256:b06ce0b022a2d5ae4921e2027381ceb7c98174ab323188766d7705845a4fb660",
-      "sha256:95a7920f1edf133d2eb6dd0a33e3b4e17b55239a101ea0dab0c95329c699a8f2"
+      "sha256:f7e0db3e3434f96c88f6202be2a3b8ea9bfc7d7545c40a98cdab654c9aa08e06",
+      "sha256:7f3d5cba68a8356b6cb31ef179c77a5c6552e662efe2d413a82c918e804baf7e"
     ],
-    "root": "sha256:ac95e675b5a251efc76a680ac548446904ac7d1afc786488ed63d82d9b9f1047",
+    "root": "sha256:3c7e01dcfdc73cca9c6030d1acee992a1682f1f9beef3f539f41edd8227a1c33",
     "tree_size": 3
   },
   "input_set_count": 3,
-  "input_set_root": "sha256:ac95e675b5a251efc76a680ac548446904ac7d1afc786488ed63d82d9b9f1047",
+  "input_set_root": "sha256:3c7e01dcfdc73cca9c6030d1acee992a1682f1f9beef3f539f41edd8227a1c33",
   "leaf_rule": "sha256(0x00 || JCS(leaf))",
   "leaves": [
     {
       "dataset": "customers",
       "record": "hmac-sha256:04de2effaa7ad9f21761b7338449a4aba8c9edb59a90fd96236c31fdcd8ab46d",
       "role": "reference",
-      "statement": "sha256:745c117d47cc2b8adfb31b812a5876fc499b1ff985923a964e5a0c36d9ae5c90"
+      "statement": "sha256:939f1c1358227b5c86ca12167927b06f5d867b19eeab99737dad78dc667ac882"
     },
     {
       "dataset": "customers",
       "record": "hmac-sha256:a2d4ab5d728fa03cd366fac0f6b4d65c419c353f56521302926604f11d3471c1",
       "role": "feature",
-      "statement": "sha256:f29c70a7b7e2c899804a61e5b7fa67693fbe9af0bb19f558bde7079ce4745e4a"
+      "statement": "sha256:f706aea0d65088ad9d4b8b4c2b86e72dc03af7eca6dc9d309af5e532ce96ed74"
     },
     {
       "dataset": "scores",
       "record": "sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c",
       "role": "feature",
-      "statement": "sha256:6ae4a38633691cf47c45d16491cff15b6b9330e4d2632ebd640bb4efc660d466"
+      "statement": "sha256:c046d7ab3d6c8dc58ae3792edc2104d2782996f4ba0fecffd156198f1a9d674f"
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",
