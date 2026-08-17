@@ -32,8 +32,8 @@ use crate::range_proof;
 use crate::tree::ValidatedLeafSet;
 use crate::{
     checkpoint_signing_bytes, commit_keyed, commit_plain, cosignature_bytes, decode_pubkey,
-    entry_id, jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id, verify_signature,
-    AhlError, B64,
+    entry_id, hash_hex, jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id, tree_root,
+    verify_signature, AhlError, B64,
 };
 
 /// Receipt container version this verifier implements.
@@ -218,14 +218,12 @@ pub enum ReceiptError {
         capability: &'static str,
     },
 
-    /// A claim's checkpoint is not the receipt's own verified `anchoring.checkpoint` (§3).
+    /// A claim's checkpoint is not the checkpoint the claim is required to rest on (§3).
     ///
-    /// A "governs" or "complete" claim may only rest on a checkpoint whose signature, witness
-    /// cosignature and inclusion path this verifier actually checked.
-    #[error(
-        "`{field}` is not the receipt's verified anchoring checkpoint: `{member}` differs \
-         (self-supplied checkpoints cannot ground this claim)"
-    )]
+    /// For `trigger-effective` that reference is the receipt's own verified
+    /// `anchoring.checkpoint`; for `propagation-complete` it is the propagation statement's
+    /// declared checkpoint D. Either way a self-supplied checkpoint cannot ground the claim.
+    #[error("`{field}` does not match the checkpoint this claim must rest on: `{member}` differs")]
     CheckpointNotBound {
         /// The claim-material member carrying the unverified checkpoint.
         field: &'static str,
@@ -543,9 +541,11 @@ struct Budget {
     limits: Limits,
     work: u64,
     embedded: usize,
-    /// Verdicts of embedded receipts already verified, keyed by entry id. Format §3.1:
-    /// "Duplicate embedded receipts (same entry id) MUST be verified once and referenced
-    /// thereafter" — so this is consulted *before* recursing, not merely recorded after.
+    /// Verdicts of embedded receipts already verified, keyed by the **JCS digest of the whole
+    /// embedded receipt object** (format §3.1). The entry id alone is unsound: two embedded
+    /// receipts can share a subject statement while carrying different — independently
+    /// forgeable — `claim_material`, and keying on the envelope would let the second reuse the
+    /// first's verdict. Consulted before recursing, not merely recorded after.
     verified: BTreeMap<String, Verdict>,
 }
 
@@ -1583,10 +1583,11 @@ fn verify_embedded(
 ) -> Result<Embedded> {
     let embedded =
         ctx.material()?.get(slot).filter(|v| v.is_object()).ok_or_else(|| ctx.missing(slot))?;
-    // Duplicate embedded receipts are verified once and referenced thereafter (§3.1). The
-    // cache is consulted before recursing, so a receipt that carries the same embedded receipt
-    // in two slots costs one verification, not two — a correctness rule with a DoS edge.
-    let key = entry_id(obj(embedded, "envelope")?);
+    // Duplicate embedded receipts are verified once and referenced thereafter (§3.1). The key
+    // is the digest of the *entire* receipt object, so only byte-identical receipts share a
+    // cache entry; two receipts about the same statement with different claim material are
+    // each verified in full.
+    let key = sha256_hex(&jcs(embedded));
     let verdict = if let Some(cached) = budget.verified.get(&key) {
         cached.clone()
     } else {
@@ -1676,83 +1677,131 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
         // "Effective" is exactly the authority claim: an unauthorized trigger is a challenge
         // (spec §2.3.3) and can never be effective, however well anchored it is.
         verify_trigger_authority(ctx, &introduction)?;
-        verify_competing_triggers(ctx, introduction.entry_index, budget)?;
+        verify_competing_triggers(ctx, &introduction, budget)?;
     } else if ctx.assurance.competing_triggers != "not-checked" {
         return Err(ReceiptError::AssuranceMismatch { field: "competing_triggers" });
     }
     Ok(())
 }
 
-/// Bind a claim-material checkpoint to the receipt's own verified `anchoring.checkpoint`.
+/// The three members that identify a checkpoint (spec §2.3.4 wire form).
+const CHECKPOINT_IDENTITY: [&str; 3] = ["log_id", "tree_size", "root_hash"];
+
+/// Compare two checkpoint objects on the §2.3.4 identity fields.
 ///
-/// Format §3: "`checkpoint_C` (and `propagation-complete`'s `corpus_checkpoint`) MUST equal,
-/// field-exact, the receipt's verified `anchoring.checkpoint`". Without this a receipt could
-/// fabricate a checkpoint — never signature-checked, never witnessed, never used for an
-/// inclusion proof — and ground a "governs" or "complete" claim on it. The three §2.3.4
-/// members must be present, and every member the carried object does declare must agree.
-fn bind_checkpoint(ctx: &ClaimCtx<'_>, carried: &Value, field: &'static str) -> Result<u64> {
+/// Format §3 fixes the comparison as "an identity-field match; extra checkpoint fields are
+/// compared when present". So `{log_id, tree_size, root_hash}` are REQUIRED on the carried
+/// object and must agree; any other member is compared only when both sides carry it, and is
+/// never itself required. That lets a bare §2.3.4 checkpoint reference be compared against a
+/// full signed checkpoint object without the missing `signature`/`key_id` counting against it.
+fn checkpoints_agree(carried: &Value, reference: &Value, field: &'static str) -> Result<()> {
     let carried =
         carried.as_object().ok_or_else(|| ReceiptError::Malformed(format!("`{field}` object")))?;
-    let verified = ctx
-        .anchoring_checkpoint
+    let reference = reference
         .as_object()
-        .ok_or_else(|| ReceiptError::Malformed("`anchoring.checkpoint` object".to_owned()))?;
+        .ok_or_else(|| ReceiptError::Malformed("reference checkpoint object".to_owned()))?;
 
-    for member in ["log_id", "tree_size", "root_hash"] {
-        if !carried.contains_key(member) {
-            return Err(ReceiptError::CheckpointNotBound { field, member: member.to_owned() });
+    for member in CHECKPOINT_IDENTITY {
+        match carried.get(member) {
+            Some(value) if reference.get(member) == Some(value) => {}
+            _ => return Err(ReceiptError::CheckpointNotBound { field, member: member.to_owned() }),
         }
     }
     for (member, value) in carried {
-        if verified.get(member) != Some(value) {
+        if reference.get(member).is_some_and(|other| other != value) {
             return Err(ReceiptError::CheckpointNotBound { field, member: member.clone() });
         }
     }
+    Ok(())
+}
+
+/// Bind `checkpoint_C` to the receipt's own verified `anchoring.checkpoint` (format §3).
+///
+/// For `trigger-effective` — and, through its embedded trigger, `disposition-effective` — C
+/// **is** the anchoring checkpoint: a "governs" claim may only rest on a checkpoint whose
+/// signature, witness cosignature and inclusion path this verifier actually checked.
+/// `propagation-complete` is the deliberate exception: its `corpus_checkpoint` is the
+/// propagation's own declared D, generally *earlier* than A, and is authenticated by
+/// [`authenticate_declared_checkpoint`] plus prefix recomputation instead.
+fn bind_checkpoint(ctx: &ClaimCtx<'_>, carried: &Value, field: &'static str) -> Result<u64> {
+    checkpoints_agree(carried, ctx.anchoring_checkpoint, field)?;
     number(ctx.anchoring_checkpoint, "tree_size")
 }
 
-/// The key ids that signed the subject envelope.
-fn signing_key_ids(ctx: &ClaimCtx<'_>) -> Result<BTreeSet<String>> {
-    array(obj(ctx.receipt, "envelope")?, "signatures")?
-        .iter()
-        .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
-        .collect()
+/// Whether the record whose triggers are being judged was introduced by an ingestion.
+///
+/// Spec §2.3.3 routes authority differently for the two introduction forms, and the embedded
+/// introduction receipt is what tells the verifier which one applies.
+fn introduced_by_ingestion(introduction: &Embedded) -> bool {
+    introduction.verdict.claim_type == "record-ingested"
 }
 
-/// Spec §2.3.3: a trigger is effective only if signed by the record's authority — the dataset
-/// authority for ingested records, the producer of the introducing derivation for derived ones.
-/// Triggers from any other key anchor as **challenges**: surfaced, never traversed.
+/// The key set entitled to trigger `dataset`'s record, **as of `index`** (spec §2.3.3, §7.2).
+///
+/// Both branches are resolved at the *trigger's* entry index, never at the introduction's:
+///
+/// * ingested records — the manifest's declared dataset authority `{producer, key_ids}`,
+///   intersected with the producer keys in force at `index`, because §7.2 requires a trigger's
+///   signing key to be "in the authority key set AND active at the trigger's entry index";
+/// * derived records — the introducing producer's key set as of `index`. §2.3.3 is explicit
+///   that this is *not* the introduction index: a key rotation between introduction and
+///   trigger applies, so a key added after the derivation may still trigger its output.
+fn authority_at(
+    ctx: &ClaimCtx<'_>,
+    dataset: &str,
+    by_ingestion: bool,
+    index: u64,
+) -> Result<BTreeSet<String>> {
+    let in_force: BTreeSet<String> = ctx.governance.producer_keys_at(index).into_keys().collect();
+    if !by_ingestion {
+        return Ok(in_force);
+    }
+    let (_, manifest) = ctx.governance.snapshot_manifest(index).ok_or_else(|| {
+        ReceiptError::GovernanceChainInvalid("no manifest governs the trigger".to_owned())
+    })?;
+    let declared = obj(obj(manifest, "datasets")?, dataset)?;
+    let authority = declared.get("authority").ok_or_else(|| {
+        ReceiptError::GovernanceChainInvalid(format!(
+            "dataset `{dataset}` declares no authority, so an ingestion into it is invalid \
+             (spec §7.2)"
+        ))
+    })?;
+    let declared_keys: BTreeSet<String> = array(authority, "key_ids")?
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| ReceiptError::Malformed("`authority.key_ids` element".to_owned()))
+        })
+        .collect::<Result<_>>()?;
+    Ok(&declared_keys & &in_force)
+}
+
+/// Whether the envelope at `index` is a trigger signed by the record's authority.
+fn is_authorized_trigger(
+    ctx: &ClaimCtx<'_>,
+    envelope: &Value,
+    dataset: &str,
+    by_ingestion: bool,
+    index: u64,
+) -> Result<bool> {
+    let signers: BTreeSet<String> = array(envelope, "signatures")?
+        .iter()
+        .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
+        .collect::<Result<_>>()?;
+    Ok(!signers.is_disjoint(&authority_at(ctx, dataset, by_ingestion, index)?))
+}
+
+/// Spec §2.3.3: a trigger is effective only if signed by the record's authority. Triggers from
+/// any other key anchor as **challenges**: surfaced by verification, never traversed.
 fn verify_trigger_authority(ctx: &ClaimCtx<'_>, introduction: &Embedded) -> Result<()> {
     let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
-    let authority: BTreeSet<String> = if introduction.verdict.claim_type == "record-ingested" {
-        let (_, manifest) =
-            ctx.governance.snapshot_manifest(ctx.subject_index).ok_or_else(|| {
-                ReceiptError::GovernanceChainInvalid("no manifest governs the trigger".to_owned())
-            })?;
-        // §7.2 declares the dataset authority; §1.2 defines it as a *key set*, so the corpus
-        // manifest carries it as `{producer, key_ids}` (see the adaptor profile note).
-        let declared = obj(obj(manifest, "datasets")?, dataset)?;
-        let authority = declared.get("authority").ok_or_else(|| {
-            ReceiptError::GovernanceChainInvalid(format!(
-                "dataset `{dataset}` declares no authority, so an ingestion into it is invalid \
-                 (spec §7.2)"
-            ))
-        })?;
-        array(authority, "key_ids")?
-            .iter()
-            .map(|id| {
-                id.as_str().map(str::to_owned).ok_or_else(|| {
-                    ReceiptError::Malformed("`authority.key_ids` element".to_owned())
-                })
-            })
-            .collect::<Result<_>>()?
-    } else {
-        // A derived record's authority is the producer of the introducing derivation; in the
-        // closed-corpus core that is the producer key set in force at the introduction.
-        ctx.governance.producer_keys_at(introduction.entry_index).into_keys().collect()
-    };
-
-    let signers = signing_key_ids(ctx)?;
+    let signers: BTreeSet<String> = array(obj(ctx.receipt, "envelope")?, "signatures")?
+        .iter()
+        .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
+        .collect::<Result<_>>()?;
+    let authority =
+        authority_at(ctx, dataset, introduced_by_ingestion(introduction), ctx.subject_index)?;
     if signers.is_disjoint(&authority) {
         return Err(ReceiptError::TriggerNotAuthorized {
             entry_index: ctx.subject_index,
@@ -1766,9 +1815,10 @@ fn verify_trigger_authority(ctx: &ClaimCtx<'_>, introduction: &Embedded) -> Resu
 /// The §3 competing-trigger enumeration required by `trigger-effective`.
 fn verify_competing_triggers(
     ctx: &ClaimCtx<'_>,
-    introduction_index: u64,
+    introduction: &Embedded,
     budget: &mut Budget,
 ) -> Result<()> {
+    let introduction_index = introduction.entry_index;
     if ctx.assurance.competing_triggers != "enumerated" || ctx.assurance.governance != "enumerated"
     {
         return Err(ReceiptError::AssuranceMismatch { field: "competing_triggers" });
@@ -1798,20 +1848,36 @@ fn verify_competing_triggers(
         });
     }
 
-    // Among the effective triggers naming the record, the greatest entry index governs
+    // Among the **effective** triggers naming the record, the greatest entry index governs
     // (spec §2.3.3); the subject must be that one.
-    let (_, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
-    let dataset = &ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?.0;
+    //
+    // Effectiveness is decided before the index comparison, not after. A trigger signed by a
+    // key that is not the record's authority anchors as a challenge and is "never traversed" —
+    // so it can never displace an earlier valid trigger, however much later it sits in the
+    // log. Selecting by index first and filtering afterwards would let anyone who can get a
+    // statement anchored unseat the governing trigger of a record they have no authority over.
+    let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
+    let by_ingestion = introduced_by_ingestion(introduction);
     let mut governing = None;
+    let mut challenges = Vec::new();
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
         let index = enumeration.from_index + offset as u64;
         let payload = payload_of(envelope)?;
-        if matches!(statement_type(payload)?, "retraction" | "correction")
-            && payload.get("dataset").and_then(Value::as_str) == Some(dataset.as_str())
-            && payload.get("record").and_then(Value::as_str) == Some(record.as_str())
+        if !matches!(statement_type(payload)?, "retraction" | "correction")
+            || payload.get("dataset").and_then(Value::as_str) != Some(dataset.as_str())
+            || payload.get("record").and_then(Value::as_str) != Some(record.as_str())
         {
-            governing = Some(index);
+            continue;
         }
+        if is_authorized_trigger(ctx, envelope, dataset, by_ingestion, index)? {
+            governing = Some(index);
+        } else {
+            challenges.push(index);
+        }
+    }
+    if !challenges.is_empty() {
+        // Surfaced, as §2.3.3 requires — but not traversed, and not permitted to govern.
+        budget.spend(challenges.len() as u64)?;
     }
     if governing != Some(ctx.subject_index) {
         return Err(ReceiptError::ClosureMismatch(format!(
@@ -1880,6 +1946,61 @@ fn verify_disposition(
     )
 }
 
+/// Authenticate the propagation's declared checkpoint D as a real, log-signed checkpoint.
+///
+/// D is carried as a full signed checkpoint object (format §3). Its signature is checked
+/// against a log key that both appears in the receipt's `keys.log` block *and* is declared by
+/// the manifest version active for **D's** own tree size — not A's. The two can differ: a
+/// manifest anchored between D and A rotates the log key set, and a checkpoint issued under
+/// the earlier state must be validated by the earlier key (format §2.2).
+fn authenticate_declared_checkpoint(
+    ctx: &ClaimCtx<'_>,
+    declared: &Value,
+    budget: &mut Budget,
+) -> Result<()> {
+    let key_id = text(declared, "key_id")?;
+    let (binding_index, manifest) = ctx
+        .governance
+        .active_for(number(declared, "tree_size")?)
+        .map_err(|_| ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index: 0 })?;
+
+    // The key must be declared by that manifest version...
+    let declared_pubkey = key_objects(obj(manifest, "log")?)?
+        .into_iter()
+        .find(|(id, _)| id == key_id)
+        .map(|(_, pubkey)| pubkey)
+        .ok_or_else(|| ReceiptError::KeyNotBound {
+            key_id: key_id.to_owned(),
+            entry_index: binding_index,
+        })?;
+    // ...and carried in the receipt's keys block, with a key id that recomputes from it.
+    let carried = array(obj(ctx.receipt, "keys")?, "log")?
+        .iter()
+        .find(|entry| text(entry, "key_id").ok() == Some(key_id))
+        .ok_or_else(|| ReceiptError::KeyNotBound {
+            key_id: key_id.to_owned(),
+            entry_index: binding_index,
+        })?;
+    check_key_id(carried)?;
+    if text(carried, "pubkey")? != declared_pubkey {
+        return Err(ReceiptError::KeyNotBound {
+            key_id: key_id.to_owned(),
+            entry_index: binding_index,
+        });
+    }
+
+    budget.spend(1)?;
+    if verify_signature(
+        &decode_pubkey(&declared_pubkey)?,
+        &checkpoint_signing_bytes(declared)?,
+        text(declared, "signature")?,
+    )? {
+        Ok(())
+    } else {
+        Err(ReceiptError::CheckpointSignatureInvalid)
+    }
+}
+
 /// `propagation-complete` (§3): the anchored affected set equals the recomputable closure.
 // The completeness claim has the longest precondition list in the registry — checkpoint
 // binding, prefix enumeration, tree material, trigger effectiveness, closure — and each step
@@ -1896,35 +2017,50 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
         .filter(|v| v.is_object())
         .ok_or_else(|| ctx.missing("corpus_prefix"))?;
 
-    // C must be the receipt's own verified checkpoint (§3), not a self-supplied one.
-    let tree_size = bind_checkpoint(
-        ctx,
-        material.get("corpus_checkpoint").ok_or_else(|| ctx.missing("corpus_checkpoint"))?,
+    // Completeness is defined at the propagation's own declared checkpoint D — never at the
+    // later checkpoint A the propagation statement is anchored under (spec §2.3.4). The
+    // carried `corpus_checkpoint` must therefore BE D, authenticated rather than self-supplied.
+    let carried_d =
+        material.get("corpus_checkpoint").ok_or_else(|| ctx.missing("corpus_checkpoint"))?;
+    checkpoints_agree(
+        carried_d,
+        obj(ctx.payload, "corpus_checkpoint")?,
         "claim_material.corpus_checkpoint",
     )?;
-    let root = parse_hash_hex(text(ctx.anchoring_checkpoint, "root_hash")?)?;
-
-    // The statement's own declared checkpoint (spec §2.3.4) must commit the trigger and must
-    // not reach past C. Recomputing at C rather than at the declared checkpoint is sound — and
-    // strictly stronger — because post-trigger consumption is prohibited, so the closure is
-    // stable across every checkpoint committing the trigger (spec §2.3.4, §5.2).
-    let declared = obj(ctx.payload, "corpus_checkpoint")?;
-    let declared_size = number(declared, "tree_size")?;
-    if declared_size > tree_size {
+    let declared_size = number(carried_d, "tree_size")?;
+    let anchor_size = number(ctx.anchoring_checkpoint, "tree_size")?;
+    if declared_size > anchor_size {
+        // D must be committed by A; otherwise the prefix cannot be authenticated under A.
         return Err(ReceiptError::CheckpointNotBound {
-            field: "envelope.payload.corpus_checkpoint",
+            field: "claim_material.corpus_checkpoint",
             member: "tree_size".to_owned(),
         });
     }
+    authenticate_declared_checkpoint(ctx, carried_d, budget)?;
 
-    let prefix = verify_enumeration(prefix_material, &root, tree_size, "corpus prefix", budget)?;
+    // The prefix is `[0, tree_size(D))`, and its range proof is checked against **A's** root:
+    // A is the checkpoint this verifier signature-checked and saw witness-cosigned. Verifying
+    // the prefix under A and then recomputing D's root from it is a consistency proof D→A in
+    // the range-proof's clothing — it establishes that D is exactly the size-`tree_size(D)`
+    // prefix of A, which is what makes D usable without a second proof mechanism.
+    let root = parse_hash_hex(text(ctx.anchoring_checkpoint, "root_hash")?)?;
+    let tree_size = declared_size;
+    let prefix = verify_enumeration(prefix_material, &root, anchor_size, "corpus prefix", budget)?;
     if prefix.from_index != 0 || prefix.to_index != tree_size {
         return Err(ReceiptError::RangeProofInvalid {
             what: "corpus prefix",
             detail: format!(
-                "must be the complete prefix [0, {tree_size}), got [{}, {})",
+                "must be the complete prefix [0, {tree_size}) of the declared checkpoint D, \
+                 got [{}, {})",
                 prefix.from_index, prefix.to_index
             ),
+        });
+    }
+    let recomputed_d = hash_hex(&tree_root(&prefix.entries.iter().map(jcs).collect::<Vec<_>>()));
+    if recomputed_d != text(carried_d, "root_hash")? {
+        return Err(ReceiptError::CheckpointNotBound {
+            field: "claim_material.corpus_checkpoint",
+            member: "root_hash".to_owned(),
         });
     }
 
@@ -1976,7 +2112,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
             outer: ctx.subject_index,
         });
     }
-    // The declared checkpoint must commit the trigger's entry (spec §2.3.4).
+    // D must commit the trigger's entry (spec §2.3.4).
     if declared_size <= trigger.entry_index {
         return Err(ReceiptError::CheckpointNotBound {
             field: "envelope.payload.corpus_checkpoint",
