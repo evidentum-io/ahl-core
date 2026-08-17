@@ -27,8 +27,9 @@ use ahl_core::{
 };
 use serde_json::{json, Value};
 
-/// The twenty-five statement vectors, in entry-index order.
-const STATEMENT_FILES: [&str; 28] = [
+/// The statement vectors, in entry-index order. Entry 28 is an intentional forgery fixture
+/// (round-5): well-formed shape, real authority `key_id`, garbage `sig`.
+const STATEMENT_FILES: [&str; 29] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -57,6 +58,7 @@ const STATEMENT_FILES: [&str; 28] = [
     "25-manifest-v2-rotate-witness-drop-key.json",
     "26-ingestion-customers-d-under-v2.json",
     "27-derivation-z-from-affected-descendant.json",
+    "28-forged-signature-trigger-f.json",
 ];
 
 /// The four published closure scenarios.
@@ -240,12 +242,23 @@ fn the_manifest_chain_links_by_entry_id_and_rotates_the_witness_set() {
 
 #[test]
 fn every_statement_signature_verifies() {
+    // Entry 28 is an intentional forgery fixture (round-5): well-formed shape, real authority
+    // `key_id`, garbage `sig`. Every other entry must genuinely verify; entry 28 must not.
+    const FORGED: usize = 28;
     let vectors = statement_vectors();
     let keys = key_set(&vectors);
     for (index, vector) in vectors.iter().enumerate() {
         let ok = verify_envelope(&vector["envelope"], |key_id| keys.get(key_id).cloned())
             .expect("well-formed envelope");
-        assert!(ok, "{}: signature did not verify", STATEMENT_FILES[index]);
+        if index == FORGED {
+            assert!(
+                !ok,
+                "{}: the forged-signature fixture must NOT verify",
+                STATEMENT_FILES[index]
+            );
+        } else {
+            assert!(ok, "{}: signature did not verify", STATEMENT_FILES[index]);
+        }
     }
 }
 
@@ -1734,8 +1747,17 @@ fn a_later_challenge_cannot_unseat_an_authorized_trigger() {
     assert!(authority.contains(&signer(22)), "entry 22 must be the authorized trigger");
     assert!(!authority.contains(&signer(23)), "entry 23 must be the challenge");
 
+    // Bounded to [0, 25): entries 22 (authorized) and 23 (challenge) are what this test
+    // illustrates. Entry 28 also names F — it is round-5's FORGED-signature fixture, covered
+    // end to end by `trigger-effective-forged-signature-ignored.ahl` — and is deliberately out
+    // of scope here: a `key_id`-only "authority" filter, as used below, cannot tell it apart
+    // from a genuine signature, which is exactly why `is_authorized_trigger` in the verifier
+    // checks the signature cryptographically rather than reusing this shortcut.
+    let mut scope = 0..25;
+
     // Selecting by greatest entry index *first* would pick the challenge — the pre-fix bug.
-    let naive_governing = (0..vectors.len())
+    let naive_governing = scope
+        .clone()
         .rfind(|i| {
             let payload = &vectors[*i]["envelope"]["payload"];
             matches!(payload["type"].as_str(), Some("retraction" | "correction"))
@@ -1746,7 +1768,7 @@ fn a_later_challenge_cannot_unseat_an_authorized_trigger() {
 
     // Filtering challenges first selects the authorized trigger, which is what the receipt
     // vector `trigger-effective-later-challenge-ignored.ahl` asserts end to end.
-    let governing = (0..vectors.len())
+    let governing = scope
         .rfind(|i| {
             let payload = &vectors[*i]["envelope"]["payload"];
             matches!(payload["type"].as_str(), Some("retraction" | "correction"))

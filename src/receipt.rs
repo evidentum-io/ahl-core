@@ -882,6 +882,11 @@ fn check_key_id(entry: &Value) -> Result<()> {
     Ok(())
 }
 
+/// `key_id -> pubkey` for `keys.log`/`keys.witness` entries that bound successfully at some
+/// checkpoint's active manifest index, plus, for every `key_id` that never did, the binding
+/// index its first failing entry actually carried.
+type BoundAndAttempted = (BTreeMap<String, String>, BTreeMap<String, u64>);
+
 fn verify_checkpoint(
     receipt: &Value,
     governance: &Governance<'_>,
@@ -910,29 +915,45 @@ fn verify_checkpoint(
         ));
     }
 
+    // A `keys.log`/`keys.witness` entry that fails to bind at `active_index` is not necessarily
+    // wrong: a `propagation-complete` receipt legitimately carries entries for TWO checkpoints
+    // (A here, and D — authenticated separately, spec §2.2) that can be active under different
+    // manifest versions, so the same physical key may appear twice under different bindings.
+    // Binding is therefore tolerant per entry rather than all-or-nothing for the whole array:
+    // any entry that binds successfully is usable; an entry that doesn't is simply not usable
+    // FOR THIS CHECKPOINT, and only becomes an error if no entry for that `key_id` ever bound —
+    // in which case the error still names that entry's own (wrong) binding index, not
+    // `active_index`, so a genuinely mis-bound single entry is reported precisely.
     let keys = obj(receipt, "keys")?;
-    let mut log_keys = BTreeMap::new();
-    for entry in array(keys, "log")? {
-        check_key_id(entry)?;
-        log_keys.insert(
-            text(entry, "key_id")?.to_owned(),
-            bind_log_or_witness_key(governance, entry, "log", active_index)?,
-        );
-    }
-    let mut witness_keys = BTreeMap::new();
-    for entry in array(keys, "witness")? {
-        check_key_id(entry)?;
-        witness_keys.insert(
-            text(entry, "key_id")?.to_owned(),
-            bind_log_or_witness_key(governance, entry, "witness", active_index)?,
-        );
-    }
+    let bind_all = |group: &str| -> Result<BoundAndAttempted> {
+        let mut bound = BTreeMap::new();
+        let mut attempted_index = BTreeMap::new();
+        for entry in array(keys, group)? {
+            check_key_id(entry)?;
+            let key_id = text(entry, "key_id")?.to_owned();
+            match bind_log_or_witness_key(governance, entry, group, active_index) {
+                Ok(pubkey) => {
+                    bound.insert(key_id, pubkey);
+                }
+                Err(_) if !bound.contains_key(&key_id) => {
+                    let index = obj(entry, "binding")
+                        .and_then(|b| number(b, "entry_index"))
+                        .unwrap_or(active_index);
+                    attempted_index.entry(key_id).or_insert(index);
+                }
+                Err(_) => {}
+            }
+        }
+        Ok((bound, attempted_index))
+    };
+    let (log_keys, log_attempted) = bind_all("log")?;
+    let (witness_keys, witness_attempted) = bind_all("witness")?;
 
-    let signing_key =
-        log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| ReceiptError::KeyNotBound {
-            key_id: text(checkpoint, "key_id").unwrap_or_default().to_owned(),
-            entry_index: active_index,
-        })?;
+    let signing_key = log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| {
+        let key_id = text(checkpoint, "key_id").unwrap_or_default().to_owned();
+        let entry_index = log_attempted.get(&key_id).copied().unwrap_or(active_index);
+        ReceiptError::KeyNotBound { key_id, entry_index }
+    })?;
     budget.spend(1)?;
     if !verify_signature(
         &decode_pubkey(signing_key)?,
@@ -948,7 +969,7 @@ fn verify_checkpoint(
         let key_id = text(cosignature, "key_id")?;
         let pubkey = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
             key_id: key_id.to_owned(),
-            entry_index: active_index,
+            entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
         })?;
         budget.spend(1)?;
         if !verify_signature(
@@ -1777,19 +1798,34 @@ fn authority_at(
     Ok(&declared_keys & &in_force)
 }
 
-/// Whether the envelope at `index` is a trigger signed by the record's authority.
+/// Whether the envelope at `index` is a trigger signed — cryptographically, not just by
+/// claimed `key_id` — by the record's authority.
+///
+/// A candidate's `signatures[].key_id` naming an authority key proves nothing on its own: the
+/// `sig` bytes are attacker-controlled in a forged statement. Every candidate MUST be checked
+/// with the same `verify_envelope` machinery used for real statements, restricted to authority
+/// keys so an envelope signed by some *other* valid producer key still correctly fails (that
+/// signer isn't this record's authority, whether or not the bytes verify). A forged envelope
+/// that reuses a real authority `key_id` with a garbage signature can otherwise displace the
+/// genuinely authorized trigger just by anchoring at a later index.
 fn is_authorized_trigger(
     ctx: &ClaimCtx<'_>,
     envelope: &Value,
     dataset: &str,
     by_ingestion: bool,
     index: u64,
+    budget: &mut Budget,
 ) -> Result<bool> {
-    let signers: BTreeSet<String> = array(envelope, "signatures")?
-        .iter()
-        .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
-        .collect::<Result<_>>()?;
-    Ok(!signers.is_disjoint(&authority_at(ctx, dataset, by_ingestion, index)?))
+    budget.spend(1)?;
+    let authority = authority_at(ctx, dataset, by_ingestion, index)?;
+    let pubkeys = ctx.governance.producer_pubkeys_at(index);
+    Ok(crate::verify_envelope(envelope, |key_id| {
+        if authority.contains(key_id) {
+            pubkeys.get(key_id).cloned()
+        } else {
+            None
+        }
+    })?)
 }
 
 /// Spec §2.3.3: a trigger is effective only if signed by the record's authority. Triggers from
@@ -1869,7 +1905,7 @@ fn verify_competing_triggers(
         {
             continue;
         }
-        if is_authorized_trigger(ctx, envelope, dataset, by_ingestion, index)? {
+        if is_authorized_trigger(ctx, envelope, dataset, by_ingestion, index, budget)? {
             governing = Some(index);
         } else {
             challenges.push(index);
@@ -1959,39 +1995,52 @@ fn authenticate_declared_checkpoint(
     budget: &mut Budget,
 ) -> Result<()> {
     let key_id = text(declared, "key_id")?;
-    let (binding_index, manifest) = ctx
-        .governance
-        .active_for(number(declared, "tree_size")?)
-        .map_err(|_| ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index: 0 })?;
+    let tree_size = number(declared, "tree_size")?;
+    let (active_index, active_manifest) = ctx.governance.active_for(tree_size)?;
 
-    // The key must be declared by that manifest version...
-    let declared_pubkey = key_objects(obj(manifest, "log")?)?
-        .into_iter()
-        .find(|(id, _)| id == key_id)
-        .map(|(_, pubkey)| pubkey)
-        .ok_or_else(|| ReceiptError::KeyNotBound {
-            key_id: key_id.to_owned(),
-            entry_index: binding_index,
-        })?;
-    // ...and carried in the receipt's keys block, with a key id that recomputes from it.
-    let carried = array(obj(ctx.receipt, "keys")?, "log")?
-        .iter()
-        .find(|entry| text(entry, "key_id").ok() == Some(key_id))
-        .ok_or_else(|| ReceiptError::KeyNotBound {
-            key_id: key_id.to_owned(),
-            entry_index: binding_index,
-        })?;
-    check_key_id(carried)?;
-    if text(carried, "pubkey")? != declared_pubkey {
-        return Err(ReceiptError::KeyNotBound {
-            key_id: key_id.to_owned(),
-            entry_index: binding_index,
-        });
+    // The log id must match the manifest version active for D, exactly as it must for A
+    // (adaptor §5) — D gets no relaxed check just because it is the earlier checkpoint.
+    if text(obj(active_manifest, "log")?, "id")? != text(declared, "log_id")? {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "checkpoint `log_id` is not the log the active manifest declares".to_owned(),
+        ));
     }
+
+    // D's log key resolves against the manifest active for D's *own* tree size, and its
+    // `keys.log` entry binds to that same manifest version (format §2.2) — the normal
+    // source/binding contract, not a byte-equality shortcut. `active_index` can differ from
+    // A's: a manifest anchored between D and A rotates the log key set, and a checkpoint issued
+    // under the earlier state must be validated by the earlier key.
+    // The same `key_id` may appear more than once in `keys.log` — a receipt authenticating two
+    // checkpoints (D here, A elsewhere) can legitimately carry the same physical log key bound
+    // to each checkpoint's own active manifest. Take whichever entry actually binds at D's
+    // `active_index`, not merely the first entry with a matching `key_id` (that could be the
+    // one meant for A).
+    let mut last_error = None;
+    let mut pubkey = None;
+    for entry in array(obj(ctx.receipt, "keys")?, "log")? {
+        if text(entry, "key_id").ok() != Some(key_id) {
+            continue;
+        }
+        check_key_id(entry)?;
+        match bind_log_or_witness_key(ctx.governance, entry, "log", active_index) {
+            Ok(bound) => {
+                pubkey = Some(bound);
+                break;
+            }
+            Err(e) => last_error = Some(e),
+        }
+    }
+    let pubkey = pubkey.ok_or_else(|| {
+        last_error.unwrap_or(ReceiptError::KeyNotBound {
+            key_id: key_id.to_owned(),
+            entry_index: active_index,
+        })
+    })?;
 
     budget.spend(1)?;
     if verify_signature(
-        &decode_pubkey(&declared_pubkey)?,
+        &decode_pubkey(&pubkey)?,
         &checkpoint_signing_bytes(declared)?,
         text(declared, "signature")?,
     )? {

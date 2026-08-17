@@ -121,6 +121,13 @@
       "claim_type": "trigger-effective",
       "embedded_receipts": 1,
       "expect": "accept",
+      "file": "trigger-effective-forged-signature-ignored.ahl"
+    },
+    {
+      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "trigger-effective",
+      "embedded_receipts": 1,
+      "expect": "accept",
       "file": "trigger-effective-derived-rotated-key.ahl"
     },
     {
@@ -157,6 +164,13 @@
       "embedded_receipts": 3,
       "expect": "accept",
       "file": "propagation-complete-valid.ahl"
+    },
+    {
+      "boundary": "the propagation statement's affected set equals the closure recomputable from the enumerated corpus prefix — complete relative to the declared corpus only; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "propagation-complete",
+      "embedded_receipts": 3,
+      "expect": "accept",
+      "file": "propagation-complete-valid-across-manifest-rotation.ahl"
     },
     {
       "claim_type": "propagation-complete",

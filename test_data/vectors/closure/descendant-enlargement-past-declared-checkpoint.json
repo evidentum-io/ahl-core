@@ -1,9 +1,9 @@
 {
   "affected_count": 4,
-  "affected_root": "sha256:f95cf435ac16619e5231b9b21d1237aae07fbebd972a373efae748a4dbeb754d",
+  "affected_root": "sha256:a19b569a95b55531bf4df657e6e03bc15258ce9b3f693e8692d5a4602dcf53f1",
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:625cd2123984bdf25ac5ff2a575e3ef5472a99f6e751f9716d2451f1c4593ec8",
+    "root_hash": "sha256:2eb016e2d590ef42a1c41daf6fbd4a81f2955c22ef793cbebbf57694a910fdc4",
     "tree_size": 28
   },
   "description": "Revocation closure `descendant-enlargement-past-declared-checkpoint` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
@@ -31,8 +31,9 @@
   ],
   "expected_dispositions": [
     {
+      "assessment": "sha256:81af6cfe105fb10380549c7290b09c7910c90cd3e860777ab7bbccc5b91be396",
       "dataset": "scores",
-      "disposition": "invalidated",
+      "disposition": "assessed_unaffected",
       "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
     },
     {

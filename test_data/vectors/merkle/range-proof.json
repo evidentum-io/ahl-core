@@ -15,7 +15,7 @@
         "sha256:ddfb641b323a1bbc12efb7a9dd95e06a31034cdac3559cd7bfb40f3eb8a9dcd3",
         "sha256:4ba0feb09d3fee32515788224a5fc03bed14033adbf1178faef919f5d1630803",
         "sha256:15bc064cd965d8e6063452db355db156dcc76900c9128e53605db7f10a4920b5",
-        "sha256:f17f25df50911a172e10407544895536c055d21164dcad14941d1aaca5256a7e",
+        "sha256:681840e98a231422da2953aa71cb7b588cc5eaa483bf2c69fb642e8e35e3a7a8",
         "sha256:2560abc5576f1a64adb236674854c308b87c9899193bf47c339126b38cec2125",
         "sha256:1b6a31908195534f1ee35059615e9c4d4c6f18d230580ad213245c7e5e802389",
         "sha256:18d0dd72f725f342f147b213e1badd69ddb0eb10dd0e10be385e11383ddc8bc2",
@@ -31,7 +31,7 @@
         "sha256:baff0e56d6225d44a8fd2bdd1dd2550d27ee346a05092626db82fd2caf1dd8a2",
         "sha256:fc6abeaf538fb23bccd38874682cf03b60acf3e6d98bcab841ae189f2bcaf5a6",
         "sha256:df5c860ea71c6777de2437cf7556756f6404f7282b65f5933ec01ce3540cb362",
-        "sha256:be6b72857329e52ddc2a30469d3e5c64f2e87e4989e8261dd97e95bfc1bc43c1",
+        "sha256:7b67c16184b280c96c23f6c1f67aee9ea2987594fba6082d5ab681a12cbb31b2",
         "sha256:e7f043099a538a08ea588d7e19c5684e50901208b3033cb3ca149e0416f772ba",
         "sha256:694dea42f11eb0fcc8439954d01b20ebf852f18b445580c2496e1cd362efb68d",
         "sha256:cf6a0dc7958cbac8d97125c065c73527d2e425658947119066b4525200f61e80"
@@ -45,7 +45,7 @@
       }
     },
     {
-      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAAAwAAAAAAAAAHAAAABeuFwBEDtpBAthbX7Yo3FQRMCr1H3lPONmkbLGzCfIUq7ysKevbc1iD1NWy2CMtZGAXUoK1jUQ7UZltTR4jRv1kWmGmEVRsCKJ7r65soGwTnPO3wTE5W/Nx+/L4XUKsgSXz4/iNpllhSE9vL51h6oXzLVe5TjqiuKxfJQ1yJ4B+7GPOWi3prDyWO1zXDz1oRWb9qBxxi23vyg0PafB+aGUI=",
+      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAAAwAAAAAAAAAHAAAABeuFwBEDtpBAthbX7Yo3FQRMCr1H3lPONmkbLGzCfIUq7ysKevbc1iD1NWy2CMtZGAXUoK1jUQ7UZltTR4jRv1kWmGmEVRsCKJ7r65soGwTnPO3wTE5W/Nx+/L4XUKsgSScRTaV1tDuQ8aZhDSV9dJMVyylfkhhWfe/0LlCeR8fLiFPFmVULRCG+LxmTd+8Ttn7YmRDwo6utKh/DCmumg+U=",
       "entry_ids": [
         "sha256:cdc46f74aed33c582a66148979641450db7d13977be5f6562f0fbc279b92ef04",
         "sha256:165c94289ebc6ee9c1f839713e650baf210456561ab926674df87ed84c274bd8",
@@ -57,8 +57,8 @@
         "sha256:eb85c01103b69040b616d7ed8a3715044c0abd47de53ce36691b2c6cc27c852a",
         "sha256:ef2b0a7af6dcd620f5356cb608cb591805d4a0ad63510ed4665b534788d1bf59",
         "sha256:16986984551b02289eebeb9b281b04e73cedf04c4e56fcdc7efcbe1750ab2049",
-        "sha256:7cf8fe236996585213dbcbe7587aa17ccb55ee538ea8ae2b17c9435c89e01fbb",
-        "sha256:18f3968b7a6b0f258ed735c3cf5a1159bf6a071c62db7bf28343da7c1f9a1942"
+        "sha256:27114da575b43b90f1a6610d257d749315cb295f9218567deff42e509e47c7cb",
+        "sha256:8853c599550b4421be2f199377ef13b67ed89910f0a3abad2a1fc30a6ba683e5"
       ],
       "note": "a proper interior sub-range",
       "range": {
@@ -67,7 +67,7 @@
       }
     },
     {
-      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAABgAAAAAAAAAHAAAABRh8dNDYm/KCYREHA432Vh62nKbWo5ReOkmnRJtf4s6YWuTeHTyUV5C8g41qDOS4Q/kClwCj8hRbk27A1oyDeyYWmGmEVRsCKJ7r65soGwTnPO3wTE5W/Nx+/L4XUKsgSXz4/iNpllhSE9vL51h6oXzLVe5TjqiuKxfJQ1yJ4B+7GPOWi3prDyWO1zXDz1oRWb9qBxxi23vyg0PafB+aGUI=",
+      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAABgAAAAAAAAAHAAAABRh8dNDYm/KCYREHA432Vh62nKbWo5ReOkmnRJtf4s6YWuTeHTyUV5C8g41qDOS4Q/kClwCj8hRbk27A1oyDeyYWmGmEVRsCKJ7r65soGwTnPO3wTE5W/Nx+/L4XUKsgSScRTaV1tDuQ8aZhDSV9dJMVyylfkhhWfe/0LlCeR8fLiFPFmVULRCG+LxmTd+8Ttn7YmRDwo6utKh/DCmumg+U=",
       "entry_ids": [
         "sha256:4ba0feb09d3fee32515788224a5fc03bed14033adbf1178faef919f5d1630803"
       ],
@@ -76,8 +76,8 @@
         "sha256:187c74d0d89bf282611107038df6561eb69ca6d6a3945e3a49a7449b5fe2ce98",
         "sha256:5ae4de1d3c945790bc838d6a0ce4b843f9029700a3f2145b936ec0d68c837b26",
         "sha256:16986984551b02289eebeb9b281b04e73cedf04c4e56fcdc7efcbe1750ab2049",
-        "sha256:7cf8fe236996585213dbcbe7587aa17ccb55ee538ea8ae2b17c9435c89e01fbb",
-        "sha256:18f3968b7a6b0f258ed735c3cf5a1159bf6a071c62db7bf28343da7c1f9a1942"
+        "sha256:27114da575b43b90f1a6610d257d749315cb295f9218567deff42e509e47c7cb",
+        "sha256:8853c599550b4421be2f199377ef13b67ed89910f0a3abad2a1fc30a6ba683e5"
       ],
       "note": "a width-1 range, which is an inclusion proof in a different serialization",
       "range": {
@@ -86,15 +86,15 @@
       }
     },
     {
-      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAAGwAAAAAAAAAcAAAABOBy0i8sjaxWfsle15oznzc3HcCAMouW+God4PdyLttje/nB2wPjU1bVj/Wgc7HgJZtU/0vo2lRMGeIEFRdIQ95MRnb/F3c3/stpkrTtouOoKcelYNRBOoHdo6GnAbJuszcIAYcGnKM2AilxoO2wCostarQrbqMCagSDhBY4HCjp",
+      "adaptor_form": "base64:QUhMUlAxAAAAAAAAABwAAAAAAAAAGwAAAAAAAAAcAAAABFrT6titynXCblqHv1UjSU08rZl4wef6DNZEwNVCbgAIe/nB2wPjU1bVj/Wgc7HgJZtU/0vo2lRMGeIEFRdIQ96B2Mtsh2C7qDZ2E3udNOeFbvLEaqNvEkxnvxgpw/pG2jcIAYcGnKM2AilxoO2wCostarQrbqMCagSDhBY4HCjp",
       "entry_ids": [
         "sha256:cf6a0dc7958cbac8d97125c065c73527d2e425658947119066b4525200f61e80"
       ],
       "node_count": 4,
       "nodes": [
-        "sha256:e072d22f2c8dac567ec95ed79a339f37371dc080328b96f86a1de0f7722edb63",
+        "sha256:5ad3ead8adca75c26e5a87bf5523494d3cad9978c1e7fa0cd644c0d5426e0008",
         "sha256:7bf9c1db03e35356d58ff5a073b1e0259b54ff4be8da544c19e20415174843de",
-        "sha256:4c4676ff177737fecb6992b4eda2e3a829c7a560d4413a81dda3a1a701b26eb3",
+        "sha256:81d8cb6c8760bba83676137b9d34e7856ef2c46aa36f124c67bf1829c3fa46da",
         "sha256:37080187069ca336022971a0edb00a8b2d6ab42b6ea3026a04838416381c28e9"
       ],
       "note": "the trailing entry",
@@ -106,7 +106,7 @@
   ],
   "checkpoint": {
     "name": "cp28",
-    "root": "sha256:625cd2123984bdf25ac5ff2a575e3ef5472a99f6e751f9716d2451f1c4593ec8",
+    "root": "sha256:2eb016e2d590ef42a1c41daf6fbd4a81f2955c22ef793cbebbf57694a910fdc4",
     "tree_size": 28
   },
   "description": "Authenticated range proofs over the 28-entry log tree under cp28 (core spec §3 contract item 5, receipt format §4.2, adaptor profile §8). Each proof establishes that the listed entries are exactly and completely the leaf set of the range under the checkpoint root.",

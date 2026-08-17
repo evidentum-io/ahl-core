@@ -293,6 +293,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp24 = corpus.anchor("cp24");
     let cp25 = corpus.anchor("cp25");
     let cp28 = corpus.anchor("cp28");
+    let cp29 = corpus.anchor("cp29");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -482,11 +483,18 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
 
     // --- trigger-declared --------------------------------------------------------
     let introduction = |subject_index: usize, record: &String, anchor: &Anchor| {
+        // The embedded receipt's own log/witness keys bind to the manifest version active for
+        // ITS anchor (§2.2), independent of the subject's own manifest snapshot — so the
+        // presented chain must include that manifest whenever it isn't genesis.
+        let mut chain = vec![0];
+        if anchor.manifest_index != 0 {
+            chain.push(usize::try_from(anchor.manifest_index).expect("small entry index"));
+        }
         Spec {
             claim_type: "record-ingested",
             subject_index,
             anchor,
-            chain: vec![0],
+            chain,
             record_subject: customers(record),
             competing: "not-checked",
             content_binding: "none",
@@ -700,6 +708,49 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    anyone able to get a statement anchored unseat the governing trigger of a \
                    record they hold no authority over. The competing enumeration deliberately \
                    spans [20, 25) so the challenge IS in range and IS seen."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    // A LATER FORGED trigger on F at entry 28: `signatures[0].key_id` names `producer-1`'s
+    // real key — the genuine `customers` authority — but `sig` is garbage, not a signature
+    // `producer-1` ever produced. Round-5 blocker: competing-trigger selection must verify each
+    // candidate's signature cryptographically before comparing authority, or a forged envelope
+    // that merely reuses a real `key_id` can displace the genuinely authorized trigger by
+    // anchoring at a later index.
+    out.push(Vector {
+        file: "trigger-effective-forged-signature-ignored.ahl",
+        receipt: Spec {
+            claim_type: "trigger-effective",
+            subject_index: 22,
+            anchor: cp29,
+            chain: vec![0, 9, 25],
+            record_subject: customers(&r.c_f),
+            competing: "enumerated",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 29, cp29),
+            claim_material: json!({
+                "introduction": introduction(20, &r.c_f, cp29),
+                "checkpoint_C": cp29.checkpoint,
+                "competing": { "corpus_range": corpus.enumeration(20, 29, cp29) },
+            }),
+            producer_keys: None,
+            note: "Proves that the retraction at entry 22 governs record F at cp29, EVEN THOUGH \
+                   a THIRD trigger naming the same record sits at the greatest entry index, 28. \
+                   That entry is a forgery: `signatures[0].key_id` correctly names \
+                   `producer-1`'s real key_id — the genuine `customers` dataset authority — but \
+                   `signatures[0].sig` does not verify against that key's actual public key. A \
+                   verifier that treated a matching `key_id` as proof of authorization, without \
+                   cryptographically checking the signature it is attached to, would let this \
+                   forgery unseat the real trigger merely by anchoring later. Effectiveness \
+                   requires BOTH the claimed key_id to be the record's authority AND the \
+                   signature to verify against it — checked before the greatest-entry-index \
+                   rule is applied, exactly as for an unauthorized-but-genuine challenge \
+                   (compare `trigger-effective-later-challenge-ignored.ahl`), because a forged \
+                   signature is never traversed either."
                 .to_owned(),
         }
         .build(corpus, keys),
@@ -956,6 +1007,58 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         ),
         expect: Expect::Accept,
     });
+
+    // The same claim, anchored under cp29 — past manifest v2's rotation at entry 25 — instead
+    // of cp13. D (cp8) stays under the GENESIS manifest; A (cp29) is active under v2, which
+    // rotated the witness set and dropped a producer key (§7.2). Round-5 substantive fix:
+    // `authenticate_declared_checkpoint` must resolve D's log key against the manifest active
+    // for D's OWN tree size via the normal keys.log source/binding contract, independently of
+    // whatever manifest governs A — not a byte-equality shortcut that happens to work only
+    // when both checkpoints share one manifest version, as every other propagation-complete
+    // vector until this one did.
+    let mut cross_rotation_receipt = Spec {
+        claim_type: "propagation-complete",
+        subject_index: 8,
+        anchor: cp29,
+        chain: vec![0, 9, 25],
+        record_subject: None,
+        competing: "not-checked",
+        content_binding: "none",
+        currency_mode: "enumerated",
+        currency_material: corpus.enumeration(0, 29, cp29),
+        claim_material: json!({
+            "corpus_checkpoint": cp8.checkpoint,
+            "corpus_prefix": corpus.enumeration(0, 8, cp29),
+            "trees": trees_block(&prefix_root_refs, false),
+            "trigger": trigger_effective(1, "Embedded trigger-effective proof, bounded by cp8."),
+        }),
+        producer_keys: None,
+        note: "Proves the same completeness claim as `propagation-complete-valid.ahl`, but \
+               anchored under cp29 instead of cp13 — A is now active under manifest v2 (entry \
+               25), which replaced the witness key set in full and dropped `producer-2` from \
+               the producer snapshot, while D (cp8) remains under the GENESIS manifest. \
+               `keys.log` carries TWO entries for the one physical log key: D's binding at \
+               entry index 0 and A's at entry index 25 — the log key itself never rotates in \
+               this corpus, but each manifest version re-declares it independently, and both \
+               bindings resolve through the ordinary `keys.log` source/binding contract \
+               (receipt §2.2) rather than a shortcut that only happens to work when D and A \
+               share one manifest version, as in every other propagation-complete vector."
+            .to_owned(),
+    }
+    .build(corpus, keys);
+    // `Spec::build` only auto-populates the ONE `keys.log` entry a receipt's own `anchoring`
+    // needs (here, A at entry 25). Authenticating D (spec §2.2, round-5 substantive fix)
+    // additionally needs the log key bound to the manifest active for D's own tree size.
+    cross_rotation_receipt["keys"]["log"]
+        .as_array_mut()
+        .expect("keys.log is an array")
+        .push(key_entry(&keys.log_1, None, 0));
+    out.push(Vector {
+        file: "propagation-complete-valid-across-manifest-rotation.ahl",
+        receipt: cross_rotation_receipt,
+        expect: Expect::Accept,
+    });
+
     out.push(Vector {
         file: "propagation-complete-missing-leaf-must-fail.ahl",
         receipt: propagation_complete(

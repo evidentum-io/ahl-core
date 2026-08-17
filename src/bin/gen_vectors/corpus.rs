@@ -3,6 +3,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use base64::Engine as _;
+
 use ahl_core::closure::{affected_set, RecordRef, TreeMaterial};
 use ahl_core::{
     checkpoint, checkpoint_signing_bytes, commit_keyed, commit_plain, cosignature_bytes, entry_id,
@@ -19,7 +21,7 @@ use crate::scenario::{
 };
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 28] = [
+pub const NAMES: [&str; 29] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -48,6 +50,7 @@ pub const NAMES: [&str; 28] = [
     "25-manifest-v2-rotate-witness-drop-key",
     "26-ingestion-customers-d-under-v2",
     "27-derivation-z-from-affected-descendant",
+    "28-forged-signature-trigger-f",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -255,7 +258,17 @@ impl Corpus {
                 "dataset": DS_SCORES, "record": r.s1,
                 "disposition": "recomputed", "successor_statement": id_7,
             }),
-            json!({ "dataset": DS_SCORES, "record": r.s2, "disposition": "invalidated" }),
+            // S2 is assessed_unaffected, not invalidated: entry 27 later derives Z from S2, and
+            // spec §2.3.4 bars relying on an `invalidated` record for covered purposes, which
+            // would make that derivation non-conformant. `assessed_unaffected` carries the
+            // required assessment digest and is the disposition an unaffected descendant of a
+            // retroactive correction can legitimately receive, so consuming S2 downstream stays
+            // conforming while S2 remains, correctly, part of the affected set at D.
+            json!({
+                "dataset": DS_SCORES, "record": r.s2,
+                "disposition": "assessed_unaffected",
+                "assessment": sha256_hex(b"ahl-test-assessment-s2-unaffected"),
+            }),
             json!({ "dataset": DS_SCORES, "record": r.s3, "disposition": "invalidated" }),
             json!({ "dataset": DS_SCORES, "record": r.s4, "disposition": "invalidated" }),
         ])
@@ -519,13 +532,15 @@ impl Corpus {
             signed("ingestion", &m2, ingest(&r.c_d, "2026-08-16/customers-05"), &keys.producer_1);
 
         // --- entry 27: a derivation consuming an AFFECTED DESCENDANT ---------------
-        // S2 is in the affected set the propagation at entry 8 dispositioned at its declared
-        // checkpoint D (tree size 8). Spec §2.3.2 bars re-consuming the *triggered* record A —
-        // it says nothing about A's descendants, so this derivation is legal. Its effect is
-        // that the transitive closure of the entry-6 trigger GROWS past D: at any checkpoint
-        // committing entry 27 the closure also contains Z. That is why §2.3.4 defines
-        // completeness at D only, and why a `propagation-complete` receipt may never be
-        // grounded at a later checkpoint.
+        // S2 is in the affected set the propagation at entry 8 dispositioned, at its declared
+        // checkpoint D (tree size 8), as `assessed_unaffected` — not `invalidated`. Spec §2.3.2
+        // bars re-consuming the *triggered* record A itself; §2.3.4 additionally bars relying on
+        // an `invalidated` record, but says nothing about a merely-affected, assessed-unaffected
+        // one, so consuming S2 here is unambiguously conforming. Its effect is that the
+        // transitive closure of the entry-6 trigger GROWS past D: at any checkpoint committing
+        // entry 27 the closure also contains Z. That is why §2.3.4 defines completeness at D
+        // only, and why a `propagation-complete` receipt may never be grounded at a later
+        // checkpoint.
         let env_27 = signed(
             "derivation",
             &m2,
@@ -541,10 +556,35 @@ impl Corpus {
             &keys.producer_1,
         );
 
+        // --- entry 28: a FORGED trigger on F, claiming the real authority's key_id ---
+        // Structurally this is a well-formed retraction of F, naming `producer-1`'s real
+        // `key_id` — the genuine `customers` dataset authority — so `key_id`-only matching would
+        // accept it. Its `sig` is garbage, not a signature `producer-1` ever produced. The log
+        // anchors opaque bytes (spec §3 contract item 1) and does not itself validate AHL
+        // signatures, so a forgery like this really can get anchored; only cryptographic
+        // verification of the candidate's own signature — not a claimed-`key_id` lookup — can
+        // catch it. Anchored after entry 22's genuine, authorized retraction, this is what the
+        // competing-trigger selection at cp29 must NOT let govern.
+        let mut env_28 = signed(
+            "retraction",
+            &m2,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_f,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "other",
+            }),
+            &keys.producer_1,
+        );
+        env_28["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
+
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
-            env_23, env_24, env_25, env_26, env_27,
+            env_23, env_24, env_25, env_26, env_27, env_28,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -555,7 +595,7 @@ impl Corpus {
         trees.insert(challenge_affected_root.clone(), challenge_dispositions);
 
         let log_leaves = leaf_bytes(&envelopes);
-        let anchors = [(8u64, 0u64), (13, 0), (20, 0), (24, 0), (25, 0), (28, 25)]
+        let anchors = [(8u64, 0u64), (13, 0), (20, 0), (24, 0), (25, 0), (28, 25), (29, 25)]
             .into_iter()
             .map(|(size, manifest_index)| {
                 let root = hash_hex(&tree_root(&log_leaves[..at(size)]));
@@ -569,7 +609,8 @@ impl Corpus {
                         20 => "cp20",
                         24 => "cp24",
                         25 => "cp25",
-                        _ => "cp28",
+                        28 => "cp28",
+                        _ => "cp29",
                     },
                     checkpoint: cp,
                     witness_id,
@@ -675,12 +716,33 @@ impl Corpus {
     }
 
     fn check_signatures(&self, keys: &Keys) {
+        // Entry 28 is an intentional forgery (round-5 vector fixture): a well-formed retraction
+        // naming the real authority's `key_id` with garbage `sig` bytes. Every OTHER entry must
+        // genuinely verify; entry 28 must genuinely NOT — both are asserted below, so a
+        // generator bug that accidentally produced a valid signature (defeating the vector's
+        // purpose) or an invalid one elsewhere (a real regression) would each be caught.
+        const FORGED_ENTRY: usize = 28;
         for (index, env) in self.envelopes.iter().enumerate() {
+            if index == FORGED_ENTRY {
+                continue;
+            }
             let ok = verify_envelope(env, |key_id| keys.resolve(key_id))
                 .expect("generated envelope is well-formed");
             assert!(ok, "entry {index}: envelope signature did not verify");
         }
-        println!("  [ok] {} envelope signatures verified", self.envelopes.len());
+        let forged_ok =
+            verify_envelope(&self.envelopes[FORGED_ENTRY], |key_id| keys.resolve(key_id))
+                .expect("forged envelope is still well-formed JSON");
+        assert!(
+            !forged_ok,
+            "entry {FORGED_ENTRY}: the forged-signature fixture must NOT verify, or it isn't a \
+             forgery"
+        );
+        println!(
+            "  [ok] {} genuine envelope signatures verified, entry {FORGED_ENTRY} confirmed \
+             forged",
+            self.envelopes.len() - 1
+        );
 
         // Manifest lineage: the successor references its predecessor by entry id (§2.3.5).
         assert_eq!(
@@ -990,15 +1052,28 @@ impl Corpus {
     fn write_statements(&self, root: &Path, keys: &Keys) {
         let statements = root.join("vectors").join("statements");
         for (index, env) in self.envelopes.iter().enumerate() {
-            write_json(
-                &statements.join(format!("{}.json", NAMES[index])),
-                &json!({
-                    "entry_index": index,
-                    "statement_id": statement_id(env).expect("well-formed envelope"),
-                    "entry_id": entry_id(env),
-                    "envelope": env,
-                }),
-            );
+            let mut vector = json!({
+                "entry_index": index,
+                "statement_id": statement_id(env).expect("well-formed envelope"),
+                "entry_id": entry_id(env),
+                "envelope": env,
+            });
+            if index == 28 {
+                // Structurally a well-formed AHL statement (statement_id/entry_id are ordinary
+                // digests of it), anchored like any other entry — but its `sig` is garbage, not
+                // a signature `producer-1` ever produced, even though `signatures[0].key_id`
+                // names `producer-1`'s real key. The log anchors opaque bytes and does not
+                // itself validate AHL signatures (core spec §3 contract item 1), so this is what
+                // a real forgery attempt anchored in the log looks like. It exists to prove that
+                // competing-trigger selection verifies each candidate's signature cryptographically
+                // rather than trusting a claimed `key_id` (receipt format §3).
+                vector["note"] = json!(
+                    "INTENTIONALLY FORGED: `signatures[0].sig` does not verify against \
+                     `signatures[0].key_id`'s real public key. See \
+                     trigger-effective-forged-signature-ignored.ahl."
+                );
+            }
+            write_json(&statements.join(format!("{}.json", NAMES[index])), &vector);
         }
 
         // Malformed statements: structurally parseable, normatively rejectable.
@@ -1080,15 +1155,18 @@ impl Corpus {
     #[allow(clippy::too_many_lines)]
     fn write_merkle(&self, root: &Path) {
         let merkle = root.join("vectors").join("merkle");
-        let leaves = self.log_leaves();
         let cp28 = self.anchor("cp28");
-        let proof_3 = inclusion_proof(&leaves, 3).expect("entry 3 is in the log");
+        // The `inclusion` block below is claimed against cp28's own root, so its proof must be
+        // computed over exactly cp28's 28 leaves — the corpus has since grown a 29th entry (the
+        // round-5 forged-signature fixture) that cp28 never committed.
+        let leaves = &self.log_leaves()[..at(cp28.tree_size())];
+        let proof_3 = inclusion_proof(leaves, 3).expect("entry 3 is in the log");
         write_json(
             &merkle.join("log-tree.json"),
             &json!({
-                "description": "AHL log tree over the 28-entry toy corpus. Leaves are the \
-                                anchored entry bytes JCS(envelope) in entry-index order and \
-                                are never sorted (core spec §2.5, §1.2).",
+                "description": "AHL log tree over the toy corpus. Leaves are the anchored entry \
+                                bytes JCS(envelope) in entry-index order and are never sorted \
+                                (core spec §2.5, §1.2).",
                 "adaptor": { "id": ADAPTOR_ID, "hash": self.adaptor_hash },
                 "leaf_rule": "sha256(0x00 || JCS(envelope))",
                 "node_rule": "sha256(0x01 || left || right)",
@@ -1221,8 +1299,11 @@ impl Corpus {
     }
 
     fn range_proof_vector(&self) -> Value {
-        let leaves = self.log_leaves();
         let cp28 = self.anchor("cp28");
+        // Scoped to cp28's own tree size (28): the corpus grows a 29th entry past it (the round-5
+        // forged-signature fixture), and this vector's proofs must stay over exactly the leaf set
+        // cp28 actually commits, not whatever the log has grown to since.
+        let leaves = &self.log_leaves()[..at(cp28.tree_size())];
         let hashes: Vec<_> = leaves.iter().map(|l| leaf_hash(l)).collect();
         let cases = [
             (0u64, 28u64, "the complete corpus prefix — carries no subtree hashes at all"),

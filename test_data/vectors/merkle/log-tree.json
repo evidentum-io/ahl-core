@@ -3,7 +3,7 @@
     "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa",
     "id": "ahl-test-log-v1"
   },
-  "description": "AHL log tree over the 28-entry toy corpus. Leaves are the anchored entry bytes JCS(envelope) in entry-index order and are never sorted (core spec §2.5, §1.2).",
+  "description": "AHL log tree over the toy corpus. Leaves are the anchored entry bytes JCS(envelope) in entry-index order and are never sorted (core spec §2.5, §1.2).",
   "entries": [
     {
       "entry_id": "sha256:be129d9d262de65c47eaad8d978ef54e87d5e1388182df53e036102816210a49",
@@ -54,9 +54,9 @@
       "name": "07-derivation-s1-prime"
     },
     {
-      "entry_id": "sha256:f17f25df50911a172e10407544895536c055d21164dcad14941d1aaca5256a7e",
+      "entry_id": "sha256:681840e98a231422da2953aa71cb7b588cc5eaa483bf2c69fb642e8e35e3a7a8",
       "entry_index": 8,
-      "leaf_hash": "sha256:1b291bf9b610e2b91407343a61b02551baa9f9292331e4750fefb5219a4daed2",
+      "leaf_hash": "sha256:7ff21f40127352a98585a0c03249a48c721573918dd1b279449a45def9f2f8c6",
       "name": "08-propagation"
     },
     {
@@ -150,9 +150,9 @@
       "name": "23-challenge-retraction-f-unauthorized"
     },
     {
-      "entry_id": "sha256:be6b72857329e52ddc2a30469d3e5c64f2e87e4989e8261dd97e95bfc1bc43c1",
+      "entry_id": "sha256:7b67c16184b280c96c23f6c1f67aee9ea2987594fba6082d5ab681a12cbb31b2",
       "entry_index": 24,
-      "leaf_hash": "sha256:e084d669563e46ef8cc252f1a36fc0835b188d7017936046e2d01b9a5e157e14",
+      "leaf_hash": "sha256:82e30e7057fe4d9ad8bf8747fa6789d6726c0ad2fb5b022de87d8395fcfde718",
       "name": "24-propagation-over-challenge"
     },
     {
@@ -172,6 +172,12 @@
       "entry_index": 27,
       "leaf_hash": "sha256:6b1780a0e5b93465e5f82eb6e4e5d7d236fadecea0f57a9f3c625d4acca546a3",
       "name": "27-derivation-z-from-affected-descendant"
+    },
+    {
+      "entry_id": "sha256:62c3f21eed8c8ac6435b5a7d53cb01fd8530536ceaaa442e7d298cfc3bcac6bc",
+      "entry_index": 28,
+      "leaf_hash": "sha256:e6280d45e0271d88d4d96a329453170063f581ecee9a8e5188c20dad180c7e6e",
+      "name": "28-forged-signature-trigger-f"
     }
   ],
   "inclusion": {
@@ -181,10 +187,10 @@
       "sha256:ef2b0a7af6dcd620f5356cb608cb591805d4a0ad63510ed4665b534788d1bf59",
       "sha256:eb85c01103b69040b616d7ed8a3715044c0abd47de53ce36691b2c6cc27c852a",
       "sha256:10b4ff43453ed64c69387748486c989cbef76fcf8059dc2b307ba5248c2b8218",
-      "sha256:7cf8fe236996585213dbcbe7587aa17ccb55ee538ea8ae2b17c9435c89e01fbb",
-      "sha256:18f3968b7a6b0f258ed735c3cf5a1159bf6a071c62db7bf28343da7c1f9a1942"
+      "sha256:27114da575b43b90f1a6610d257d749315cb295f9218567deff42e509e47c7cb",
+      "sha256:8853c599550b4421be2f199377ef13b67ed89910f0a3abad2a1fc30a6ba683e5"
     ],
-    "root": "sha256:625cd2123984bdf25ac5ff2a575e3ef5472a99f6e751f9716d2451f1c4593ec8",
+    "root": "sha256:2eb016e2d590ef42a1c41daf6fbd4a81f2955c22ef793cbebbf57694a910fdc4",
     "tree_size": 28
   },
   "leaf_rule": "sha256(0x00 || JCS(envelope))",
@@ -197,28 +203,33 @@
     },
     {
       "name": "cp13",
-      "root": "sha256:c2ca7fdb4a7eb50960ba0db9de67fc17103c24089635bb91d971e5da2d2be6c0",
+      "root": "sha256:7d54f45bcb2cf8c8271ac697dc1931ce6a0851af3e9abf64f68573a497e29c6b",
       "tree_size": 13
     },
     {
       "name": "cp20",
-      "root": "sha256:01b81a5d3ae19767a1f579c292e4c689f0575e6f9b63a8401038640d1140b20b",
+      "root": "sha256:f88aef74818f289a092643ca19ff4981b5e43b574c877aa9576fe203e13b2624",
       "tree_size": 20
     },
     {
       "name": "cp24",
-      "root": "sha256:036ecbf7d99c09c560f498e4c015bb2e4c3e9d9b7cd5c846baf018d49e35adfa",
+      "root": "sha256:57c5602c0c631d08988c42a4492373bc0834d38cfc8c7d92f3c001b67fc0bdd4",
       "tree_size": 24
     },
     {
       "name": "cp25",
-      "root": "sha256:a3b1e480d11d90ce61d2b6b30d410a55987c2c276f313502a7f164ba5d2eb127",
+      "root": "sha256:301777d73d9dd065030758b7e2507cbc9818b6be2f733a9ce21fa9922044bde0",
       "tree_size": 25
     },
     {
       "name": "cp28",
-      "root": "sha256:625cd2123984bdf25ac5ff2a575e3ef5472a99f6e751f9716d2451f1c4593ec8",
+      "root": "sha256:2eb016e2d590ef42a1c41daf6fbd4a81f2955c22ef793cbebbf57694a910fdc4",
       "tree_size": 28
+    },
+    {
+      "name": "cp29",
+      "root": "sha256:306a7739eb9f3c2eab1aaf02092097c730931f9df9dfb8138a9072e01d8bcb19",
+      "tree_size": 29
     }
   ]
 }
