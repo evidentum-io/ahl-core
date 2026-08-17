@@ -95,6 +95,25 @@ recursion is local. Every hash it computes is still `atl-core`'s: subtree roots 
 serialization, and the verifier cross-checks it through `verify_inclusion` so the two
 constructions cannot diverge.
 
+### JCS vectors: pinned, not duplicated
+
+This corpus carries no `vectors/jcs/` of its own. AHL's JCS canonicalization is byte-identical
+to ATL's (both RFC 8785), so this crate references `atl-core`'s JCS vector corpus at the exact
+revision `Cargo.toml` pins, rather than forking it:
+
+- **Revision:** `79ac9c085857` (the `rev` pinned for the `atl-core` git dependency)
+- **Path:** `test_data/vectors/jcs/` in `github.com/evidentum-io/atl-core` at that revision
+- **Corpus digest:** `sha256:8dd7289c9838e8b2bc2ed9eeabee298069d81d7bf76c3694ac2113424e81fcdf`
+
+The digest is computed as SHA-256 over the concatenation of `<relative path>\x00<file bytes>`
+for every file under `test_data/vectors/jcs/` at that revision, sorted ascending by relative
+path. At this revision the directory holds a single file, `cases.json` (2215 bytes, plain
+`sha256:753d21da52f8962f71969383e03510f75f521e2ef9e2209e61e627c6dd4d133c`), so the corpus digest
+above is `SHA-256("cases.json\x00" + <contents of cases.json>)`. Re-verify by fetching
+`test_data/vectors/jcs/` from `atl-core` at `79ac9c085857` and recomputing; a mismatch means the
+pinned revision's vectors changed underneath this crate, which the `Cargo.lock` `rev` alone does
+not protect against if the tag is ever force-moved upstream.
+
 ## Test keys — never reuse
 
 Every seed in `keys/` is a **published constant** committed to a public repository,
