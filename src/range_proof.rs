@@ -378,7 +378,7 @@ mod tests {
         let root = tree_root(&leaves);
         let proof = generate(&all, 3, 7).expect("valid range");
         let mut span = all[3..7].to_vec();
-        span[1] = leaf_hash(b"forged");
+        span[1] = leaf_hash(b"substituted");
         assert!(!verify(&proof, &span, &root).expect("well-formed proof"));
     }
 

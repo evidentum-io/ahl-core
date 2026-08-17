@@ -1,6 +1,6 @@
 {
-  "entry_id": "sha256:62c3f21eed8c8ac6435b5a7d53cb01fd8530536ceaaa442e7d298cfc3bcac6bc",
-  "entry_index": 28,
+  "entry_id": "sha256:8722ec0a667429b3a99b7d6648a234505d6ff820c86d15324b225df28d56433e",
+  "entry_index": 29,
   "envelope": {
     "payload": {
       "ahl_version": "0.3",
@@ -19,11 +19,15 @@
     },
     "signatures": [
       {
+        "key_id": "sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827",
+        "sig": "base64:6EJ+HUuD+Efy+9sTbAQME0zfJHH4165KXwEFHV3GSxGDNkBi8dUzjGjydL+FE/Ouc54kP0aEgWeP3QXx2VF9Bg=="
+      },
+      {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
         "sig": "base64:qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg=="
       }
     ]
   },
-  "note": "INTENTIONALLY FORGED: `signatures[0].sig` does not verify against `signatures[0].key_id`'s real public key. See trigger-effective-forged-signature-ignored.ahl.",
+  "note": "INTENTIONALLY NON-VERIFYING: `signatures[1].sig` (the entry naming the dataset authority's real key_id) does not verify against that key_id's real public key, even though `signatures[0]` is a genuine signature from a non-authority producer key. See trigger-effective-unverified-authority-signature-must-fail.ahl.",
   "statement_id": "sha256:e1efb3df88925cd894f99c4210dd1b20b08f597cf2ce511d4d3040f6041cde39"
 }

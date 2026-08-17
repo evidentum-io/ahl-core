@@ -548,9 +548,9 @@ mod tests {
                 "scope": { "effective_from": T0, "retroactive": true },
             } }),
         ];
-        // A forged extra input would add an edge the producer never committed.
-        let forged = vec![json!({ "dataset": "d", "record": b })];
-        let trees = TreeMaterial::from([(input_root, forged)]);
+        // An invalid extra input would add an edge the producer never committed.
+        let tampered = vec![json!({ "dataset": "d", "record": b })];
+        let trees = TreeMaterial::from([(input_root, tampered)]);
         assert!(matches!(
             affected_set(&log, &trees, 1, log.len()),
             Err(AhlError::TreeRootMismatch { .. })

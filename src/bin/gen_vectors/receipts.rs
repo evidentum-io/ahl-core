@@ -294,6 +294,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp25 = corpus.anchor("cp25");
     let cp28 = corpus.anchor("cp28");
     let cp29 = corpus.anchor("cp29");
+    let cp30 = corpus.anchor("cp30");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -640,7 +641,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     });
 
     // The challenge at entry 21: a well-anchored trigger from a non-authority key.
-    let unauthorized_trigger = Spec {
+    let non_authority_trigger = Spec {
         claim_type: "trigger-effective",
         subject_index: 23,
         anchor: cp25,
@@ -667,8 +668,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     }
     .build(corpus, keys);
     out.push(Vector {
-        file: "trigger-effective-unauthorized-issuer-must-fail.ahl",
-        receipt: unauthorized_trigger.clone(),
+        file: "trigger-effective-non-authority-issuer-must-fail.ahl",
+        receipt: non_authority_trigger.clone(),
         expect: Expect::Reject {
             rule: "spec §2.3.3 — a trigger not signed by the record's authority is a challenge",
             matches: |e| matches!(e, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. }),
@@ -714,14 +715,14 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Accept,
     });
 
-    // A LATER FORGED trigger on F at entry 28: `signatures[0].key_id` names `producer-1`'s
-    // real key — the genuine `customers` authority — but `sig` is garbage, not a signature
-    // `producer-1` ever produced. Round-5 blocker: competing-trigger selection must verify each
-    // candidate's signature cryptographically before comparing authority, or a forged envelope
-    // that merely reuses a real `key_id` can displace the genuinely authorized trigger by
-    // anchoring at a later index.
+    // A LATER NON-VERIFYING trigger on F at entry 28: `signatures[0].key_id` names
+    // `producer-1`'s real key — the genuine `customers` authority — but `sig` is garbage, not a
+    // signature `producer-1` ever produced. Round-5 blocker: competing-trigger selection must
+    // verify each candidate's signature cryptographically before comparing authority, or an
+    // envelope that merely reuses a real `key_id` with a non-verifying signature can displace
+    // the genuinely authorized trigger by anchoring at a later index.
     out.push(Vector {
-        file: "trigger-effective-forged-signature-ignored.ahl",
+        file: "trigger-effective-non-verifying-signature-ignored.ahl",
         receipt: Spec {
             claim_type: "trigger-effective",
             subject_index: 22,
@@ -740,21 +741,73 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             producer_keys: None,
             note: "Proves that the retraction at entry 22 governs record F at cp29, EVEN THOUGH \
                    a THIRD trigger naming the same record sits at the greatest entry index, 28. \
-                   That entry is a forgery: `signatures[0].key_id` correctly names \
-                   `producer-1`'s real key_id — the genuine `customers` dataset authority — but \
-                   `signatures[0].sig` does not verify against that key's actual public key. A \
-                   verifier that treated a matching `key_id` as proof of authorization, without \
-                   cryptographically checking the signature it is attached to, would let this \
-                   forgery unseat the real trigger merely by anchoring later. Effectiveness \
+                   That entry's signature does not verify: `signatures[0].key_id` correctly \
+                   names `producer-1`'s real key_id — the genuine `customers` dataset authority \
+                   — but `signatures[0].sig` does not verify against that key's actual public \
+                   key. A verifier that treated a matching `key_id` as proof of authorization, \
+                   without cryptographically checking the signature it is attached to, would let \
+                   this entry unseat the real trigger merely by anchoring later. Effectiveness \
                    requires BOTH the claimed key_id to be the record's authority AND the \
                    signature to verify against it — checked before the greatest-entry-index \
-                   rule is applied, exactly as for an unauthorized-but-genuine challenge \
-                   (compare `trigger-effective-later-challenge-ignored.ahl`), because a forged \
-                   signature is never traversed either."
+                   rule is applied, exactly as for a non-authority-but-genuine challenge \
+                   (compare `trigger-effective-later-challenge-ignored.ahl`), because a \
+                   non-verifying signature is never traversed either."
                 .to_owned(),
         }
         .build(corpus, keys),
         expect: Expect::Accept,
+    });
+
+    // Entry 29: the SUBJECT of its own `trigger-effective` claim carries two signature
+    // entries — one genuinely valid, cryptographically-signed entry from `producer-2` (not the
+    // `customers` authority, and no longer even in the producer snapshot after manifest v2),
+    // and one naming `producer-1`'s real key_id — the genuine `customers` authority — whose
+    // `sig` does not verify. A verifier that name-matched the authority's `key_id` among the
+    // signers without checking that entry's own signature would be fooled into treating this
+    // as authorized; instead, receipt §5 step 4 requires EVERY signature entry on the subject's
+    // own envelope to verify before any claim-specific logic runs at all, so this entry is
+    // rejected outright and never even reaches the claim-specific trigger-authority check.
+    // (`verify_trigger_authority`'s own completeness fix — the same requirement applied to the
+    // one entry that names the authority — is independently exercised end to end by
+    // `trigger-effective-non-authority-issuer-must-fail.ahl`, whose sole signer is a genuine,
+    // cryptographically valid non-authority signature, and by
+    // `trigger-effective-non-verifying-signature-ignored.ahl`'s competing candidate at entry
+    // 28, which reaches the identical `is_authorized_trigger` machinery via the
+    // competing-trigger enumeration route that bypasses this subject-level gate.)
+    out.push(Vector {
+        file: "trigger-effective-unverified-authority-signature-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "trigger-effective",
+            subject_index: 29,
+            anchor: cp30,
+            chain: vec![0, 9, 25],
+            record_subject: customers(&r.c_f),
+            competing: "enumerated",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 30, cp30),
+            claim_material: json!({
+                "introduction": introduction(20, &r.c_f, cp30),
+                "checkpoint_C": cp30.checkpoint,
+                "competing": { "corpus_range": corpus.enumeration(20, 30, cp30) },
+            }),
+            producer_keys: None,
+            note: "MUST FAIL. Entry 29's own envelope carries two signature entries: \
+                   `signatures[0]` is a genuine, cryptographically valid signature from \
+                   `producer-2`, who is not the `customers` dataset authority; \
+                   `signatures[1].key_id` correctly names `producer-1`'s real key_id — the \
+                   genuine authority — but `signatures[1].sig` does not verify against that \
+                   key's actual public key. Receipt §5 step 4 requires every signature entry on \
+                   the subject's own envelope to verify; naming the authority's key_id is not \
+                   enough when that entry's own signature does not verify, so this envelope \
+                   cannot ground any claim, let alone one asserting it is an effective trigger."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "receipt §5 step 4 — every subject envelope signature entry must verify",
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 29 }),
+        },
     });
 
     // A trigger on a DERIVED record, signed with a key added after the introduction.
@@ -1166,7 +1219,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                     ],
                     false,
                 ),
-                "trigger": unauthorized_trigger,
+                "trigger": non_authority_trigger,
             }),
             producer_keys: None,
             note: "MUST FAIL. The propagation statement at entry 24 is well formed, correctly \

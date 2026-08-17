@@ -177,7 +177,13 @@
       "entry_id": "sha256:62c3f21eed8c8ac6435b5a7d53cb01fd8530536ceaaa442e7d298cfc3bcac6bc",
       "entry_index": 28,
       "leaf_hash": "sha256:e6280d45e0271d88d4d96a329453170063f581ecee9a8e5188c20dad180c7e6e",
-      "name": "28-forged-signature-trigger-f"
+      "name": "28-invalid-signature-trigger-f"
+    },
+    {
+      "entry_id": "sha256:8722ec0a667429b3a99b7d6648a234505d6ff820c86d15324b225df28d56433e",
+      "entry_index": 29,
+      "leaf_hash": "sha256:93292c693bf65f0897a6143ba928922310e6050af782b70f42167330a9e450d6",
+      "name": "29-unverified-authority-signature-trigger-f"
     }
   ],
   "inclusion": {
@@ -230,6 +236,11 @@
       "name": "cp29",
       "root": "sha256:306a7739eb9f3c2eab1aaf02092097c730931f9df9dfb8138a9072e01d8bcb19",
       "tree_size": 29
+    },
+    {
+      "name": "cp30",
+      "root": "sha256:eceb835965e6f5ba49db1e1f113d602bd09262067d5d99b363e1a6d47572c306",
+      "tree_size": 30
     }
   ]
 }

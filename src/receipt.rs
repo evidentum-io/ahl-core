@@ -1697,7 +1697,7 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
     if kind == "trigger-effective" {
         // "Effective" is exactly the authority claim: an unauthorized trigger is a challenge
         // (spec §2.3.3) and can never be effective, however well anchored it is.
-        verify_trigger_authority(ctx, &introduction)?;
+        verify_trigger_authority(ctx, &introduction, budget)?;
         verify_competing_triggers(ctx, &introduction, budget)?;
     } else if ctx.assurance.competing_triggers != "not-checked" {
         return Err(ReceiptError::AssuranceMismatch { field: "competing_triggers" });
@@ -1802,12 +1802,13 @@ fn authority_at(
 /// claimed `key_id` — by the record's authority.
 ///
 /// A candidate's `signatures[].key_id` naming an authority key proves nothing on its own: the
-/// `sig` bytes are attacker-controlled in a forged statement. Every candidate MUST be checked
-/// with the same `verify_envelope` machinery used for real statements, restricted to authority
-/// keys so an envelope signed by some *other* valid producer key still correctly fails (that
-/// signer isn't this record's authority, whether or not the bytes verify). A forged envelope
-/// that reuses a real authority `key_id` with a garbage signature can otherwise displace the
-/// genuinely authorized trigger just by anchoring at a later index.
+/// `sig` bytes are controlled by whoever assembled the statement, who may be a party without
+/// authority. Every candidate MUST be checked with the same `verify_envelope` machinery used
+/// for real statements, restricted to authority keys so an envelope signed by some *other*
+/// valid producer key still correctly fails (that signer isn't this record's authority,
+/// whether or not the bytes verify). A non-verifying envelope that reuses a real authority
+/// `key_id` with a garbage signature can otherwise displace the genuinely authorized trigger
+/// just by anchoring at a later index.
 fn is_authorized_trigger(
     ctx: &ClaimCtx<'_>,
     envelope: &Value,
@@ -1830,15 +1831,25 @@ fn is_authorized_trigger(
 
 /// Spec §2.3.3: a trigger is effective only if signed by the record's authority. Triggers from
 /// any other key anchor as **challenges**: surfaced by verification, never traversed.
-fn verify_trigger_authority(ctx: &ClaimCtx<'_>, introduction: &Embedded) -> Result<()> {
+///
+/// Format §3 requires this to be a real cryptographic check, not a `key_id` name match: a
+/// signature entry that merely *names* an authority key proves nothing on its own, since the
+/// `sig` bytes are controlled by whoever assembled the envelope. This routes through the same
+/// `is_authorized_trigger` machinery `verify_competing_triggers` uses, so the receipt's own
+/// envelope must actually verify against an authority key active at `ctx.subject_index`.
+fn verify_trigger_authority(
+    ctx: &ClaimCtx<'_>,
+    introduction: &Embedded,
+    budget: &mut Budget,
+) -> Result<()> {
     let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
-    let signers: BTreeSet<String> = array(obj(ctx.receipt, "envelope")?, "signatures")?
-        .iter()
-        .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
-        .collect::<Result<_>>()?;
-    let authority =
-        authority_at(ctx, dataset, introduced_by_ingestion(introduction), ctx.subject_index)?;
-    if signers.is_disjoint(&authority) {
+    let envelope = obj(ctx.receipt, "envelope")?;
+    let by_ingestion = introduced_by_ingestion(introduction);
+    if !is_authorized_trigger(ctx, envelope, dataset, by_ingestion, ctx.subject_index, budget)? {
+        let signers: BTreeSet<String> = array(envelope, "signatures")?
+            .iter()
+            .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
+            .collect::<Result<_>>()?;
         return Err(ReceiptError::TriggerNotAuthorized {
             entry_index: ctx.subject_index,
             record: record.clone(),

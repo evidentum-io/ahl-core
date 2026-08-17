@@ -87,6 +87,18 @@
         "tree_size": 29
       },
       "name": "cp29"
+    },
+    {
+      "active_manifest_entry_index": 25,
+      "checkpoint": {
+        "checkpoint_time": "2026-08-16T12:00:00Z",
+        "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
+        "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
+        "root_hash": "sha256:eceb835965e6f5ba49db1e1f113d602bd09262067d5d99b363e1a6d47572c306",
+        "signature": "base64:PN+ZJWMdXAvrsOf3CA/AKNWge27j+itFke5Utxpe5TUVeMrYz1EDfCQkLgRZeVfE0b2AYTsMGeyIJKFdP+OVBw==",
+        "tree_size": 30
+      },
+      "name": "cp30"
     }
   ],
   "cosignatures": [
@@ -144,6 +156,14 @@
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
       "signed_over": "JCS({\"checkpoint\": <signed cp29>, \"witness_id\": \"witness-2\"})",
+      "witness_id": "witness-2"
+    },
+    {
+      "checkpoint": "cp30",
+      "cosignature": "base64:13ty0Pn6FQupXvrhMO/KUxan87w/4mJ0D6Tsvp3uv/zX5RjiNIOMSBuN+9GdqRtGiWbt2NCCyntV5tcha+6ADQ==",
+      "cosigned_at": "2026-08-16T12:00:00Z",
+      "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
+      "signed_over": "JCS({\"checkpoint\": <signed cp30>, \"witness_id\": \"witness-2\"})",
       "witness_id": "witness-2"
     }
   ],

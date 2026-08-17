@@ -105,7 +105,7 @@
     {
       "claim_type": "trigger-effective",
       "expect": "reject",
-      "file": "trigger-effective-unauthorized-issuer-must-fail.ahl",
+      "file": "trigger-effective-non-authority-issuer-must-fail.ahl",
       "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "spec §2.3.3 — a trigger not signed by the record's authority is a challenge"
     },
@@ -121,7 +121,14 @@
       "claim_type": "trigger-effective",
       "embedded_receipts": 1,
       "expect": "accept",
-      "file": "trigger-effective-forged-signature-ignored.ahl"
+      "file": "trigger-effective-non-verifying-signature-ignored.ahl"
+    },
+    {
+      "claim_type": "trigger-effective",
+      "expect": "reject",
+      "file": "trigger-effective-unverified-authority-signature-must-fail.ahl",
+      "reason": "envelope signature at entry index 29 did not verify",
+      "rule": "receipt §5 step 4 — every subject envelope signature entry must verify"
     },
     {
       "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",

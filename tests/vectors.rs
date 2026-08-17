@@ -27,9 +27,11 @@ use ahl_core::{
 };
 use serde_json::{json, Value};
 
-/// The statement vectors, in entry-index order. Entry 28 is an intentional forgery fixture
-/// (round-5): well-formed shape, real authority `key_id`, garbage `sig`.
-const STATEMENT_FILES: [&str; 29] = [
+/// The statement vectors, in entry-index order. Entry 28 is an intentional non-verifying-
+/// signature fixture: well-formed shape, real authority `key_id`, garbage `sig`. Entry 29 adds
+/// a second, genuinely valid signature entry from a non-authority key alongside a non-verifying
+/// authority-named one.
+const STATEMENT_FILES: [&str; 30] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -58,7 +60,8 @@ const STATEMENT_FILES: [&str; 29] = [
     "25-manifest-v2-rotate-witness-drop-key.json",
     "26-ingestion-customers-d-under-v2.json",
     "27-derivation-z-from-affected-descendant.json",
-    "28-forged-signature-trigger-f.json",
+    "28-invalid-signature-trigger-f.json",
+    "29-unverified-authority-signature-trigger-f.json",
 ];
 
 /// The four published closure scenarios.
@@ -242,18 +245,20 @@ fn the_manifest_chain_links_by_entry_id_and_rotates_the_witness_set() {
 
 #[test]
 fn every_statement_signature_verifies() {
-    // Entry 28 is an intentional forgery fixture (round-5): well-formed shape, real authority
-    // `key_id`, garbage `sig`. Every other entry must genuinely verify; entry 28 must not.
-    const FORGED: usize = 28;
+    // Entries 28 and 29 are intentional non-verifying-signature fixtures: well-formed shape,
+    // real authority `key_id`, garbage `sig` (entry 29 also carries a second, genuinely valid
+    // entry from a non-authority key). Every other entry must genuinely verify; these two must
+    // not.
+    const NON_VERIFYING: [usize; 2] = [28, 29];
     let vectors = statement_vectors();
     let keys = key_set(&vectors);
     for (index, vector) in vectors.iter().enumerate() {
         let ok = verify_envelope(&vector["envelope"], |key_id| keys.get(key_id).cloned())
             .expect("well-formed envelope");
-        if index == FORGED {
+        if NON_VERIFYING.contains(&index) {
             assert!(
                 !ok,
-                "{}: the forged-signature fixture must NOT verify",
+                "{}: the non-verifying-signature fixture must NOT verify",
                 STATEMENT_FILES[index]
             );
         } else {
@@ -438,7 +443,7 @@ fn range_proofs_verify_and_reject_tampering_through_atl_core() {
 
         // Completeness and order: substituting, reordering or dropping an entry must fail.
         let mut substituted = span.to_vec();
-        substituted[0] = b"forged entry".to_vec();
+        substituted[0] = b"substituted entry".to_vec();
         assert!(
             !range_proof::verify_over_leaves(&proof, &substituted, &root)
                 .expect("well-formed proof"),
@@ -940,9 +945,12 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "statement-anchored-dropped-producer-key-must-fail.ahl" => {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
         }
-        "trigger-effective-unauthorized-issuer-must-fail.ahl"
+        "trigger-effective-non-authority-issuer-must-fail.ahl"
         | "propagation-complete-challenge-trigger-must-fail.ahl" => {
             matches!(error, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. })
+        }
+        "trigger-effective-unverified-authority-signature-must-fail.ahl" => {
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 29 })
         }
         "propagation-complete-past-declared-checkpoint-must-fail.ahl" => matches!(
             error,
@@ -1635,37 +1643,37 @@ fn dedup_keys_on_the_whole_receipt_not_the_envelope() {
     // determined by the envelope); non-identical receipt objects sharing an entry id are each
     // verified in full."
     //
-    // The attack an entry-id cache would enable: carry one honest embedded receipt and one
-    // forged receipt *about the same statement*, so the forgery is waved through as a
+    // What an entry-id cache would enable: carry one honest embedded receipt and one invalid
+    // receipt *about the same statement*, so the invalid one is waved through as a
     // "duplicate" of the honest one.
     let policy = trust_policy();
     let (_, receipt) = read_receipt("trigger-declared-valid.ahl");
     let honest = receipt["claim_material"]["introduction"].clone();
 
-    let mut forged = honest.clone();
+    let mut invalid = honest.clone();
     // Same envelope — therefore the same entry id — but different claim material.
-    forged["claim"]["assurance"]["content_binding"] = json!("plain-verified");
-    forged["claim_material"] = json!({
+    invalid["claim"]["assurance"]["content_binding"] = json!("plain-verified");
+    invalid["claim_material"] = json!({
         "record_bytes": "base64:AAAA",
         "canonicalization": "jcs-v1",
     });
     assert_eq!(
-        honest["subject"]["entry_id"], forged["subject"]["entry_id"],
+        honest["subject"]["entry_id"], invalid["subject"]["entry_id"],
         "the two embedded receipts must share an entry id for this to be the right test"
     );
-    assert_ne!(honest["claim_material"], forged["claim_material"]);
+    assert_ne!(honest["claim_material"], invalid["claim_material"]);
 
     let mut attack = receipt;
-    attack["claim_material"]["replacement_introduction"] = forged.clone();
+    attack["claim_material"]["replacement_introduction"] = invalid.clone();
     let error = verify_receipt(&attack, &policy)
-        .expect_err("the forged embedded receipt must be verified in full, not skipped");
+        .expect_err("the invalid embedded receipt must be verified in full, not skipped");
     assert!(
         matches!(error, ReceiptError::ContentBindingMismatch { .. }),
-        "the forgery must fail on its own claim material, not be waved through: {error}"
+        "the invalid receipt must fail on its own claim material, not be waved through: {error}"
     );
 
     // And the honest receipt in that slot fails only on the §2.3 record rule — proving the
-    // rejection above came from the forged material rather than from the slot itself.
+    // rejection above came from the invalid material rather than from the slot itself.
     let mut control = attack;
     control["claim_material"]["replacement_introduction"] = honest;
     assert!(matches!(
@@ -1748,11 +1756,11 @@ fn a_later_challenge_cannot_unseat_an_authorized_trigger() {
     assert!(!authority.contains(&signer(23)), "entry 23 must be the challenge");
 
     // Bounded to [0, 25): entries 22 (authorized) and 23 (challenge) are what this test
-    // illustrates. Entry 28 also names F — it is round-5's FORGED-signature fixture, covered
-    // end to end by `trigger-effective-forged-signature-ignored.ahl` — and is deliberately out
-    // of scope here: a `key_id`-only "authority" filter, as used below, cannot tell it apart
-    // from a genuine signature, which is exactly why `is_authorized_trigger` in the verifier
-    // checks the signature cryptographically rather than reusing this shortcut.
+    // illustrates. Entry 28 also names F — it is the non-verifying-signature fixture, covered
+    // end to end by `trigger-effective-non-verifying-signature-ignored.ahl` — and is
+    // deliberately out of scope here: a `key_id`-only "authority" filter, as used below, cannot
+    // tell it apart from a genuine signature, which is exactly why `is_authorized_trigger` in
+    // the verifier checks the signature cryptographically rather than reusing this shortcut.
     let mut scope = 0..25;
 
     // Selecting by greatest entry index *first* would pick the challenge — the pre-fix bug.
