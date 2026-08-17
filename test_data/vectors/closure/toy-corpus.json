@@ -1,0 +1,63 @@
+{
+  "affected_count": 4,
+  "affected_root": "sha256:4bd82efc9f06646acc30186a67187081bd3a5adc9425afd447e9b23fd3f82dd2",
+  "corpus_checkpoint": {
+    "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
+    "root_hash": "sha256:5acb2282a107e7f7435e28117b0006f0e724aad828f8e8c2709c0a68d74ac6ba",
+    "tree_size": 8
+  },
+  "description": "Revocation closure over the 10-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
+  "expected_affected": [
+    {
+      "dataset": "scores",
+      "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
+    },
+    {
+      "dataset": "scores",
+      "record": "sha256:54805948541052fc8111ac220cbdd5bcb3892e9899ffb96697b76aa7b7d42798"
+    },
+    {
+      "dataset": "scores",
+      "record": "sha256:7f706bff69ab07703a27a6770f401c2b302e9bca264129e57d517a10a54f25d1"
+    },
+    {
+      "dataset": "scores",
+      "record": "sha256:df31b93a28e3de74b910bd72977edd310e9d4dfd2c8e66d38eab5c7303d6abfe"
+    }
+  ],
+  "expected_dispositions": [
+    {
+      "dataset": "scores",
+      "disposition": "invalidated",
+      "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
+    },
+    {
+      "dataset": "scores",
+      "disposition": "invalidated",
+      "record": "sha256:54805948541052fc8111ac220cbdd5bcb3892e9899ffb96697b76aa7b7d42798"
+    },
+    {
+      "dataset": "scores",
+      "disposition": "recomputed",
+      "record": "sha256:7f706bff69ab07703a27a6770f401c2b302e9bca264129e57d517a10a54f25d1",
+      "successor_statement": "sha256:012cf94aa6e69b854a342d6e9af53f56438f1c8380f41b99c7a958dba2635b27"
+    },
+    {
+      "dataset": "scores",
+      "disposition": "invalidated",
+      "record": "sha256:df31b93a28e3de74b910bd72977edd310e9d4dfd2c8e66d38eab5c7303d6abfe"
+    }
+  ],
+  "note": "The derivation at entry 7 produces S1' (sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c) from the replacement A2 and is therefore NOT affected: closure traverses (dataset, record) edges only (core spec §2.3.2), and S1' never consumed the corrected record. It appears in the corpus solely as the `successor_statement` of the `recomputed` disposition of S1.",
+  "trigger": {
+    "dataset": "customers",
+    "entry_index": 6,
+    "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
+    "scope": {
+      "effective_from": "2026-08-16T12:00:00Z",
+      "retroactive": true
+    },
+    "statement_id": "sha256:9ef5470b0bacb2558c0f6cbfb107b9916a02f9a99ff37c6fe355282a1349bd4f",
+    "type": "correction"
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "adaptor": {
+    "hash": "sha256:dd733d9f57a063924c8aaaa85d9929b0b570fb7e7de44f2a509183a9ed1bb43f",
+    "id": "ahl-test-log-v1"
+  },
+  "description": "Batch derivation output tree of entry 4 (core spec §2.5). Leaves are `ahl-leaf-v2` objects, record-sorted and duplicate-free; leaf bytes are JCS(leaf).",
+  "inclusion": {
+    "leaf": {
+      "dataset": "scores",
+      "inputs": [
+        {
+          "dataset": "customers",
+          "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
+          "role": "feature",
+          "statement": "sha256:22fa0e25334cc3422f9a957d5e5975747adf3981d404f2d2f33e5fa1b301c1a0"
+        }
+      ],
+      "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
+    },
+    "leaf_index": 0,
+    "path": [
+      "sha256:0dbe3d30a374de89bc88888fe617f54409566764a397a43fc0e1284c48f3d567",
+      "sha256:fbff01f577285c4c60629122b30c7a7705bfeb9b786778f229aa3ff5683a5283"
+    ],
+    "root": "sha256:a8cde531dde161f8b4c37d1218ebe58f784c1255d9cf89928dabedce965b0158",
+    "tree_size": 3
+  },
+  "leaf_format": "ahl-leaf-v2",
+  "leaf_rule": "sha256(0x00 || JCS(leaf))",
+  "leaves": [
+    {
+      "dataset": "scores",
+      "inputs": [
+        {
+          "dataset": "customers",
+          "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
+          "role": "feature",
+          "statement": "sha256:22fa0e25334cc3422f9a957d5e5975747adf3981d404f2d2f33e5fa1b301c1a0"
+        }
+      ],
+      "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
+    },
+    {
+      "dataset": "scores",
+      "inputs": [
+        {
+          "dataset": "customers",
+          "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
+          "role": "feature",
+          "statement": "sha256:22fa0e25334cc3422f9a957d5e5975747adf3981d404f2d2f33e5fa1b301c1a0"
+        }
+      ],
+      "record": "sha256:54805948541052fc8111ac220cbdd5bcb3892e9899ffb96697b76aa7b7d42798"
+    },
+    {
+      "dataset": "scores",
+      "inputs": [
+        {
+          "dataset": "customers",
+          "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
+          "role": "feature",
+          "statement": "sha256:22fa0e25334cc3422f9a957d5e5975747adf3981d404f2d2f33e5fa1b301c1a0"
+        }
+      ],
+      "record": "sha256:df31b93a28e3de74b910bd72977edd310e9d4dfd2c8e66d38eab5c7303d6abfe"
+    }
+  ],
+  "node_rule": "sha256(0x01 || left || right)",
+  "outputs_count": 3,
+  "outputs_root": "sha256:a8cde531dde161f8b4c37d1218ebe58f784c1255d9cf89928dabedce965b0158",
+  "sort_rule": "leaves sorted ascending by the byte sequence of the `record` family string; duplicates prohibited (core spec §2.5)"
+}

@@ -1,0 +1,23 @@
+{
+  "envelope": {
+    "payload": {
+      "ahl_version": "0.3",
+      "dataset": "customers",
+      "issued_at": "2026-08-16T12:00:00Z",
+      "manifest": "sha256:77b0a6bd4834a89ae68001c2e3c2ca0beee1959063b6fc8f7c175fd97da319d7",
+      "producer": "producer-1",
+      "reason_code": "consent_withdrawn",
+      "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
+      "type": "retraction",
+      "valid_time": "2026-08-16T12:00:00Z"
+    },
+    "signatures": [
+      {
+        "keyid": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
+        "sig": "base64:h3+rF3jF8YX4Is0A3th4ThyxP1u7N4YG+0XKr3hKLn/MxfkhF1G8qyqPPVx3OYXzZbqE/Eq6IZ7tLHgtBygRAQ=="
+      }
+    ]
+  },
+  "expect": "reject: core spec §2.3.3 requires `scope` on every trigger — \"`scope` REQUIRED; scopeless triggers are malformed\"",
+  "name": "trigger-without-scope"
+}
