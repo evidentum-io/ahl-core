@@ -1,12 +1,12 @@
 {
-  "entry_id": "sha256:4815061e056dac31b119c4e59d6d14fa378b65d5016779a5382bf3f104bcdaf0",
+  "entry_id": "sha256:ca44b4dc288c2c044ab7610a857d6a69cc427f47266792ecc9605f5a4fa0c194",
   "entry_index": 19,
   "envelope": {
     "payload": {
       "ahl_version": "0.3",
       "dataset": "scores",
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:7727dbc886141dc4dfa0824a2facd3e70aa960da336945f971b81f5b075c5577",
+      "manifest": "sha256:8aa7aebb081f2254732b1f3dc7cbc2555f61f9027a4ec1e578bf2a570bbdc551",
       "producer": "producer-1",
       "reason_code": "superseded",
       "record": "sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c",
@@ -20,9 +20,9 @@
     "signatures": [
       {
         "key_id": "sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827",
-        "sig": "base64:8wlScStF0GRXvEjHUZXzucEWXYTTrkV0iHEV+4BunrMg199xxrQ1leU5W92F90HEVqVAzsMsx/z2s7AwTPrPCA=="
+        "sig": "base64:XgW/KlJMUKcXz0pBMC9+LFOy4n8L5BZ+GDsWapYiDD7w+2gTdRwg0vzSekGpmDTSGyR6lzQzC/Bg6MO+yDsqBA=="
       }
     ]
   },
-  "statement_id": "sha256:1a8d8869b318646c5dc1277169c6cb7083650239460520f20c5f48d232b182fc"
+  "statement_id": "sha256:882eb3e4738616b397b19efd6b4308107d5471626a2cf34ae84b8db447184a49"
 }

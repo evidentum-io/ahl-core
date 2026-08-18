@@ -1,7 +1,7 @@
 {
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:5e1a0a24806e19c784194e5138d4612933af519dcdf2364ae2bb92ab87c93093",
+    "root_hash": "sha256:679d5064158e89f7c7d6fae9c6d32eb447b6295cf1061488fcbe81e0ca136c24",
     "tree_size": 20
   },
   "description": "Revocation closure `derived-record-authority-after-rotation` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
@@ -30,7 +30,7 @@
       "effective_from": "2026-08-16T12:00:00Z",
       "retroactive": true
     },
-    "statement_id": "sha256:1a8d8869b318646c5dc1277169c6cb7083650239460520f20c5f48d232b182fc",
+    "statement_id": "sha256:882eb3e4738616b397b19efd6b4308107d5471626a2cf34ae84b8db447184a49",
     "type": "retraction"
   }
 }

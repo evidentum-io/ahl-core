@@ -1091,6 +1091,9 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "statement-anchored-continued-history-wrong-pair-must-fail.ahl" => {
             matches!(error, ReceiptError::ConsistencyPathInvalid)
         }
+        "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl" => {
+            matches!(error, ReceiptError::FormatConflict { .. })
+        }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };
     assert!(fired, "{name}: expected rejection by {rule}, got: {error}");
@@ -1543,13 +1546,10 @@ fn reject_by_manifest_schema(mutate: impl FnOnce(&mut serde_json::Map<String, Va
     let error = verify_receipt(&receipt, &policy)
         .err()
         .unwrap_or_else(|| panic!("{case}: must be rejected, but verified"));
-    match &error {
-        ReceiptError::GovernanceChainInvalid(detail) => assert!(
-            detail.contains("§7.3") && detail.contains("REQUIRED"),
-            "{case}: rejected, but not by the §7.3 schema rule: {error}"
-        ),
-        other => panic!("{case}: expected a §7.3 schema rejection, got: {other}"),
-    }
+    assert!(
+        matches!(error, ReceiptError::ManifestSchemaInvalid { .. }),
+        "{case}: expected a manifest-schema rejection, got: {error}"
+    );
 }
 
 /// The same, scoped to the `log` object every §7.3 member lives in.
@@ -1615,6 +1615,184 @@ fn the_manifest_log_object_schema_is_enforced_and_log_id_has_no_alias() {
         "the log object itself",
     );
     reject_by_manifest_schema(|payload| payload["log"] = json!("a log"), "log is not an object");
+}
+
+#[test]
+fn the_manifest_log_object_value_grammars_are_enforced() {
+    // §7.3 states value grammars, not just membership, and requires a malformed value to be
+    // "rejected rather than approximated". The duty is on the value: this verifier computes no
+    // cadence or freshness verdict, but a manifest carrying `P1Y` would make those verdicts
+    // implementation-dependent for whoever does compute them, so it must not verify here.
+
+    // Family strings: `sha256:` plus exactly 64 lowercase hex digits. Uppercase hex names the
+    // same digest but compares unequal as a string, and every key lookup here is a comparison.
+    reject_by_log_schema(|log| log["log_id"] = json!("sha256:00ff"), "log_id is too short");
+    reject_by_log_schema(
+        |log| log["log_id"] = json!(format!("sha256:{}", "AB".repeat(32))),
+        "log_id in uppercase hex",
+    );
+    reject_by_log_schema(
+        |log| log["log_id"] = json!(format!("md5:{}", "ab".repeat(32))),
+        "log_id under another hash family",
+    );
+    reject_by_log_schema(
+        |log| log["adaptor"]["hash"] = json!("sha256:not-hex"),
+        "adaptor.hash is not hex",
+    );
+
+    // Durations: time components only. Years and a date-part `M` are PROHIBITED because their
+    // length is context-dependent, which is exactly what would make cadence, frontier and
+    // completeness bounds implementation-dependent.
+    for bad in [
+        "P1Y",             // years
+        "P1M",             // calendar months in the date part
+        "P1YT1H",          // years alongside a legal time part
+        "P1W",             // weeks are not in the restricted grammar either
+        "PT1H30",          // a component with no designator
+        "PTH",             // a designator with no digits
+        "PT",              // `T` with no component
+        "P1DT",            // a dangling `T`
+        "P",               // no component at all
+        "1H",              // no leading `P`
+        "PT1S1H",          // out of order
+        "PT1H1H",          // repeated component
+        "PT-1H",           // signed
+        "pt1h",            // lowercase designators are not the grammar as written
+        "PT1.5H",          // a fraction on a component other than seconds
+        "PT0.1234567891S", // ten fractional digits
+    ] {
+        reject_by_log_schema(|log| log["checkpoint_cadence"] = json!(bad), bad);
+        reject_by_log_schema(|log| log["witness_grace_period"] = json!(bad), bad);
+    }
+
+    // A zero cadence is a maximum gap no published series could ever meet.
+    for zero in ["PT0S", "PT0H0M0S", "P0D"] {
+        reject_by_log_schema(|log| log["checkpoint_cadence"] = json!(zero), zero);
+    }
+
+    // The grace period, by contrast, may legitimately be zero: §7.3 fixes the "greater than
+    // zero" rule on the cadence alone, and a deployment allowing no slack at all is strict
+    // rather than malformed. Accepting the forms §7.3 admits matters as much as rejecting the
+    // rest — a validator that rejected everything would pass every negative test above.
+    for good in ["PT0S", "P1D", "PT15M", "P1DT2H3M4S", "PT0.123456789S", "PT1H0M0S"] {
+        let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+        receipt["governance"]["chain"][0]["envelope"]["payload"]["log"]["witness_grace_period"] =
+            json!(good);
+        let anchor = entry_id(&receipt["governance"]["chain"][0]["envelope"]);
+        receipt["governance"]["genesis_entry_id"] = json!(&anchor);
+        let policy = TrustPolicy { genesis_entry_id: anchor, ..trust_policy() };
+        // Editing the manifest breaks its chain hop's inclusion proof, which is checked well
+        // after the schema, so the receipt may still be rejected — just never by the schema.
+        // (`PT15M` is the corpus value, so that one edit changes nothing and verifies outright.)
+        if let Err(error) = verify_receipt(&receipt, &policy) {
+            assert!(
+                !matches!(error, ReceiptError::ManifestSchemaInvalid { .. }),
+                "`{good}` is a duration §7.3 admits and must not be rejected by the schema: \
+                 {error}"
+            );
+        }
+    }
+
+    // `cadence_epoch` is RFC 3339, and a date alone is not an instant.
+    for bad in ["2026-08-16", "16/08/2026", "not a time", "2026-08-16T11:30:00"] {
+        reject_by_log_schema(|log| log["cadence_epoch"] = json!(bad), bad);
+    }
+
+    // Key objects carry `{key_id, pubkey, valid_from_index}`, and an entry index is an
+    // unsigned integer: a negative or fractional value indexes nothing in an append-only log.
+    for member in ["key_id", "pubkey", "valid_from_index"] {
+        reject_by_log_schema(
+            |log| {
+                log["keys"][0].as_object_mut().expect("key object").remove(member);
+            },
+            member,
+        );
+    }
+    reject_by_log_schema(|log| log["keys"][0]["valid_from_index"] = json!(-1), "negative index");
+    reject_by_log_schema(|log| log["keys"][0]["valid_from_index"] = json!(1.5), "fractional index");
+    reject_by_log_schema(|log| log["keys"][0]["key_id"] = json!("sha256:zz"), "key_id not hex");
+
+    // The same key-object shape governs the producer and witness arrays (§7.2, "same form").
+    reject_by_manifest_schema(
+        |payload| {
+            payload["keys"][0].as_object_mut().expect("key object").remove("valid_from_index");
+        },
+        "producer key object without valid_from_index",
+    );
+    reject_by_manifest_schema(
+        |payload| {
+            payload["witnesses"][0]["keys"][0]
+                .as_object_mut()
+                .expect("key object")
+                .remove("valid_from_index");
+        },
+        "witness key object without valid_from_index",
+    );
+}
+
+#[test]
+fn enumerated_currency_with_a_later_checkpoint_fails_closed() {
+    // Receipt §2.1 requires governance material covering through `later_checkpoint.tree_size`;
+    // §4 fixes enumerated material at exactly [0, tree_size(C)) for the anchoring checkpoint.
+    // Both cannot hold at once, and the format defines no second authenticated range, so the
+    // combination is refused. Accepting it would report as established a coverage requirement
+    // nothing in the receipt proves — a manifest rotating the log key set between the two
+    // checkpoints would be invisible to an enumeration bounded at the earlier size.
+    let policy = trust_policy();
+    let (_, receipt) =
+        read_receipt("trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl");
+    let error = verify_receipt(&receipt, &policy).expect_err("the combination must be refused");
+    assert!(matches!(error, ReceiptError::FormatConflict { .. }), "{error}");
+    // The error names the conflict rather than pretending a rule failed.
+    let rendered = error.to_string();
+    assert!(rendered.contains("§2.1") && rendered.contains("§4"), "{rendered}");
+
+    // Removing the later checkpoint — and the proof that pairs with it — leaves the very same
+    // enumerated receipt verifying. Nothing about the enumeration was wrong; it simply cannot
+    // reach a checkpoint beyond its own range.
+    let mut without = receipt;
+    let anchoring = without["anchoring"].as_object_mut().expect("anchoring");
+    anchoring.remove("later_checkpoint");
+    anchoring.remove("consistency_path");
+    without["claim"]["assurance"]["continued_history"] = json!(false);
+    let verdict = verify_receipt(&without, &policy).expect("the enumerated claim itself is sound");
+    assert_eq!(verdict.claim_type, "trigger-effective");
+    assert!(!verdict.assurance.continued_history);
+
+    // Declared mode is unaffected: it makes no currency claim to begin with (§2.1).
+    let (_, declared) = read_receipt("statement-anchored-continued-history.ahl");
+    assert_eq!(declared["governance"]["currency"]["mode"], json!("declared"));
+    assert!(
+        verify_receipt(&declared, &policy)
+            .expect("declared mode is unaffected")
+            .assurance
+            .continued_history
+    );
+}
+
+#[test]
+fn a_governance_hop_the_checkpoint_cannot_commit_is_refused() {
+    // The coverage §2.1 wants for a later checkpoint under a rotated key set would need a
+    // manifest hop anchored beyond the anchoring checkpoint. Its inclusion cannot be proven
+    // against that root, so it is a named refusal — never a pass on the strength of an older
+    // key that happens to remain usable.
+    // Append a genuine, well-formed manifest hop — version 2, chained to genesis by entry id —
+    // at an index beyond the anchoring checkpoint of size 20. Everything about the statement is
+    // real; what cannot exist is a proof of its inclusion under a root that never committed it.
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| {
+            let (_, source) = read_receipt("governance-state-valid.ahl");
+            let mut hop = source["governance"]["chain"][2].clone();
+            hop["entry_index"] = json!(9_999);
+            r["governance"]["chain"].as_array_mut().expect("chain").push(hop);
+        },
+        |e| {
+            matches!(e, ReceiptError::GovernanceChainInvalid(detail)
+                if detail.contains("does not commit"))
+        },
+        "§5 step 4 — a chain hop must be committed by the checkpoint it is proven against",
+    );
 }
 
 #[test]

@@ -716,6 +716,40 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         },
     });
 
+    // Enumerated governance currency plus a later checkpoint: a combination the frozen format
+    // cannot evidence, and therefore a refusal rather than a pass. Every individual piece here
+    // is genuine — the enumeration over [0, 8) is complete and correctly proven, cp13 is a real
+    // signed checkpoint, and the consistency path from cp8 to cp13 verifies — which is exactly
+    // why the vector is worth carrying: nothing is malformed, and the receipt is still refused.
+    let mut enumerated_with_later = trigger_effective(
+        1,
+        "MUST FAIL. Receipt §2.1 requires the governance material to cover through \
+         `later_checkpoint.tree_size` (13 here); §4 fixes enumerated material at exactly \
+         [0, tree_size(C)) for the receipt's verified checkpoint, which §3 binds to \
+         `anchoring.checkpoint` (cp8, tree size 8). No single range satisfies both rules, and \
+         the format defines no second authenticated range, so the coverage §2.1 mandates cannot \
+         be carried at all. Every piece of this receipt is individually valid: the [0, 8) \
+         enumeration is complete and correctly proven, cp13 carries a genuine log signature, and \
+         the consistency path from cp8 to cp13 verifies. A verifier that checked each piece and \
+         accepted would be reporting as established a coverage requirement nothing here proves — \
+         a manifest anchored between the two checkpoints could have rotated the log key set, and \
+         an enumeration bounded at 8 could never reveal it. The refusal names the conflict \
+         rather than pretending some rule failed: a defective format is a reason not to \
+         fabricate evidence, not a reason to declare missing evidence verified.",
+    );
+    enumerated_with_later["claim"]["assurance"]["continued_history"] = json!(true);
+    enumerated_with_later["anchoring"]["later_checkpoint"] = cp13.checkpoint.clone();
+    enumerated_with_later["anchoring"]["consistency_path"] = json!(corpus.consistency_path(8, 13));
+    out.push(Vector {
+        file: "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl",
+        receipt: enumerated_with_later,
+        expect: Expect::Reject {
+            rule: "receipt §2.1 vs §4 — enumerated currency cannot cover a later checkpoint, so \
+                   the combination is refused rather than accepted on unproven governance",
+            matches: |e| matches!(e, ReceiptError::FormatConflict { .. }),
+        },
+    });
+
     // The challenge at entry 21: a well-anchored trigger from a non-authority key.
     let non_authority_trigger = Spec {
         claim_type: "trigger-effective",

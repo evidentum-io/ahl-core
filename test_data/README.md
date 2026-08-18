@@ -54,7 +54,12 @@ The corpus is 32 anchored entries carrying these interlocking scenarios:
    would be void.
 7. **Continued history.** A consistency proof from cp20 to cp24 backs
    `assurance.continued_history` on a receipt, and a proof generated for a different pair of
-   sizes — genuine, correctly built, about the wrong fact — is rejected.
+   sizes — genuine, correctly built, about the wrong fact — is rejected. A third vector pairs
+   enumerated governance currency with a later checkpoint: every piece of it is individually
+   valid, and it is still refused, because receipt format §2.1 wants governance coverage through
+   the later checkpoint's tree size while §4 fixes enumerated material at the anchoring
+   checkpoint's, and no range satisfies both. A format that cannot express the evidence is a
+   reason to refuse, never a reason to report missing evidence as verified.
 
 Entry 25 anchors a second manifest version that rotates the witness key set in full and drops a
 producer key from its snapshot, chained to its predecessor by *entry* id; entries 26 onward are

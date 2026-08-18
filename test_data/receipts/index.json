@@ -7,13 +7,13 @@
           "checkpoint_raw": false,
           "consistency_proofs": true
         },
-        "hash": "sha256:2a9d7e6fe0a48c893a6b1353c58b35b2ba9b8754379684ab840571d13ba10950"
+        "hash": "sha256:ea4e9a7d9f4c2286fe2a0a292e939ef6c2261c8567b3d91cd7375c5490525961"
       }
     },
     "dataset_keys": {
       "customers": "test_data/keys/dataset_customers.key — held only by an authorized verifier; never packaged in a receipt"
     },
-    "genesis_entry_id": "sha256:740b6847ba546b1ead48503b3a3ec32b04924de6d9a6337d77fee76910771638",
+    "genesis_entry_id": "sha256:06dd2ba2f082130c98b1b178ea1c59245ec8ad7bf24ebac4323758ec8f5ba3ee",
     "genesis_key_ids": [
       "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
     ],
@@ -119,6 +119,13 @@
     {
       "claim_type": "trigger-effective",
       "expect": "reject",
+      "file": "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl",
+      "reason": "enumerated governance currency together with `anchoring.later_checkpoint` cannot be evidenced under this format revision: receipt format §2.1 requires governance material covering through `later_checkpoint.tree_size`, while §4 fixes enumerated material at exactly [0, tree_size(anchoring.checkpoint)); no range satisfies both, so the coverage §2.1 mandates is absent and the receipt is refused rather than accepted on unproven governance",
+      "rule": "receipt §2.1 vs §4 — enumerated currency cannot cover a later checkpoint, so the combination is refused rather than accepted on unproven governance"
+    },
+    {
+      "claim_type": "trigger-effective",
+      "expect": "reject",
       "file": "trigger-effective-non-authority-issuer-must-fail.ahl",
       "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "spec §2.3.3 — a trigger not signed by the record's authority is a challenge"
@@ -204,7 +211,7 @@
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-missing-leaf-must-fail.ahl",
-      "reason": "tree material for `sha256:89a5a22bd510168a1fbbbea50d506bf2808e4cc2e7c870dd2a8bad62c1e44810` is invalid: commits 3 leaves, 2 carried",
+      "reason": "tree material for `sha256:666457c5534dfcb45502fec62fa5387a462f32ebd773946f39d55c3dad26a800` is invalid: commits 3 leaves, 2 carried",
       "rule": "spec §2.5/§3.5 — committed tree material must open its anchored root and count"
     },
     {

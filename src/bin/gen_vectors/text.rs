@@ -86,7 +86,12 @@ The corpus is 32 anchored entries carrying these interlocking scenarios:
    would be void.
 7. **Continued history.** A consistency proof from cp20 to cp24 backs
    `assurance.continued_history` on a receipt, and a proof generated for a different pair of
-   sizes — genuine, correctly built, about the wrong fact — is rejected.
+   sizes — genuine, correctly built, about the wrong fact — is rejected. A third vector pairs
+   enumerated governance currency with a later checkpoint: every piece of it is individually
+   valid, and it is still refused, because receipt format §2.1 wants governance coverage through
+   the later checkpoint's tree size while §4 fixes enumerated material at the anchoring
+   checkpoint's, and no range satisfies both. A format that cannot express the evidence is a
+   reason to refuse, never a reason to report missing evidence as verified.
 
 Entry 25 anchors a second manifest version that rotates the witness key set in full and drops a
 producer key from its snapshot, chained to its predecessor by *entry* id; entries 26 onward are
@@ -347,6 +352,24 @@ unchanged by every later version, and the earliest checkpoint committing the gen
 must fall in `[cadence_epoch, cadence_epoch + checkpoint_cadence]`. This profile defines no
 cadence *enforcement* — the corpus publishes checkpoints for the scenarios its vectors need,
 not on a schedule — but the members are carried because a manifest missing one is malformed.
+
+The value grammars are core spec §7.3's, restated here so a verifier implemented from this
+document alone is complete:
+
+| member | grammar |
+| --- | --- |
+| `log_id`, `keys[].key_id`, `adaptor.hash` | family strings: `"sha256:"` plus 64 lowercase hex digits (§3) |
+| `checkpoint_cadence`, `witness_grace_period` | `P[n]DT[n]H[n]M[n]S` — days, hours, minutes, seconds. `Y`, and `M` in the date part, are PROHIBITED; at most nine fractional digits, on the seconds component only |
+| `checkpoint_cadence` | additionally MUST be greater than zero |
+| `cadence_epoch` | RFC 3339 |
+| `keys[]` | `{ key_id, pubkey, valid_from_index }`, the last an entry index |
+
+A malformed value MUST be **rejected rather than approximated**, and rejection is a duty on the
+value rather than a consequence of computing with it. A verifier that reads no cadence still
+refuses a manifest declaring `P1Y`: admitting it would leave the corpus verifiable only by
+implementations sharing that tolerance, and would make cadence, frontier and completeness bounds
+implementation-dependent for every party that does compute with the value. Truncating an
+over-long fraction is the same error in a quieter form.
 
 This profile defines no binary checkpoint framing, so receipts under it MUST NOT carry
 `anchoring.checkpoint.raw`.

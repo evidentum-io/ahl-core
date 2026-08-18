@@ -185,6 +185,24 @@ must fall in `[cadence_epoch, cadence_epoch + checkpoint_cadence]`. This profile
 cadence *enforcement* — the corpus publishes checkpoints for the scenarios its vectors need,
 not on a schedule — but the members are carried because a manifest missing one is malformed.
 
+The value grammars are core spec §7.3's, restated here so a verifier implemented from this
+document alone is complete:
+
+| member | grammar |
+| --- | --- |
+| `log_id`, `keys[].key_id`, `adaptor.hash` | family strings: `"sha256:"` plus 64 lowercase hex digits (§3) |
+| `checkpoint_cadence`, `witness_grace_period` | `P[n]DT[n]H[n]M[n]S` — days, hours, minutes, seconds. `Y`, and `M` in the date part, are PROHIBITED; at most nine fractional digits, on the seconds component only |
+| `checkpoint_cadence` | additionally MUST be greater than zero |
+| `cadence_epoch` | RFC 3339 |
+| `keys[]` | `{ key_id, pubkey, valid_from_index }`, the last an entry index |
+
+A malformed value MUST be **rejected rather than approximated**, and rejection is a duty on the
+value rather than a consequence of computing with it. A verifier that reads no cadence still
+refuses a manifest declaring `P1Y`: admitting it would leave the corpus verifiable only by
+implementations sharing that tolerance, and would make cadence, frontier and completeness bounds
+implementation-dependent for every party that does compute with the value. Truncating an
+over-long fraction is the same error in a quieter form.
+
 This profile defines no binary checkpoint framing, so receipts under it MUST NOT carry
 `anchoring.checkpoint.raw`.
 

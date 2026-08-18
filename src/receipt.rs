@@ -317,6 +317,34 @@ pub enum ReceiptError {
     #[error("governance chain invalid: {0}")]
     GovernanceChainInvalid(String),
 
+    /// A manifest object does not satisfy the schema the specification fixes for it.
+    ///
+    /// Spec §7.3 states value grammars for the `log` object and requires a malformed value to
+    /// be "rejected rather than approximated". The duty is on the value, so a signed manifest
+    /// that breaks the schema does not verify here even where this verifier never reads the
+    /// offending member — admitting it would leave the corpus verifiable only by
+    /// implementations that share this one's tolerances.
+    #[error("manifest `{object}` is invalid: {detail}")]
+    ManifestSchemaInvalid {
+        /// The offending member, as a dotted path from the manifest payload.
+        object: String,
+        /// Which rule it breaks.
+        detail: String,
+    },
+
+    /// The receipt asks for a combination the frozen container format cannot evidence.
+    ///
+    /// Not a failed rule: a rule that cannot be satisfied at all. Rejecting is the only honest
+    /// outcome, because the alternative is to report as verified a coverage requirement no
+    /// material in the format can meet.
+    #[error("{combination} cannot be evidenced under this format revision: {conflict}")]
+    FormatConflict {
+        /// The combination of receipt features that cannot be evidenced.
+        combination: &'static str,
+        /// The conflicting requirements, each named by section.
+        conflict: &'static str,
+    },
+
     /// An envelope signature did not verify under the key set as of its entry index.
     #[error("envelope signature at entry index {entry_index} did not verify")]
     EnvelopeSignatureInvalid {
@@ -670,25 +698,151 @@ impl<'a> Governance<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The manifest `log` object schema (spec §7.3)
+// ---------------------------------------------------------------------------
+
+/// A `sha256:` family string: the prefix plus exactly 64 lowercase hex digits.
+///
+/// Lowercase is not cosmetic. Spec §2.3.6 derives a producer `key_id` as `sha256:` plus
+/// *lowercase* hex, and §2.5 says family strings are lowercase hex; two spellings of one digest
+/// would compare unequal as strings while naming the same value, and every key lookup and
+/// checkpoint binding in this verifier is a string comparison.
+fn is_family_hash(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Parse the restricted duration grammar of spec §7.3, returning the value in nanoseconds.
+///
+/// §7.3 admits `P[n]DT[n]H[n]M[n]S` and nothing else: days, hours, minutes and seconds. Years
+/// and calendar months are PROHIBITED because their length is context-dependent, and a value
+/// carrying `Y`, or `M` in the date part, "is malformed and MUST be rejected rather than
+/// approximated". Fractional seconds are capped at nine digits, again with rejection rather than
+/// truncation — truncating would make the value implementation-dependent in exactly the way the
+/// component restriction exists to prevent.
+///
+/// The duty is on the *value*, not on the reader's use of it. This verifier computes no cadence
+/// or freshness verdict, but a manifest carrying `P1Y` would make those verdicts
+/// implementation-dependent for whoever does compute them, and a signed manifest that violates
+/// the frozen schema must not verify here merely because this code has no use for the field.
+///
+/// Returns the offending rule as a message on rejection.
+fn duration_nanos(value: &str) -> core::result::Result<u128, &'static str> {
+    /// Seconds per unit, in the order the grammar fixes.
+    const UNITS: [(char, u128); 3] = [('H', 3_600), ('M', 60), ('S', 1)];
+
+    fn digits(text: &str) -> core::result::Result<u64, &'static str> {
+        if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("every component is one or more ASCII digits followed by its designator");
+        }
+        text.parse().map_err(|_| "the component value is too large to represent")
+    }
+
+    let rest = value.strip_prefix('P').ok_or("a duration must begin with `P`")?;
+    let (date, time) = rest.split_once('T').map_or((rest, None), |(d, t)| (d, Some(t)));
+
+    let mut nanos: u128 = 0;
+    let mut components = 0usize;
+
+    if !date.is_empty() {
+        // Days are the only date component §7.3 admits: `Y`, and `M` in the date part, are
+        // prohibited outright, and no other designator (`W` among them) is in the grammar.
+        let day_digits = date.strip_suffix('D').ok_or(
+            "the date part admits days only — `Y` and a date-part `M` are prohibited (§7.3)",
+        )?;
+        nanos = u128::from(digits(day_digits)?) * 86_400 * 1_000_000_000;
+        components += 1;
+    }
+
+    if let Some(time) = time {
+        // A dangling `T` designates a time part that is not there. Admitting it would mean two
+        // spellings of one value, which is the class of latitude §7.3 exists to close.
+        if time.is_empty() {
+            return Err("`T` must be followed by at least one time component");
+        }
+        let mut cursor = time;
+        let mut next_unit = 0usize;
+        while !cursor.is_empty() {
+            let at = cursor
+                .find(|c: char| !c.is_ascii_digit() && c != '.')
+                .ok_or("a time component must carry a `H`, `M` or `S` designator")?;
+            let (number, tail) = cursor.split_at(at);
+            let designator = tail.chars().next().ok_or("a truncated time component")?;
+            let unit = UNITS
+                .iter()
+                .position(|(c, _)| *c == designator)
+                .ok_or("the time part admits `H`, `M` and `S` only (§7.3)")?;
+            if unit < next_unit {
+                return Err("time components appear in the order H, M, S, each at most once");
+            }
+            next_unit = unit + 1;
+
+            let value_nanos = match number.split_once('.') {
+                Some((whole, fraction)) => {
+                    if designator != 'S' {
+                        return Err("only the seconds component may carry a fraction (§7.3)");
+                    }
+                    if fraction.len() > 9 {
+                        return Err(
+                            "at most nine fractional digits; a longer value is malformed and is \
+                             rejected rather than truncated or rounded (§7.3)",
+                        );
+                    }
+                    let scale = 10u128.pow(9 - u32::try_from(fraction.len()).unwrap_or(9));
+                    u128::from(digits(whole)?) * 1_000_000_000
+                        + u128::from(digits(fraction)?) * scale
+                }
+                None => u128::from(digits(number)?) * UNITS[unit].1 * 1_000_000_000,
+            };
+            nanos =
+                nanos.checked_add(value_nanos).ok_or("the duration is too large to represent")?;
+            components += 1;
+            cursor = &tail[designator.len_utf8()..];
+        }
+    }
+
+    if components == 0 {
+        return Err("a duration carries at least one component");
+    }
+    Ok(nanos)
+}
+
 /// The manifest `log` object, checked against the §7.3 schema before anything reads it.
 ///
-/// Spec §7.3 names the id member `log_id` and makes **every** member REQUIRED. Both facts are
-/// enforced here rather than at each use: reading the id under any other spelling — or
-/// tolerating a manifest that omits `cadence_epoch` — is how two incompatible dialects of one
-/// manifest come to coexist, each verifiable only by the implementation that wrote it. There is
-/// deliberately no alias for `id`.
+/// Spec §7.3 fixes both the membership and the value grammars, and makes rejection a duty on
+/// the value rather than a consequence of computing with it:
 ///
-/// What this does *not* do is validate the ISO 8601 grammar of `checkpoint_cadence` and
-/// `witness_grace_period` (§7.3 restricts them to time components, at most nine fractional
-/// digits, cadence greater than zero). Those rules govern cadence and freshness verdicts, which
-/// this offline receipt verifier does not compute.
+/// * every member is REQUIRED — `log_id`, `operator`, `adaptor: {id, hash}`,
+///   `checkpoint_cadence`, `cadence_epoch`, `witness_grace_period`, `keys`;
+/// * `log_id` and each `keys[].key_id` are family strings, as is `adaptor.hash`;
+/// * `checkpoint_cadence` and `witness_grace_period` follow the restricted duration grammar of
+///   [`duration_nanos`], and `checkpoint_cadence` MUST be greater than zero;
+/// * `cadence_epoch` is RFC 3339;
+/// * each key object is `{key_id, pubkey, valid_from_index}`, the last an entry index.
+///
+/// The id member is `log_id`, and there is deliberately no alias for `id`: reading the id under
+/// another spelling — or tolerating a manifest that omits `cadence_epoch` — is how two
+/// incompatible dialects of one manifest come to coexist, each verifiable only by the
+/// implementation that wrote it.
+///
+/// What this does *not* fix is the encoding of `keys[].pubkey`, which core spec §2.3.6 leaves
+/// adaptor-defined; it is decoded where it is used, under the rule of the pinned profile.
 fn log_object(manifest: &Value) -> Result<&Value> {
-    let missing = |member: &str| {
-        ReceiptError::GovernanceChainInvalid(format!(
-            "the manifest `log` object is missing the REQUIRED member `{member}` (spec §7.3)"
-        ))
+    let invalid = |member: &str, detail: &str| ReceiptError::ManifestSchemaInvalid {
+        object: format!("log.{member}"),
+        detail: detail.to_owned(),
     };
-    let log = manifest.get("log").filter(|v| v.is_object()).ok_or_else(|| missing("log"))?;
+    let missing = |member: &str| invalid(member, "the member is REQUIRED (spec §7.3)");
+
+    let log = manifest.get("log").filter(|value| value.is_object()).ok_or_else(|| {
+        ReceiptError::ManifestSchemaInvalid {
+            object: "log".to_owned(),
+            detail: "the object is REQUIRED (spec §7.3)".to_owned(),
+        }
+    })?;
+
     for member in
         ["log_id", "operator", "checkpoint_cadence", "cadence_epoch", "witness_grace_period"]
     {
@@ -696,23 +850,74 @@ fn log_object(manifest: &Value) -> Result<&Value> {
             return Err(missing(member));
         }
     }
-    let adaptor = log.get("adaptor").filter(|v| v.is_object()).ok_or_else(|| missing("adaptor"))?;
+    if !is_family_hash(text(log, "log_id")?) {
+        return Err(invalid("log_id", "not a `sha256:` family string in lowercase hex (§7.3)"));
+    }
+
+    // Both durations are restricted to time components. `checkpoint_cadence` additionally MUST
+    // be greater than zero: a zero maximum gap could never be met by any published series, so a
+    // corpus declaring it would be unjudgeable rather than merely strict.
+    let cadence = duration_nanos(text(log, "checkpoint_cadence")?)
+        .map_err(|detail| invalid("checkpoint_cadence", detail))?;
+    if cadence == 0 {
+        return Err(invalid("checkpoint_cadence", "MUST be greater than zero (§7.3)"));
+    }
+    duration_nanos(text(log, "witness_grace_period")?)
+        .map_err(|detail| invalid("witness_grace_period", detail))?;
+
+    crate::bitemporal::parse_rfc3339("log.cadence_epoch", text(log, "cadence_epoch")?)
+        .map_err(|source| invalid("cadence_epoch", &source.to_string()))?;
+
+    let adaptor =
+        log.get("adaptor").filter(|value| value.is_object()).ok_or_else(|| missing("adaptor"))?;
     for member in ["id", "hash"] {
         if !adaptor.get(member).is_some_and(Value::is_string) {
-            return Err(missing(member));
+            return Err(missing(&format!("adaptor.{member}")));
         }
     }
+    if !is_family_hash(text(adaptor, "hash")?) {
+        return Err(invalid("adaptor.hash", "not a `sha256:` family string in lowercase hex"));
+    }
+
     if !log.get("keys").is_some_and(Value::is_array) {
         return Err(missing("keys"));
     }
+    key_objects(log)?;
     Ok(log)
 }
 
-/// Read the manifest key objects of `group` (`keys`, `log.keys`, `witnesses[].keys`).
+/// Read the manifest key objects of `group` (`keys`, `log.keys`, `witnesses[].keys`), checking
+/// each against the §7.2 shape every manifest key object shares.
+///
+/// Spec §7.2 gives producer, log and witness key objects one form —
+/// `{key_id, pubkey, valid_from_index}` — so they are validated in one place. `key_id` is a
+/// family string (§7.3) and `valid_from_index` is an entry index, which is an unsigned integer:
+/// a negative or fractional value is not an index into an append-only log.
 fn key_objects(container: &Value) -> Result<Vec<(String, String)>> {
     array(container, "keys")?
         .iter()
-        .map(|object| Ok((text(object, "key_id")?.to_owned(), text(object, "pubkey")?.to_owned())))
+        .enumerate()
+        .map(|(index, object)| {
+            let invalid = |member: &str, detail: &str| ReceiptError::ManifestSchemaInvalid {
+                object: format!("keys[{index}].{member}"),
+                detail: detail.to_owned(),
+            };
+            let key_id = object
+                .get("key_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("key_id", "the member is REQUIRED (spec §7.2)"))?;
+            if !is_family_hash(key_id) {
+                return Err(invalid("key_id", "not a `sha256:` family string in lowercase hex"));
+            }
+            let pubkey = object
+                .get("pubkey")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("pubkey", "the member is REQUIRED (spec §7.2)"))?;
+            if object.get("valid_from_index").and_then(Value::as_u64).is_none() {
+                return Err(invalid("valid_from_index", "not an entry index (spec §7.2, §7.3)"));
+            }
+            Ok((key_id.to_owned(), pubkey.to_owned()))
+        })
         .collect()
 }
 
@@ -767,7 +972,21 @@ fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance
                 // The manifest's `keys` array is a *snapshot*, not a set of add events
                 // (spec §7.2). It is read at resolution time by `producer_keys_at`, which
                 // discards whatever the prior manifest declared.
+                //
+                // Schema checking happens here, once per manifest, rather than wherever a
+                // member is first read. Key binding downstream is deliberately tolerant — a
+                // receipt may carry the same log key bound to two manifest versions, so a
+                // single entry that fails to bind is not fatal — and a malformed key object
+                // reaching that path would be swallowed by the tolerance and resurface as a
+                // missing key. A manifest that breaks the frozen schema must be refused as
+                // such, not reported as a key that happens not to resolve.
                 key_objects(payload)?;
+                log_object(payload)?;
+                if let Some(witnesses) = payload.get("witnesses").and_then(Value::as_array) {
+                    for witness in witnesses {
+                        key_objects(witness)?;
+                    }
+                }
                 manifests.push((index, payload));
             }
             "key" => {
@@ -1305,6 +1524,18 @@ fn verify_nested(
     // --- §5 step 4: chain anchoring and signatures ----------------------------------
     for hop in array(obj(receipt, "governance")?, "chain")? {
         let index = number(hop, "entry_index")?;
+        // A hop the checkpoint does not commit cannot be proven against its root, and an
+        // unprovable governance statement is a refusal rather than a pass. This is the wall a
+        // receipt hits when a manifest version was anchored after its own anchoring checkpoint
+        // — the case §2.1 needs for a later checkpoint under a rotated key set. Reporting it as
+        // a named refusal keeps it from degrading into "the older key still worked, so accept".
+        if index >= anchoring.tree_size {
+            return Err(ReceiptError::GovernanceChainInvalid(format!(
+                "the chain carries a hop at entry index {index}, which a checkpoint of size {} \
+                 does not commit: its inclusion cannot be proven against that root",
+                anchoring.tree_size
+            )));
+        }
         let hop_envelope = obj(hop, "envelope")?;
         check_inclusion(
             &jcs(hop_envelope),
@@ -1342,6 +1573,32 @@ fn verify_nested(
     }
     if assurance.continued_history != anchoring.continued_history {
         return Err(ReceiptError::AssuranceMismatch { field: "continued_history" });
+    }
+
+    // Enumerated currency and a later checkpoint cannot both be evidenced. §2.1 requires the
+    // governance material to cover through `later_checkpoint.tree_size`; §4 fixes enumerated
+    // material at exactly `[0, tree_size(C))` for the receipt's verified checkpoint, which §3
+    // binds to `anchoring.checkpoint`. Since a later checkpoint is at a greater tree size, no
+    // range satisfies both rules, and the format defines no second authenticated range.
+    //
+    // The tempting move is to verify the enumeration through the anchoring checkpoint, accept
+    // the later checkpoint separately, and call the receipt good. That reports as established a
+    // coverage requirement nothing in the receipt proves: a manifest anchored between the two
+    // checkpoints could have rotated the log key set, and the enumeration would never show it.
+    // A defective format is a reason not to fabricate evidence; it is not a reason to declare
+    // missing evidence verified. So the combination is refused, under an error naming the
+    // conflict rather than pretending some rule failed. Declared mode is unaffected: it makes
+    // no currency claim in the first place (§2.1).
+    if mode == "enumerated" && obj(receipt, "anchoring")?.get("later_checkpoint").is_some() {
+        return Err(ReceiptError::FormatConflict {
+            combination:
+                "enumerated governance currency together with `anchoring.later_checkpoint`",
+            conflict: "receipt format §2.1 requires governance material covering through \
+                       `later_checkpoint.tree_size`, while §4 fixes enumerated material at \
+                       exactly [0, tree_size(anchoring.checkpoint)); no range satisfies both, so \
+                       the coverage §2.1 mandates is absent and the receipt is refused rather \
+                       than accepted on unproven governance",
+        });
     }
 
     let claim_type = text(claim, "type")?.to_owned();
