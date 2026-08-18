@@ -31,6 +31,17 @@ pub const T_PAST_TO: &str = "2026-07-01T00:00:00Z";
 /// `effective_from` of the non-retroactive retraction at entry 17.
 pub const T_RETRACTION: &str = "2026-08-01T00:00:00Z";
 
+/// `log.cadence_epoch` — the single start of the checkpoint-series obligation (spec §7.3).
+///
+/// Spec §7.3 pins the epoch to the corpus's opening interval: the earliest checkpoint
+/// committing the genesis manifest MUST carry a `checkpoint_time` at or after `cadence_epoch`
+/// and no later than `cadence_epoch` plus that version's `checkpoint_cadence`. Every corpus
+/// checkpoint is stamped [`T0`] and the cadence is `PT1H`, so the epoch sits half an hour
+/// before [`T0`] — strictly inside that window rather than on either boundary. It is declared
+/// by the genesis manifest and repeated unchanged by every later version; the epoch never
+/// moves, while a later version MAY change the cadence from its own entry index forward.
+pub const T_CADENCE_EPOCH: &str = "2026-08-16T11:30:00Z";
+
 pub const PRODUCER_1: &str = "producer-1";
 pub const PRODUCER_2: &str = "producer-2";
 pub const WITNESS_1: &str = "witness-1";
@@ -185,11 +196,15 @@ pub fn manifest(
         "issued_at": T0,
         "level": "L3",
         "keys": producer_keys,
+        // Spec §7.3 fixes this object's schema and makes every member REQUIRED. The id member
+        // is `log_id` — the same spelling the checkpoint carries — and `cadence_epoch` is the
+        // fixed start of the checkpoint series, repeated unchanged by every manifest version.
         "log": {
-            "id": log_id,
+            "log_id": log_id,
             "operator": LOG_OPERATOR,
             "adaptor": { "id": ADAPTOR_ID, "hash": adaptor_hash },
             "checkpoint_cadence": "PT1H",
+            "cadence_epoch": T_CADENCE_EPOCH,
             "witness_grace_period": "PT15M",
             "keys": [ keys.log_1.key_object(0) ],
         },

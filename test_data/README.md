@@ -12,17 +12,17 @@ conformance levels, corpus manifest) and the **AHL Evidence Receipt (`.ahl`) con
 | Path | Contents |
 | --- | --- |
 | `adaptor/` | The test adaptor profile document, content-addressed and pinned in both manifest versions |
-| `vectors/statements/` | The 25-entry toy corpus, plus malformed statements naming the rule each violates |
+| `vectors/statements/` | The 32-entry toy corpus, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
-| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 19, 23 and 25, each cosigned by the witness its active manifest version declares |
-| `vectors/closure/` | Four closure scenarios (see below) |
+| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 28, 29, 30 and 32, each cosigned by the witness its active manifest version declares |
+| `vectors/closure/` | Six closure scenarios (see below) |
 | `vectors/witness/` | Signed witness refusal evidence carrying two conflicting checkpoints (spec §3.3 step 3) |
 | `receipts/` | One positive and at least one negative receipt per claim-type registry entry, plus `index.json` naming the expected outcome, the rule each negative must trip, and the trust policy those outcomes assume |
 | `keys/` | Committed test key seeds — **see the warning below** |
 
 ## The scenarios
 
-The corpus is 25 anchored entries carrying five interlocking scenarios:
+The corpus is 32 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -41,13 +41,24 @@ The corpus is 25 anchored entries carrying five interlocking scenarios:
    before the boundary, an open interval, and a closed interval ending before the boundary. The
    retraction at entry 17 (`retroactive: false`) affects exactly one of them. Scope is evaluated
    as an interval intersection over parsed instants, never as string comparison.
-5. **Challenge.** Entry 21 retracts a record under a key that is *not* the dataset authority, so
-   it anchors as a challenge (spec §2.3.3); entry 22 propagates over it anyway. No
+5. **Challenge.** Entry 23 retracts a record under a key that is *not* the dataset authority, so
+   it anchors as a challenge (spec §2.3.3); entry 24 propagates over it anyway. No
    `propagation-complete` receipt over that propagation can verify, which is the point.
+6. **Signature handling on competing triggers.** Entries 28, 29 and 31 all retract record F.
+   Entry 28 names the real authority's `key_id` with a signature that does not verify; entry 29
+   carries a genuine signature from a non-authority key alongside a non-verifying one that names
+   the authority; entry 31 is genuinely co-signed by the authority and a second active producer
+   key. Spec §2.1 forbids two envelopes sharing a statement id, and the statement id digests the
+   payload alone, so the three carry different `reason_code` values — otherwise they would be
+   one statement anchored three times, of which only entry 28 would govern and the other two
+   would be void.
+7. **Continued history.** A consistency proof from cp20 to cp24 backs
+   `assurance.continued_history` on a receipt, and a proof generated for a different pair of
+   sizes — genuine, correctly built, about the wrong fact — is rejected.
 
-Entry 23 anchors a second manifest version that rotates the witness key set in full and drops a
-producer key from its snapshot, chained to its predecessor by *entry* id; entry 24 is anchored
-under it.
+Entry 25 anchors a second manifest version that rotates the witness key set in full and drops a
+producer key from its snapshot, chained to its predecessor by *entry* id; entries 26 onward are
+anchored under it.
 
 ## Regenerating
 
@@ -59,11 +70,14 @@ The generator has no wall-clock read and no randomness: every timestamp is a fix
 every key comes from a committed seed, and every record is committed content. Two consecutive
 runs must leave `test_data/` byte-identical — if they do not, that is a bug.
 
-Before writing anything the generator verifies its own output and aborts on any mismatch: all
-25 envelope signatures, the manifest lineage and key-snapshot semantics, the challenge's
-authority status, every checkpoint signature and witness cosignature, every inclusion proof,
-every range proof (including that it rejects substitution), the witness refusal evidence, and
-an independent recomputation of all four revocation closures. It then runs every receipt vector
+Before writing anything the generator verifies its own output and aborts on any mismatch:
+statement-id and entry-id uniqueness (spec §2.1), every envelope signature — including that the
+two deliberately non-verifying fixtures really do not verify — the manifest lineage and
+key-snapshot semantics, the challenge's authority status, every checkpoint signature and witness
+cosignature, every inclusion proof, every range proof (including that it rejects substitution),
+every consistency proof between published checkpoints (including that a proof for the wrong pair
+of sizes is rejected), the witness refusal evidence, and an independent recomputation of every
+revocation closure. It then runs every receipt vector
 through `verify_receipt` and requires each positive one to be accepted and each negative one to
 be rejected *by the specific rule it names*. A vector that cannot be self-verified never reaches
 the repository.
@@ -88,31 +102,16 @@ exact revision and — normatively — **verifies every inclusion proof through
 Canonicalization (RFC 8785 JCS), node hashing, root computation and proof generation come from
 the same place.
 
+Consistency proofs come from `atl-core` too — `generate_consistency_proof` and, for
+verification, `verify_consistency` — so AHL's `continued_history` evidence is the RFC 9162
+construction the ATL family already implements, not a second one.
+
 Range proofs are the one construction `atl-core` has no primitive for, so the combining
 recursion is local. Every hash it computes is still `atl-core`'s: subtree roots from
 `compute_root`, interior nodes from `hash_children`, the split point from
 `largest_power_of_2_less_than`. A width-1 range is an inclusion proof in a different
 serialization, and the verifier cross-checks it through `verify_inclusion` so the two
 constructions cannot diverge.
-
-### JCS vectors: pinned, not duplicated
-
-This corpus carries no `vectors/jcs/` of its own. AHL's JCS canonicalization is byte-identical
-to ATL's (both RFC 8785), so this crate references `atl-core`'s JCS vector corpus at the exact
-revision `Cargo.toml` pins, rather than forking it:
-
-- **Revision:** `79ac9c085857` (the `rev` pinned for the `atl-core` git dependency)
-- **Path:** `test_data/vectors/jcs/` in `github.com/evidentum-io/atl-core` at that revision
-- **Corpus digest:** `sha256:8dd7289c9838e8b2bc2ed9eeabee298069d81d7bf76c3694ac2113424e81fcdf`
-
-The digest is computed as SHA-256 over the concatenation of `<relative path>\x00<file bytes>`
-for every file under `test_data/vectors/jcs/` at that revision, sorted ascending by relative
-path. At this revision the directory holds a single file, `cases.json` (2215 bytes, plain
-`sha256:753d21da52f8962f71969383e03510f75f521e2ef9e2209e61e627c6dd4d133c`), so the corpus digest
-above is `SHA-256("cases.json\x00" + <contents of cases.json>)`. Re-verify by fetching
-`test_data/vectors/jcs/` from `atl-core` at `79ac9c085857` and recomputing; a mismatch means the
-pinned revision's vectors changed underneath this crate, which the `Cargo.lock` `rev` alone does
-not protect against if the tag is ever force-moved upstream.
 
 ## Test keys — never reuse
 

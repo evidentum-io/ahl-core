@@ -5,15 +5,15 @@
       "ahl-test-log-v1": {
         "capabilities": {
           "checkpoint_raw": false,
-          "consistency_proofs": false
+          "consistency_proofs": true
         },
-        "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa"
+        "hash": "sha256:2a9d7e6fe0a48c893a6b1353c58b35b2ba9b8754379684ab840571d13ba10950"
       }
     },
     "dataset_keys": {
       "customers": "test_data/keys/dataset_customers.key — held only by an authorized verifier; never packaged in a receipt"
     },
-    "genesis_entry_id": "sha256:be129d9d262de65c47eaad8d978ef54e87d5e1388182df53e036102816210a49",
+    "genesis_entry_id": "sha256:740b6847ba546b1ead48503b3a3ec32b04924de6d9a6337d77fee76910771638",
     "genesis_key_ids": [
       "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
     ],
@@ -38,6 +38,20 @@
       "file": "overclaim-must-fail.ahl",
       "reason": "assurance field `governance` overstates what the receipt proves",
       "rule": "receipt §2.3 — assurance.governance must equal governance.currency.mode"
+    },
+    {
+      "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; the log's history continued to be append-only through the later checkpoint carried, which is not evidence that every checkpoint the cadence required was published; record content not verified",
+      "claim_type": "statement-anchored",
+      "embedded_receipts": 0,
+      "expect": "accept",
+      "file": "statement-anchored-continued-history.ahl"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "reject",
+      "file": "statement-anchored-continued-history-wrong-pair-must-fail.ahl",
+      "reason": "consistency path did not verify",
+      "rule": "receipt §2.1 / adaptor §9.2 — the consistency path must open the pair the receipt's own two checkpoints name"
     },
     {
       "claim_type": "statement-anchored",
@@ -190,7 +204,7 @@
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-missing-leaf-must-fail.ahl",
-      "reason": "tree material for `sha256:e7d5c31308ceff47b34c2f8f4dce9b90f2f54197c27e32432b2bd8625e3ae51a` is invalid: commits 3 leaves, 2 carried",
+      "reason": "tree material for `sha256:89a5a22bd510168a1fbbbea50d506bf2808e4cc2e7c870dd2a8bad62c1e44810` is invalid: commits 3 leaves, 2 carried",
       "rule": "spec §2.5/§3.5 — committed tree material must open its anchored root and count"
     },
     {

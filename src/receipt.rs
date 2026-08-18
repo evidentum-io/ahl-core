@@ -670,6 +670,44 @@ impl<'a> Governance<'a> {
     }
 }
 
+/// The manifest `log` object, checked against the §7.3 schema before anything reads it.
+///
+/// Spec §7.3 names the id member `log_id` and makes **every** member REQUIRED. Both facts are
+/// enforced here rather than at each use: reading the id under any other spelling — or
+/// tolerating a manifest that omits `cadence_epoch` — is how two incompatible dialects of one
+/// manifest come to coexist, each verifiable only by the implementation that wrote it. There is
+/// deliberately no alias for `id`.
+///
+/// What this does *not* do is validate the ISO 8601 grammar of `checkpoint_cadence` and
+/// `witness_grace_period` (§7.3 restricts them to time components, at most nine fractional
+/// digits, cadence greater than zero). Those rules govern cadence and freshness verdicts, which
+/// this offline receipt verifier does not compute.
+fn log_object(manifest: &Value) -> Result<&Value> {
+    let missing = |member: &str| {
+        ReceiptError::GovernanceChainInvalid(format!(
+            "the manifest `log` object is missing the REQUIRED member `{member}` (spec §7.3)"
+        ))
+    };
+    let log = manifest.get("log").filter(|v| v.is_object()).ok_or_else(|| missing("log"))?;
+    for member in
+        ["log_id", "operator", "checkpoint_cadence", "cadence_epoch", "witness_grace_period"]
+    {
+        if !log.get(member).is_some_and(Value::is_string) {
+            return Err(missing(member));
+        }
+    }
+    let adaptor = log.get("adaptor").filter(|v| v.is_object()).ok_or_else(|| missing("adaptor"))?;
+    for member in ["id", "hash"] {
+        if !adaptor.get(member).is_some_and(Value::is_string) {
+            return Err(missing(member));
+        }
+    }
+    if !log.get("keys").is_some_and(Value::is_array) {
+        return Err(missing("keys"));
+    }
+    Ok(log)
+}
+
 /// Read the manifest key objects of `group` (`keys`, `log.keys`, `witnesses[].keys`).
 fn key_objects(container: &Value) -> Result<Vec<(String, String)>> {
     array(container, "keys")?
@@ -829,7 +867,7 @@ fn bind_log_or_witness_key(
         })?;
 
     let declared: Vec<(String, String)> = if group == "log" {
-        key_objects(obj(manifest, "log")?)?
+        key_objects(log_object(manifest)?)?
     } else {
         let mut all = Vec::new();
         for witness in array(manifest, "witnesses")? {
@@ -909,7 +947,7 @@ fn verify_checkpoint(
     let (active_index, active_manifest) = governance.active_for(tree_size)?;
 
     // The log id must match the manifest version active for the checkpoint (adaptor §5).
-    if text(obj(active_manifest, "log")?, "id")? != text(checkpoint, "log_id")? {
+    if text(log_object(active_manifest)?, "log_id")? != text(checkpoint, "log_id")? {
         return Err(ReceiptError::GovernanceChainInvalid(
             "checkpoint `log_id` is not the log the active manifest declares".to_owned(),
         ));
@@ -985,20 +1023,89 @@ fn verify_checkpoint(
     // `continued_history` requires a later checkpoint plus a verifying consistency proof.
     // A profile that defines no consistency-proof serialization cannot supply one, so the
     // claim is unverifiable *under that profile* — reject rather than accept it unchecked.
-    let continued_history = anchoring.get("later_checkpoint").is_some();
-    if continued_history && !profile.capabilities.consistency_proofs {
+    if (anchoring.get("later_checkpoint").is_some() || anchoring.get("consistency_path").is_some())
+        && !profile.capabilities.consistency_proofs
+    {
         return Err(ReceiptError::AdaptorCapabilityUnsupported {
             id: profile_id.to_owned(),
             capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
         });
     }
-    if continued_history {
-        // A profile that does declare the capability still owes an actual verified proof;
-        // no such profile exists in this tranche, so nothing can reach acceptance here.
-        return Err(ReceiptError::ConsistencyPathInvalid);
-    }
+    let continued_history =
+        verify_continued_history(receipt, governance, anchoring, tree_size, &root, budget)?;
 
     Ok(Anchoring { tree_size, root, witnessed, continued_history })
+}
+
+/// Verify `anchoring.later_checkpoint` plus `anchoring.consistency_path` (format §2.1, §2.3;
+/// adaptor profile `ahl-adaptor-atl-v1` §8.3).
+///
+/// The claim `continued_history` makes is that the log's history continued to be append-only
+/// past the checkpoint the subject is included under. Three things have to hold, and each is
+/// checked here:
+///
+/// 1. **Both members are present.** §2.3 states the equivalence — `continued_history` is true
+///    *iff* `later_checkpoint` and `consistency_path` verify — so a later checkpoint with no
+///    proof, or a proof with no checkpoint, is malformed rather than a weaker claim.
+/// 2. **The later checkpoint is authentic on its own terms.** Its log signature is verified
+///    against a key declared by the manifest version active for **its** `tree_size`, not the
+///    subject checkpoint's (§2.1, §2.2). A key a later manifest replaced must not validate a
+///    checkpoint issued under the later state, and the reverse is equally true.
+/// 3. **The proof verifies**, as an RFC 9162 §2.1.4 consistency proof from the subject
+///    checkpoint's `(tree_size, root_hash)` to the later checkpoint's. A proof that is
+///    structurally impossible for that pair of sizes is a failed proof, not a different error:
+///    a proof generated for some other pair must never validate a claim about this one.
+///
+/// The claim's boundary stops there. A consistency proof shows one tree is an append-only
+/// extension of another; it does not show that a checkpoint the cadence required was ever
+/// published (core spec §7.3), and no verdict rendered from it may say otherwise.
+fn verify_continued_history(
+    receipt: &Value,
+    governance: &Governance<'_>,
+    anchoring: &Value,
+    from_size: u64,
+    from_root: &Hash,
+    budget: &mut Budget,
+) -> Result<bool> {
+    match (anchoring.get("later_checkpoint"), anchoring.get("consistency_path")) {
+        (None, None) => return Ok(false),
+        (Some(_), None) => {
+            return Err(ReceiptError::Malformed(
+                "`anchoring.consistency_path` is REQUIRED whenever `later_checkpoint` is \
+                 present (§2.1)"
+                    .to_owned(),
+            ))
+        }
+        (None, Some(_)) => {
+            return Err(ReceiptError::Malformed(
+                "`anchoring.later_checkpoint` is REQUIRED whenever `consistency_path` is \
+                 present (§2.1)"
+                    .to_owned(),
+            ))
+        }
+        (Some(_), Some(_)) => {}
+    }
+
+    let later = obj(anchoring, "later_checkpoint")?;
+    let to_size = number(later, "tree_size")?;
+    if to_size < from_size {
+        // A "later" checkpoint smaller than the one the subject is included under proves no
+        // continued history; it is the size regression a witness refuses to cosign over.
+        return Err(ReceiptError::ConsistencyPathInvalid);
+    }
+    authenticate_checkpoint(receipt, governance, later, budget)?;
+
+    let to_root = parse_hash_hex(text(later, "root_hash")?)?;
+    let path = path_strings(anchoring, "consistency_path")?;
+    let proof = crate::consistency_from_hex(from_size, to_size, &path)?;
+    budget.spend(1)?;
+    match crate::verify_consistency_proof(&proof, from_root, &to_root) {
+        Ok(true) => Ok(true),
+        // `Ok(false)` is a proof that does not open the pair; `Err` is a proof that could not
+        // exist for these sizes at all. Neither establishes continued history, and reporting
+        // them apart would only invite treating the second as a transport problem.
+        Ok(false) | Err(_) => Err(ReceiptError::ConsistencyPathInvalid),
+    }
 }
 
 /// Verify an inclusion path carried bare (adaptor profile §2.3) against a root.
@@ -1743,7 +1850,7 @@ fn checkpoints_agree(carried: &Value, reference: &Value, field: &'static str) ->
 /// signature, witness cosignature and inclusion path this verifier actually checked.
 /// `propagation-complete` is the deliberate exception: its `corpus_checkpoint` is the
 /// propagation's own declared D, generally *earlier* than A, and is authenticated by
-/// [`authenticate_declared_checkpoint`] plus prefix recomputation instead.
+/// [`authenticate_checkpoint`] plus prefix recomputation instead.
 fn bind_checkpoint(ctx: &ClaimCtx<'_>, carried: &Value, field: &'static str) -> Result<u64> {
     checkpoints_agree(carried, ctx.anchoring_checkpoint, field)?;
     number(ctx.anchoring_checkpoint, "tree_size")
@@ -2006,48 +2113,51 @@ fn verify_disposition(
     )
 }
 
-/// Authenticate the propagation's declared checkpoint D as a real, log-signed checkpoint.
+/// Authenticate a checkpoint the receipt carries alongside its own anchoring checkpoint.
 ///
-/// D is carried as a full signed checkpoint object (format §3). Its signature is checked
-/// against a log key that both appears in the receipt's `keys.log` block *and* is declared by
-/// the manifest version active for **D's** own tree size — not A's. The two can differ: a
-/// manifest anchored between D and A rotates the log key set, and a checkpoint issued under
-/// the earlier state must be validated by the earlier key (format §2.2).
-fn authenticate_declared_checkpoint(
-    ctx: &ClaimCtx<'_>,
+/// Two claim shapes need this: the propagation's declared checkpoint D (format §3) and
+/// `anchoring.later_checkpoint` (§2.1). Both are carried as full signed checkpoint objects, and
+/// both are validated the same way — the signature is checked against a log key that appears in
+/// the receipt's `keys.log` block *and* is declared by the manifest version active for **that
+/// checkpoint's own** tree size, never for the anchoring checkpoint's. The two can differ: a
+/// manifest anchored between them rotates the log key set, and a checkpoint issued under one
+/// state must be validated by that state's key (format §2.2).
+fn authenticate_checkpoint(
+    receipt: &Value,
+    governance: &Governance<'_>,
     declared: &Value,
     budget: &mut Budget,
 ) -> Result<()> {
     let key_id = text(declared, "key_id")?;
     let tree_size = number(declared, "tree_size")?;
-    let (active_index, active_manifest) = ctx.governance.active_for(tree_size)?;
+    let (active_index, active_manifest) = governance.active_for(tree_size)?;
 
-    // The log id must match the manifest version active for D, exactly as it must for A
-    // (adaptor §5) — D gets no relaxed check just because it is the earlier checkpoint.
-    if text(obj(active_manifest, "log")?, "id")? != text(declared, "log_id")? {
+    // The log id must match the manifest version active for this checkpoint, exactly as it must
+    // for the anchoring one (adaptor §5) — no relaxed check for the second checkpoint.
+    if text(log_object(active_manifest)?, "log_id")? != text(declared, "log_id")? {
         return Err(ReceiptError::GovernanceChainInvalid(
             "checkpoint `log_id` is not the log the active manifest declares".to_owned(),
         ));
     }
 
-    // D's log key resolves against the manifest active for D's *own* tree size, and its
-    // `keys.log` entry binds to that same manifest version (format §2.2) — the normal
-    // source/binding contract, not a byte-equality shortcut. `active_index` can differ from
-    // A's: a manifest anchored between D and A rotates the log key set, and a checkpoint issued
-    // under the earlier state must be validated by the earlier key.
+    // The log key resolves against the manifest active for this checkpoint's *own* tree size,
+    // and its `keys.log` entry binds to that same manifest version (format §2.2) — the normal
+    // source/binding contract, not a byte-equality shortcut. `active_index` can differ from the
+    // anchoring checkpoint's: a manifest anchored between them rotates the log key set, and a
+    // checkpoint issued under one state must be validated by that state's key.
     // The same `key_id` may appear more than once in `keys.log` — a receipt authenticating two
-    // checkpoints (D here, A elsewhere) can legitimately carry the same physical log key bound
-    // to each checkpoint's own active manifest. Take whichever entry actually binds at D's
+    // checkpoints can legitimately carry the same physical log key bound to each checkpoint's
+    // own active manifest. Take whichever entry actually binds at this checkpoint's
     // `active_index`, not merely the first entry with a matching `key_id` (that could be the
-    // one meant for A).
+    // one meant for the other checkpoint).
     let mut last_error = None;
     let mut pubkey = None;
-    for entry in array(obj(ctx.receipt, "keys")?, "log")? {
+    for entry in array(obj(receipt, "keys")?, "log")? {
         if text(entry, "key_id").ok() != Some(key_id) {
             continue;
         }
         check_key_id(entry)?;
-        match bind_log_or_witness_key(ctx.governance, entry, "log", active_index) {
+        match bind_log_or_witness_key(governance, entry, "log", active_index) {
             Ok(bound) => {
                 pubkey = Some(bound);
                 break;
@@ -2109,7 +2219,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
             member: "tree_size".to_owned(),
         });
     }
-    authenticate_declared_checkpoint(ctx, carried_d, budget)?;
+    authenticate_checkpoint(ctx.receipt, ctx.governance, carried_d, budget)?;
 
     // The prefix is `[0, tree_size(D))`, and its range proof is checked against **A's** root:
     // A is the checkpoint this verifier signature-checked and saw witness-cosigned. Verifying
@@ -2342,9 +2452,12 @@ fn render(claim_type: &str, assurance: &Assurance) -> String {
     } else {
         "; the anchoring checkpoint carries no verified witness cosignature"
     });
-    if !assurance.continued_history {
-        boundary.push_str("; no claim of continued append-only history beyond that checkpoint");
-    }
+    boundary.push_str(if assurance.continued_history {
+        "; the log's history continued to be append-only through the later checkpoint carried, \
+         which is not evidence that every checkpoint the cadence required was published"
+    } else {
+        "; no claim of continued append-only history beyond that checkpoint"
+    });
     boundary.push_str(match assurance.content_binding.as_str() {
         "plain-verified" => "; record content verified against the commitment",
         "keyed-authorized" => {

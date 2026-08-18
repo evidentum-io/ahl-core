@@ -8,7 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use ahl_core::receipt::{verify_receipt, AdaptorProfile, ReceiptError, TrustPolicy};
+use ahl_core::receipt::{
+    verify_receipt, AdaptorCapabilities, AdaptorProfile, ReceiptError, TrustPolicy,
+};
 use ahl_core::{entry_id, field_str, statement_id, TestKey};
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -41,12 +43,19 @@ pub fn trust_policy(corpus: &Corpus, keys: &Keys, dataset_key: &[u8]) -> TrustPo
     TrustPolicy {
         genesis_entry_id: entry_id(&corpus.envelopes[0]),
         genesis_key_ids: BTreeSet::from([keys.producer_1.key_id()]),
-        // `ahl-test-log-v1` defines neither a binary checkpoint framing nor a consistency-proof
-        // serialization, so both capabilities are off: material needing them is rejected as a
-        // limitation of *this profile*, naming it, not as a limitation of the format.
+        // `ahl-test-log-v1` defines the consistency-proof serialization (profile §9) but no
+        // binary checkpoint framing, so a receipt carrying `anchoring.checkpoint.raw` is
+        // rejected as a limitation of *this profile*, naming it, not as a limitation of the
+        // format — while `continued_history` is reachable and must be really proven.
         adaptor_profiles: BTreeMap::from([(
             ADAPTOR_ID.to_owned(),
-            AdaptorProfile::minimal(corpus.adaptor_hash.clone()),
+            AdaptorProfile {
+                hash: corpus.adaptor_hash.clone(),
+                capabilities: AdaptorCapabilities {
+                    checkpoint_raw: false,
+                    consistency_proofs: true,
+                },
+            },
         )]),
         dataset_keys: BTreeMap::from([(DS_CUSTOMERS.to_owned(), dataset_key.to_vec())]),
         trusted_witness_key_ids: BTreeSet::new(),
@@ -118,7 +127,7 @@ pub fn write_all(corpus: &Corpus, keys: &Keys, root: &Path, dataset_key: &[u8]) 
                             // What the profile document defines. Absent capabilities make
                             // dependent receipt material unverifiable *under this profile*.
                             "checkpoint_raw": false,
-                            "consistency_proofs": false,
+                            "consistency_proofs": true,
                         },
                     },
                 },
@@ -332,6 +341,72 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Reject {
             rule: "receipt §2.3 — assurance.governance must equal governance.currency.mode",
             matches: |e| matches!(e, ReceiptError::AssuranceMismatch { field: "governance" }),
+        },
+    });
+
+    // --- continued history (receipt §2.1, §2.3; adaptor profile §9) ---------------
+    // `assurance.continued_history` is the claim that the log's history stayed append-only past
+    // the checkpoint the subject is included under. It is reachable only where the pinned
+    // profile defines a consistency-proof serialization, and only against a real proof: the
+    // later checkpoint is authenticated on its own terms — its log signature verified under the
+    // manifest version active for ITS tree size — and then the RFC 9162 proof must open the
+    // pair (cp20.root at size 20 -> cp24.root at size 24).
+    let continued = |path: Vec<String>, note: &str| {
+        let mut receipt = Spec {
+            claim_type: "statement-anchored",
+            subject_index: 3,
+            anchor: cp20,
+            chain: vec![0],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: None,
+            note: note.to_owned(),
+        }
+        .build(corpus, keys);
+        receipt["claim"]["assurance"]["continued_history"] = json!(true);
+        receipt["anchoring"]["later_checkpoint"] = cp24.checkpoint.clone();
+        receipt["anchoring"]["consistency_path"] = json!(path);
+        receipt
+    };
+
+    out.push(Vector {
+        file: "statement-anchored-continued-history.ahl",
+        receipt: continued(
+            corpus.consistency_path(20, 24),
+            "Proves what `statement-anchored-valid.ahl` proves, and one thing more: that the \
+             log's history continued to be append-only past cp20. The receipt carries cp24 as a \
+             complete signed checkpoint object and an RFC 9162 consistency path from cp20's \
+             root at tree size 20 to cp24's at tree size 24 (adaptor profile §9). cp24's own \
+             log signature is verified under the manifest version active for ITS tree size, not \
+             cp20's — here both resolve to the genesis manifest, but the rule is the same one \
+             that lets a rotated log key set validate only the checkpoints issued under it \
+             (receipt §2.1, §2.2). The boundary stops there: a consistency proof shows an \
+             append-only extension, never that every checkpoint the declared cadence required \
+             was actually published (core §7.3), and the rendered verdict says so.",
+        ),
+        expect: Expect::Accept,
+    });
+
+    out.push(Vector {
+        file: "statement-anchored-continued-history-wrong-pair-must-fail.ahl",
+        receipt: continued(
+            corpus.consistency_path(8, 24),
+            "MUST FAIL. The carried path is a genuine, correctly generated RFC 9162 consistency \
+             proof — for the pair (8, 24), not the pair (20, 24) this receipt's two checkpoints \
+             name. Nothing about it is malformed; it simply proves a different fact. The sizes \
+             are deliberately NOT part of the serialization (adaptor profile §9.1): they come \
+             from `anchoring.checkpoint` and `anchoring.later_checkpoint`, so the proof is bound \
+             to one pair and a verifier that asked only \"does this path open something?\" \
+             would accept evidence about sizes the claim never mentioned.",
+        ),
+        expect: Expect::Reject {
+            rule: "receipt §2.1 / adaptor §9.2 — the consistency path must open the pair the \
+                   receipt's own two checkpoints name",
+            matches: |e| matches!(e, ReceiptError::ConsistencyPathInvalid),
         },
     });
 

@@ -172,8 +172,18 @@ by `producer-2` is effective.
 
 The log signs `JCS(checkpoint object with the "signature" member removed)`. `log_id` is
 `"sha256:" || hex(SHA-256("ahl-test-log-1"))` for the corpus log and MUST match
-`log.id` in the manifest version active for the checkpoint's `tree_size`. A checkpoint
-commits exactly the entries with index in `[0, tree_size)`.
+`log.log_id` in the manifest version active for the checkpoint's `tree_size` — the manifest
+member is spelled `log_id`, exactly as the checkpoint member is, and this profile defines no
+alias for it. A checkpoint commits exactly the entries with index in `[0, tree_size)`.
+
+The manifest `log` object of core spec §7.3 is
+`{ log_id, operator, adaptor: {id, hash}, checkpoint_cadence, cadence_epoch,
+witness_grace_period, keys }`, and **every member is REQUIRED**. `cadence_epoch` is the single
+start of the checkpoint-series obligation: it is declared by the genesis manifest, repeated
+unchanged by every later version, and the earliest checkpoint committing the genesis manifest
+must fall in `[cadence_epoch, cadence_epoch + checkpoint_cadence]`. This profile defines no
+cadence *enforcement* — the corpus publishes checkpoints for the scenarios its vectors need,
+not on a schedule — but the members are carried because a manifest missing one is malformed.
 
 This profile defines no binary checkpoint framing, so receipts under it MUST NOT carry
 `anchoring.checkpoint.raw`.
@@ -193,67 +203,94 @@ Serialized in a receipt as
 
 ### 6.1 Refusal evidence
 
-Core spec §3.3 step 3: on inconsistency or a missing consistency proof a witness MUST refuse
-to cosign and MUST publish signed refusal evidence containing both conflicting checkpoints.
-Under this profile that evidence is:
+Core spec §3.3 step 3: a witness that observes a fault MUST refuse to cosign and MUST publish
+signed refusal evidence containing both conflicting checkpoints. Under this profile that
+evidence is:
 
 ```json
 { "type": "witness-refusal",
   "witness_id": "<id>",
   "log_id": "sha256:<hex>",
-  "reason": "inconsistent | missing-consistency-proof",
+  "reason": "equivocation | size-regression | extension-failed",
   "retained": { ...signed checkpoint the witness had already cosigned... },
   "offered":  { ...signed checkpoint the witness refused... },
+  "proof": { "from_size": 13, "to_size": 20, "path": [ "sha256:<hex>", ... ] },
   "detail": "<informative text; never normative>",
   "refused_at": "<RFC 3339>",
   "key_id": "sha256:<hex>",
   "signature": "base64:<...>" }
 ```
 
-The witness signs `JCS(refusal object with the "signature" member removed)` — the same rule
-as §5, so one signing routine serves both. Refusal evidence is **self-authenticating**: a
-verifier needs only the witness public key from the manifest (core spec §7.2) plus the log
-public key to establish that the log signed two checkpoints that cannot both be true. It is
-not an AHL statement, is not anchored, and carries no `payload`/`signatures` envelope.
+`retained` and `offered` are REQUIRED in **every** refusal, each a complete signed checkpoint
+object of §5 including its `signature` member. `proof` is REQUIRED for `extension-failed` and
+MUST be absent for the other two reasons: a carried proof that no reason directs a verifier to
+check is unverified material inviting misreading. The witness signs `JCS(refusal object with
+the "signature" member removed)` — the same rule as §5, so one signing routine serves both.
+
+Every reason is independently recheckable from the evidence the refusal itself carries. A
+verifier never has to consult the log, the producer or the witness to decide whether a refusal
+is supported:
+
+| `reason` | emitted when | what a verifier rechecks from the carried evidence |
+| --- | --- | --- |
+| `equivocation` | the offered checkpoint shares a `tree_size` with a cosigned one and carries a different `root_hash` | `retained.tree_size == offered.tree_size` **and** `retained.root_hash != offered.root_hash`, both checkpoints carried and log-signed |
+| `size-regression` | the offered `tree_size` is smaller than an already-cosigned size, and no history exists at the offered size | `offered.tree_size < retained.tree_size` over the two carried checkpoints |
+| `extension-failed` | the offered checkpoint is larger and the consistency proof from the retained one to it fails verification | re-run the §9 consistency verification over the **carried proof**, after checking `proof.from_size == retained.tree_size` and `proof.to_size == offered.tree_size` |
+
+The two binding equalities for `extension-failed` MUST be checked **before** the proof is
+verified, and the refusal rejected as unsupported if either fails — otherwise a structurally
+valid proof that fails for some unrelated pair of sizes would validate a refusal about this
+pair, and the refusal would be baseless while the failure was real.
+
+There is no reason for "the log supplied no proof". Absence of a proof is not recheckable from
+a signed refusal — the evidence would carry nothing a verifier could examine, so a witness could
+emit it at will and a verifier could neither confirm nor refute it. A witness that derives
+consistency proofs itself, which is the arrangement this profile assumes, treats its own
+inability to compute one as an internal error: it declines to cosign and reports operationally,
+but publishes no refusal, because it has no evidence of log misbehaviour.
+
+Refusal evidence is **self-authenticating**: a verifier needs only the witness public key from
+the manifest (core spec §7.2) plus the log public key. It is not an AHL statement, is not
+anchored, and carries no `payload`/`signatures` envelope.
 
 Checking refusal evidence:
 
 1. verify the witness signature over the refusal object;
 2. verify the log signature on **both** carried checkpoints — an unsigned or badly signed
-   checkpoint proves nothing about the log;
-3. establish the conflict. For `reason: "inconsistent"` the two checkpoints have equal
-   `tree_size` and different `root_hash`, which no append-only log can produce. For
-   `reason: "missing-consistency-proof"` the offered checkpoint has the greater `tree_size`
-   and no consistency proof from the retained one was supplied;
-4. treat a verified refusal as evidence of log equivocation, not as a verdict about any
-   particular statement (core spec §3.3 claim discipline).
+   checkpoint proves nothing about the log — and confirm both carry the named `log_id`;
+3. apply the recheck for the declared `reason` from the table above. A refusal whose evidence
+   does not support its declared reason is **unsupported** and MUST be reported as such; a
+   verifier MUST NOT substitute a different reason the evidence would have supported;
+4. treat a verified refusal as evidence about the log's conduct within the boundary of its
+   reason, not as a verdict about any particular statement (core spec §3.3 claim discipline).
+   A verified `equivocation` ends the canonical series from that `tree_size` onward; a verified
+   `size-regression` or `extension-failed` is a finding about what the log offered this witness
+   and by itself establishes no divergence.
 
-## 7. Capabilities this profile does NOT define
+## 7. Capabilities
 
 Core spec §3 item 6 forbids verification from depending on knowledge outside the profile
 document, so the absence of a definition here is a **property of this profile**, not of the
-container format or of any verifier. Two capabilities the format allows are deliberately
-undefined in this revision:
+container format or of any verifier:
 
 | capability | status under `ahl-test-log-v1` | consequence |
 | --- | --- | --- |
 | binary checkpoint framing (`anchoring.checkpoint.raw`) | **not defined** | a receipt carrying `raw` under this profile MUST be rejected — there is no framing to parse it against, so the §5-step-2 "parses to the same values" check cannot be performed |
-| consistency-proof serialization (`anchoring.later_checkpoint` + `consistency_path`) | **not defined** | a receipt claiming `assurance.continued_history: true` under this profile MUST be rejected; receipts under it carry `continued_history: false` and omit both members |
+| consistency-proof serialization (`anchoring.later_checkpoint` + `consistency_path`) | **defined** (§9) | `assurance.continued_history: true` is reachable under this profile; a receipt claiming it MUST carry both members and both MUST verify |
+| authenticated range enumeration | **defined** (§8) | enumerated governance currency and every claim type requiring it are available |
+| typed-subset (governance) proofs | **not defined** (§8.4) | enumerated governance carries the full entry range |
 
-A conformant verifier reports these as limitations of the pinned profile, naming it — another
-profile that defined either capability would make the same receipt verifiable without any
-change to the verifier. Both are candidates for a future revision of this document, which
-would carry a new profile hash and therefore a new manifest version.
-
-Consistency proofs between checkpoints are otherwise a core-spec §3 contract item; nothing
-here weakens that requirement for production adaptors.
+A conformant verifier reports an absent capability as a limitation of the pinned profile,
+naming it — another profile that defined it would make the same receipt verifiable without any
+change to the verifier. The binary framing is a candidate for a future revision of this
+document, which would carry a new profile hash and therefore a new manifest version.
 
 ### 7.1 Authenticating an earlier checkpoint without a consistency proof
 
 Receipt format §3 lets `propagation-complete` authenticate the propagation's declared
 checkpoint D "EITHER [by] a consistency proof D→`anchoring.checkpoint` OR [by] recomputation of
-D's prefix root from the enumerated prefix". Because this profile defines no consistency-proof
-serialization, only the second path is available under it — and it is sufficient:
+D's prefix root from the enumerated prefix". Both paths exist under this profile; the corpus
+uses the second, and it is sufficient on its own:
 
 1. the receipt carries D as a full signed checkpoint object; its log signature is verified
    against a key declared by the manifest version active for **D's** `tree_size` (§2.2), which
@@ -265,7 +302,7 @@ serialization, only the second path is available under it — and it is sufficie
    `root_hash`.
 
 Steps 2 and 3 together establish that D is exactly the size-`tree_size(D)` prefix of A, which
-is precisely what an RFC 6962 consistency proof D→A asserts. The prefix is carried in full
+is precisely what an RFC 9162 consistency proof D→A asserts. The prefix is carried in full
 regardless — receipt format §3 states there is no compact completeness form — so a separate
 consistency proof would restate an already-proven fact in a second encoding.
 
@@ -347,3 +384,58 @@ Because this profile provides **no typed-subset proofs** (core spec §10.9), rec
 filtering of `entries` to manifest/key statements is NOT available under it: enumerated
 governance currency must carry the full entry range. That is the honest cost until a typed
 governance sub-tree exists.
+
+## 9. Consistency proofs
+
+Core spec §3 contract item 3 requires the log to serve consistency proofs between checkpoints,
+and receipt format §2.1 makes them the evidence behind `assurance.continued_history`. This
+profile defines them.
+
+### 9.1 Construction and serialization
+
+A consistency proof is an RFC 9162 §2.1.4 proof between two tree sizes of the **same** log,
+over the log tree of §2.1. It is serialized as a JSON array of `"sha256:<hex>"` family strings
+in the order produced by the RFC 9162 algorithm — the same shape as an inclusion path (§2.3),
+and, like it, carried bare:
+
+```json
+"consistency_path": [ "sha256:<hex>", "sha256:<hex>", ... ]
+```
+
+The two sizes are not carried inside the array. They come from the checkpoints the proof runs
+between, which is what binds the proof to a specific pair:
+
+| member | from size | to size |
+| --- | --- | --- |
+| `anchoring.consistency_path` | `anchoring.checkpoint.tree_size` | `anchoring.later_checkpoint.tree_size` |
+
+`anchoring.later_checkpoint` is a complete signed checkpoint object of §5, including its
+`signature` member.
+
+### 9.2 Verification
+
+1. Reject unless **both** `later_checkpoint` and `consistency_path` are present. Receipt format
+   §2.3 states the equivalence — `assurance.continued_history` is true *iff* both are present
+   and verify — so one without the other is malformed, not a weaker claim.
+2. Reject unless `later_checkpoint.tree_size >= anchoring.checkpoint.tree_size`. A "later"
+   checkpoint of smaller size proves no continued history; it is the size regression a witness
+   refuses to cosign over (§6.1).
+3. Verify `later_checkpoint`'s own log signature by §5, against a key declared by the manifest
+   version active for **its** `tree_size` — which may be a later manifest version than the one
+   active for `anchoring.checkpoint` (receipt format §2.2). A key one manifest version replaced
+   must not validate a checkpoint issued under another.
+4. Run the RFC 9162 §2.1.4 verification over the carried path, from
+   `anchoring.checkpoint.root_hash` at its `tree_size` to `later_checkpoint.root_hash` at its
+   own. Accept only on success; a path that is structurally impossible for that pair of sizes is
+   a failed proof, exactly like one that simply does not open the pair.
+
+### 9.3 What the proof does and does not establish
+
+A consistency proof establishes that the later checkpoint's tree is an append-only extension of
+the earlier one's: no entry the earlier checkpoint committed was removed, reordered or altered.
+
+It does **not** establish that a checkpoint the cadence required was ever published — omission
+is invisible to it (core spec §7.3) — and it says nothing about whether the operator showed the
+same log to everyone, which is what the witness protocol of §6 exists for. A verdict rendered
+from `continued_history` must not be stated more strongly than "the log's history continued to
+be append-only through the later checkpoint carried here".

@@ -1,10 +1,10 @@
 {
   "adaptor": {
-    "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa",
+    "hash": "sha256:2a9d7e6fe0a48c893a6b1353c58b35b2ba9b8754379684ab840571d13ba10950",
     "id": "ahl-test-log-v1"
   },
   "affected_count": 4,
-  "affected_root": "sha256:a19b569a95b55531bf4df657e6e03bc15258ce9b3f693e8692d5a4602dcf53f1",
+  "affected_root": "sha256:eb6da6570de702b79826d40d0e1db00a16c6f78b03ee9750d7205b85b87a3191",
   "description": "Disposition tree committed by the propagation statement at entry 8 (core spec §2.3.4, §2.5). Leaves are record-sorted disposition objects; leaf bytes are JCS(leaf).",
   "inclusion": {
     "leaf": {
@@ -16,9 +16,9 @@
     "leaf_index": 0,
     "path": [
       "sha256:e9da4e2c9ab30836defdf1a3b83fbc2b9b529ecdd867169eb0a5e2202b71d50d",
-      "sha256:6a9579084fa951009fb19bfb9ac6727f6d0d0be99b1b710d491878fae04e6fc5"
+      "sha256:04c58c3f05629ded0e6deda65f9938d4a1faab698b8d61aa04305ca018569124"
     ],
-    "root": "sha256:a19b569a95b55531bf4df657e6e03bc15258ce9b3f693e8692d5a4602dcf53f1",
+    "root": "sha256:eb6da6570de702b79826d40d0e1db00a16c6f78b03ee9750d7205b85b87a3191",
     "tree_size": 4
   },
   "leaf_rule": "sha256(0x00 || JCS(leaf))",
@@ -38,7 +38,7 @@
       "dataset": "scores",
       "disposition": "recomputed",
       "record": "sha256:7f706bff69ab07703a27a6770f401c2b302e9bca264129e57d517a10a54f25d1",
-      "successor_statement": "sha256:c046d7ab3d6c8dc58ae3792edc2104d2782996f4ba0fecffd156198f1a9d674f"
+      "successor_statement": "sha256:670d1d2ad6f994e2147a857a4c4756136dd7ef5c55c33ab061a285c40ab74188"
     },
     {
       "dataset": "scores",

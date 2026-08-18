@@ -1,15 +1,16 @@
 //! The 28-entry toy corpus and every non-receipt vector file it produces.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use base64::Engine as _;
 
 use ahl_core::closure::{affected_set, RecordRef, TreeMaterial};
 use ahl_core::{
-    checkpoint, checkpoint_signing_bytes, commit_keyed, commit_plain, cosignature_bytes, entry_id,
-    envelope, field_str, hash_hex, inclusion_proof, jcs, leaf_hash, proof_path_hex, range_proof,
-    record_sorted, sha256_hex, statement_id, tree_root, verify_envelope, verify_inclusion_proof,
+    checkpoint, checkpoint_signing_bytes, commit_keyed, commit_plain, consistency_path_hex,
+    consistency_proof, cosignature_bytes, entry_id, envelope, field_str, hash_hex, inclusion_proof,
+    jcs, leaf_hash, parse_hash_hex, proof_path_hex, range_proof, record_sorted, sha256_hex,
+    statement_id, tree_root, verify_consistency_proof, verify_envelope, verify_inclusion_proof,
     verify_signature,
 };
 use serde_json::{json, Value};
@@ -568,6 +569,14 @@ impl Corpus {
         // verification of the candidate's own signature — not a claimed-`key_id` lookup — can
         // catch it. Anchored after entry 22's genuine, authorized retraction, this is what the
         // competing-trigger selection at cp29 must NOT let govern.
+        // The three retractions of F at entries 28, 29 and 31 carry DIFFERENT `reason_code`
+        // values for one reason: spec §2.1 forbids anchoring two envelopes with the same
+        // statement id, and the statement id is the digest of the payload alone. Identical
+        // payloads under different signature sets would be one statement anchored three times,
+        // of which only the smallest entry index governs and the later two are void — so the
+        // two negative fixtures below could not be reasoned about, and the positive one at
+        // entry 31 could never govern. The reason code is the payload member that carries no
+        // verification weight, so it is the honest place to make them distinct.
         let mut env_28 = signed(
             "retraction",
             &m2,
@@ -575,7 +584,7 @@ impl Corpus {
                 "dataset": DS_CUSTOMERS,
                 "record": r.c_f,
                 "scope": { "effective_from": T0, "retroactive": true },
-                "reason_code": "other",
+                "reason_code": "fraud",
             }),
             &keys.producer_1,
         );
@@ -601,7 +610,7 @@ impl Corpus {
                 "dataset": DS_CUSTOMERS,
                 "record": r.c_f,
                 "scope": { "effective_from": T0, "retroactive": true },
-                "reason_code": "other",
+                "reason_code": "error",
             }),
         );
         let producer_2_sig = keys.producer_2.sign(&jcs(&f_retraction_2));
@@ -656,7 +665,7 @@ impl Corpus {
                 "dataset": DS_CUSTOMERS,
                 "record": r.c_f,
                 "scope": { "effective_from": T0, "retroactive": true },
-                "reason_code": "other",
+                "reason_code": "superseded",
             }),
         );
         let producer_1_sig_31 = keys.producer_1.sign(&jcs(&f_retraction_3));
@@ -786,6 +795,16 @@ impl Corpus {
         self.trees.get(root).expect("committed tree material")
     }
 
+    /// The RFC 9162 consistency path between two published tree sizes (adaptor profile §9).
+    ///
+    /// The sizes are not part of the serialization: they come from the two checkpoints the
+    /// proof runs between, which is what binds a proof to one specific pair.
+    pub fn consistency_path(&self, from_size: u64, to_size: u64) -> Vec<String> {
+        let proof = consistency_proof(&self.log_leaves(), from_size, to_size)
+            .expect("both sizes are within the corpus");
+        consistency_path_hex(&proof)
+    }
+
     /// The §4.2 inline enumeration form for `[from, to)` under a named checkpoint.
     pub fn enumeration(&self, from: u64, to: u64, anchor: &Anchor) -> Value {
         let leaves = self.log_leaves();
@@ -810,12 +829,46 @@ impl Corpus {
 
     pub fn self_check(&self, keys: &Keys) {
         println!("self-check");
+        self.check_statement_ids_are_unique();
         self.check_signatures(keys);
         self.check_anchors(keys);
         self.check_trees();
         self.check_range_proofs();
+        self.check_consistency_proofs();
         self.check_refusal(keys);
         self.check_closures();
+    }
+
+    /// Spec §2.1: a producer MUST NOT anchor two envelopes with the same statement id, and
+    /// where duplicates occur the smallest entry index governs while later ones are void.
+    ///
+    /// A corpus that broke this rule could not demonstrate the rules it exists for: a vector
+    /// asserting that some later entry governs would be asserting the opposite of §2.1, and no
+    /// reader could tell the intended lesson from the accident. Entry ids are checked too — two
+    /// envelopes sharing one would be one anchored entry counted twice.
+    fn check_statement_ids_are_unique(&self) {
+        let mut statements: BTreeMap<String, usize> = BTreeMap::new();
+        let mut entries: BTreeMap<String, usize> = BTreeMap::new();
+        for (index, env) in self.envelopes.iter().enumerate() {
+            let sid = statement_id(env).expect("well-formed envelope");
+            if let Some(first) = statements.insert(sid.clone(), index) {
+                panic!(
+                    "entries {first} and {index} share statement id {sid}: spec §2.1 voids the \
+                     later one, so the corpus cannot demonstrate anything about it"
+                );
+            }
+            let eid = entry_id(env);
+            if let Some(first) = entries.insert(eid.clone(), index) {
+                panic!("entries {first} and {index} share entry id {eid}");
+            }
+        }
+        println!(
+            "  [ok] {} anchored envelopes carry {} distinct statement ids and {} distinct entry \
+             ids (spec §2.1 payload uniqueness)",
+            self.envelopes.len(),
+            statements.len(),
+            entries.len()
+        );
     }
 
     fn check_signatures(&self, keys: &Keys) {
@@ -1034,6 +1087,52 @@ impl Corpus {
         );
     }
 
+    /// Every published checkpoint pair must be provably append-only, and a proof generated for
+    /// one pair must not validate another (adaptor profile §9).
+    fn check_consistency_proofs(&self) {
+        let leaves = self.log_leaves();
+        let root_at = |size: u64| tree_root(&leaves[..at(size)]);
+        let mut pairs = 0;
+        for older in &self.anchors {
+            for newer in &self.anchors {
+                if newer.tree_size() < older.tree_size() {
+                    continue;
+                }
+                let path = self.consistency_path(older.tree_size(), newer.tree_size());
+                let proof =
+                    ahl_core::consistency_from_hex(older.tree_size(), newer.tree_size(), &path)
+                        .expect("generated path is well formed");
+                assert!(
+                    verify_consistency_proof(
+                        &proof,
+                        &parse_hash_hex(older.root()).expect("root hash"),
+                        &parse_hash_hex(newer.root()).expect("root hash"),
+                    )
+                    .expect("well-formed proof"),
+                    "{} -> {}: consistency proof did not verify",
+                    older.name,
+                    newer.name
+                );
+                pairs += 1;
+            }
+        }
+
+        // A proof for a DIFFERENT pair must not validate this one. Without this, a verifier
+        // that checked only "does a path open something?" would accept a proof about sizes the
+        // claim never mentioned — the same defect adaptor profile §6.1 pins down for refusal
+        // evidence, in a different place.
+        let wrong = ahl_core::consistency_from_hex(20, 24, &self.consistency_path(8, 24))
+            .expect("well-formed path");
+        assert!(
+            !verify_consistency_proof(&wrong, &root_at(20), &root_at(24)).unwrap_or(false),
+            "a consistency proof generated for [8, 24) must not verify as one for [20, 24)"
+        );
+        println!(
+            "  [ok] {pairs} consistency proofs verified between published checkpoints, and a \
+             proof for the wrong pair of sizes was rejected (adaptor profile §9)"
+        );
+    }
+
     fn check_refusal(&self, keys: &Keys) {
         let mut unsigned = self.refusal.as_object().cloned().expect("refusal object");
         unsigned.remove("signature");
@@ -1147,6 +1246,11 @@ impl Corpus {
                                 self-authenticating and is NOT an anchored AHL statement.",
                 "adaptor": { "id": ADAPTOR_ID, "hash": self.adaptor_hash },
                 "signed_over": "JCS(refusal object with the \"signature\" member removed)",
+                "reason_taxonomy": [ "equivocation", "size-regression", "extension-failed" ],
+                "recheck": "for `equivocation`: retained.tree_size == offered.tree_size AND \
+                            retained.root_hash != offered.root_hash, over two carried, \
+                            log-signed checkpoints. `proof` MUST be absent — it is required \
+                            only for `extension-failed`.",
                 "expect": "accept as evidence of log equivocation: both checkpoints carry valid \
                            log-1 signatures, `tree_size` is equal and `root_hash` differs, which \
                            no append-only log can produce",
@@ -1567,6 +1671,14 @@ fn record_list(records: &[RecordRef]) -> Vec<Value> {
 
 /// Witness refusal evidence: the log signed a second, different root at a tree size the
 /// witness had already cosigned (spec §3.3 step 3, adaptor profile §6.1).
+///
+/// The reason is `equivocation`. That is the only reason this evidence supports: the taxonomy
+/// is `equivocation | size-regression | extension-failed`, each independently recheckable from
+/// what the refusal itself carries, and here the recheck is exactly `retained.tree_size ==
+/// offered.tree_size` with `retained.root_hash != offered.root_hash` over two log-signed
+/// checkpoints. `proof` is deliberately absent: it is required only for `extension-failed`, and
+/// a carried proof no reason directs a verifier to check is unverified material inviting
+/// misreading.
 fn refusal_evidence(keys: &Keys, log_id: &str, retained: &Anchor) -> Value {
     let conflicting_root = sha256_hex(b"ahl-test-log-1 equivocating root at tree size 13");
     let offered = checkpoint(log_id, retained.tree_size(), &conflicting_root, T0, &keys.log_1);
@@ -1574,12 +1686,12 @@ fn refusal_evidence(keys: &Keys, log_id: &str, retained: &Anchor) -> Value {
         "type": "witness-refusal",
         "witness_id": WITNESS_1,
         "log_id": log_id,
-        "reason": "inconsistent",
+        "reason": "equivocation",
         "retained": retained.checkpoint,
         "offered": offered,
         "detail": "the log offered a second checkpoint at tree_size 13 whose root differs from \
                    the one witness-1 had already cosigned; no append-only log can produce two \
-                   roots at one tree size, so no consistency proof between them can exist",
+                   roots at one tree size",
         "refused_at": T0,
         "key_id": keys.witness_1.key_id(),
     });

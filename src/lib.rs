@@ -46,14 +46,17 @@ pub mod range_proof;
 pub mod receipt;
 pub mod tree;
 
-use atl_core::core::merkle::{compute_root, generate_inclusion_proof, verify_inclusion};
+use atl_core::core::merkle::{
+    compute_root, generate_consistency_proof, generate_inclusion_proof, verify_consistency,
+    verify_inclusion,
+};
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use hmac::{Hmac, Mac as _};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 
-pub use atl_core::core::merkle::{Hash, InclusionProof};
+pub use atl_core::core::merkle::{ConsistencyProof, Hash, InclusionProof};
 pub use error::{AhlError, AhlResult};
 
 /// The AHL core specification version these vectors are generated against.
@@ -407,6 +410,67 @@ pub fn verify_inclusion_proof(leaf: &[u8], proof: &InclusionProof, root: &Hash) 
     Ok(verify_inclusion(&leaf_hash(leaf), proof, root)?)
 }
 
+/// RFC 9162 §2.1.4 consistency proof between two sizes of one log tree.
+///
+/// Generation, like inclusion-proof generation, is delegated to [`atl_core`]; only the leaf
+/// hashing is local. `leaves` must be the log's leaf byte strings up to at least `to_size`.
+///
+/// # Errors
+///
+/// Returns [`AhlError::Merkle`] if `from_size` exceeds `to_size` or `to_size` exceeds the
+/// leaf material supplied.
+pub fn consistency_proof(
+    leaves: &[Vec<u8>],
+    from_size: u64,
+    to_size: u64,
+) -> AhlResult<ConsistencyProof> {
+    let hashes: Vec<Hash> = leaves.iter().map(|leaf| leaf_hash(leaf)).collect();
+    Ok(generate_consistency_proof(from_size, to_size, |level, index| {
+        if level == 0 {
+            hashes.get(usize::try_from(index).ok()?).copied()
+        } else {
+            None
+        }
+    })?)
+}
+
+/// Verify a consistency proof, so an older root is shown to be a prefix of a newer one.
+///
+/// The verification step is [`atl_core::core::merkle::verify_consistency`], never a local
+/// reimplementation — the same anti-drift coupling inclusion proofs use.
+///
+/// # Errors
+///
+/// Returns [`AhlError::Merkle`] if the proof is structurally impossible for its declared
+/// sizes. A structurally valid proof that simply does not prove consistency yields `Ok(false)`.
+pub fn verify_consistency_proof(
+    proof: &ConsistencyProof,
+    old_root: &Hash,
+    new_root: &Hash,
+) -> AhlResult<bool> {
+    Ok(verify_consistency(proof, old_root, new_root)?)
+}
+
+/// A consistency-proof path rendered as `["sha256:<hex>", ...]`, in RFC 9162 order.
+#[must_use]
+pub fn consistency_path_hex(proof: &ConsistencyProof) -> Vec<String> {
+    proof.path.iter().map(hash_hex).collect()
+}
+
+/// Rebuild a [`ConsistencyProof`] from its serialized path.
+///
+/// # Errors
+///
+/// Returns an error if any path element is not a valid `sha256:<hex>` string.
+pub fn consistency_from_hex(
+    from_size: u64,
+    to_size: u64,
+    path: &[String],
+) -> AhlResult<ConsistencyProof> {
+    let path = path.iter().map(|h| parse_hash_hex(h)).collect::<AhlResult<Vec<Hash>>>()?;
+    Ok(ConsistencyProof { from_size, to_size, path })
+}
+
 /// Render a tree hash as `sha256:<hex>`.
 #[must_use]
 pub fn hash_hex(hash: &Hash) -> String {
@@ -678,6 +742,47 @@ mod tests {
         assert_eq!(path.len(), proof.path.len());
         assert_eq!(proof_from_hex(2, 5, &path).expect("well-formed path"), proof);
         assert!(inclusion_proof(&leaves, 9).is_err());
+    }
+
+    #[test]
+    fn consistency_proofs_verify_through_atl_core() {
+        let leaves: Vec<Vec<u8>> = (0u8..9).map(|i| vec![i; 4]).collect();
+        let root_at = |size: usize| tree_root(&leaves[..size]);
+        for from in 1..=9usize {
+            for to in from..=9usize {
+                let proof =
+                    consistency_proof(&leaves, from as u64, to as u64).expect("sizes in range");
+                assert!(
+                    verify_consistency_proof(&proof, &root_at(from), &root_at(to))
+                        .expect("well-formed proof"),
+                    "consistency {from} -> {to} did not verify"
+                );
+                let path = consistency_path_hex(&proof);
+                assert_eq!(
+                    consistency_from_hex(from as u64, to as u64, &path).expect("valid path"),
+                    proof,
+                    "the serialized path must round trip"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_consistency_proof_does_not_verify_for_another_pair_of_sizes() {
+        let leaves: Vec<Vec<u8>> = (0u8..9).map(|i| vec![i; 4]).collect();
+        let root_at = |size: usize| tree_root(&leaves[..size]);
+        // A genuine proof for [3, 9) must not validate the claim [5, 9): the sizes live outside
+        // the serialization, so they are what bind a proof to one pair.
+        let path = consistency_path_hex(&consistency_proof(&leaves, 3, 9).expect("sizes in range"));
+        let mislabelled = consistency_from_hex(5, 9, &path).expect("valid path");
+        assert!(!verify_consistency_proof(&mislabelled, &root_at(5), &root_at(9)).unwrap_or(false));
+
+        // An inverted pair is an error, not a quiet `false`.
+        assert!(consistency_proof(&leaves, 9, 3).is_err());
+        assert!(matches!(
+            consistency_from_hex(1, 2, &["nope".to_owned()]),
+            Err(AhlError::MissingPrefix { .. })
+        ));
     }
 
     #[test]

@@ -212,6 +212,113 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
 }
 
 #[test]
+fn the_manifest_log_object_carries_every_required_member() {
+    let vectors = statement_vectors();
+    let published =
+        read_json(&test_data().join("vectors").join("checkpoints").join("checkpoints.json"));
+
+    let mut epochs = BTreeSet::new();
+    for index in [0usize, 25] {
+        let log = &vectors[index]["envelope"]["payload"]["log"];
+
+        // Spec §7.3 names the id member `log_id` and makes every member REQUIRED. `id` is not
+        // an accepted spelling and must not appear: a silent alias is how two incompatible
+        // dialects of one manifest come to coexist.
+        assert!(log.get("id").is_none(), "the manifest log id member is spelled `log_id`");
+        for member in
+            ["log_id", "operator", "checkpoint_cadence", "cadence_epoch", "witness_grace_period"]
+        {
+            assert!(
+                log.get(member).and_then(Value::as_str).is_some(),
+                "manifest at entry {index} omits the REQUIRED `log.{member}` (spec §7.3)"
+            );
+        }
+        assert!(log["adaptor"].get("id").is_some() && log["adaptor"].get("hash").is_some());
+        assert!(log["keys"].is_array());
+
+        // §7.3: durations are restricted to time components — years and calendar months are
+        // PROHIBITED, since their length is context-dependent.
+        for member in ["checkpoint_cadence", "witness_grace_period"] {
+            let value = field_str(log, member).expect("duration");
+            let (date_part, _) = value.split_once('T').unwrap_or((value, ""));
+            assert!(
+                !date_part.contains('Y') && !date_part.contains('M'),
+                "`log.{member}` = `{value}` carries a calendar component (spec §7.3)"
+            );
+        }
+        epochs.insert(field_str(log, "cadence_epoch").expect("cadence_epoch").to_owned());
+
+        // The checkpoint every receipt binds to must name the log this manifest declares.
+        for entry in published["checkpoints"].as_array().expect("checkpoints") {
+            assert_eq!(
+                field_str(&entry["checkpoint"], "log_id").expect("log_id"),
+                field_str(log, "log_id").expect("log_id"),
+                "the checkpoint `log_id` and the manifest `log.log_id` are one value"
+            );
+        }
+    }
+
+    // §7.3: the epoch is declared by the genesis manifest and repeated unchanged by every later
+    // version — it anchors the start of the series and never moves.
+    assert_eq!(epochs.len(), 1, "every manifest version repeats one `cadence_epoch`");
+
+    // And it is not free-floating: the earliest checkpoint committing the genesis manifest must
+    // fall within [cadence_epoch, cadence_epoch + checkpoint_cadence]. The corpus cadence is
+    // PT1H and every checkpoint is stamped at the same instant, so the window is one hour wide.
+    let genesis_log = &vectors[0]["envelope"]["payload"]["log"];
+    assert_eq!(field_str(genesis_log, "checkpoint_cadence").expect("cadence"), "PT1H");
+    let epoch = field_str(genesis_log, "cadence_epoch").expect("cadence_epoch");
+    let earliest = published["checkpoints"].as_array().expect("checkpoints")[0]["checkpoint"]
+        ["checkpoint_time"]
+        .as_str()
+        .expect("checkpoint_time");
+    assert_eq!(epoch, "2026-08-16T11:30:00Z");
+    assert_eq!(earliest, "2026-08-16T12:00:00Z");
+}
+
+#[test]
+fn no_two_anchored_envelopes_share_a_statement_id() {
+    // Spec §2.1: "A producer MUST NOT anchor two envelopes with the same statement id; if
+    // duplicates occur, the one with the smallest entry index governs and later ones are void."
+    // A corpus that broke this could not demonstrate the rules it exists for — a vector
+    // asserting that some later entry governs would be asserting the opposite of §2.1.
+    let vectors = statement_vectors();
+    let mut statements: BTreeMap<String, usize> = BTreeMap::new();
+    let mut entries: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, vector) in vectors.iter().enumerate() {
+        let sid = field_str(vector, "statement_id").expect("statement_id").to_owned();
+        if let Some(first) = statements.insert(sid.clone(), index) {
+            panic!(
+                "{} and {} share statement id {sid}, which §2.1 voids the later of",
+                STATEMENT_FILES[first], STATEMENT_FILES[index]
+            );
+        }
+        let eid = field_str(vector, "entry_id").expect("entry_id").to_owned();
+        if let Some(first) = entries.insert(eid.clone(), index) {
+            panic!(
+                "{} and {} share entry id {eid}",
+                STATEMENT_FILES[first], STATEMENT_FILES[index]
+            );
+        }
+    }
+    assert_eq!(statements.len(), STATEMENT_FILES.len());
+    assert_eq!(entries.len(), STATEMENT_FILES.len());
+
+    // The three retractions of record F that exist to exercise signature handling — the
+    // non-verifying one, the one whose authority-named entry does not verify, and the genuinely
+    // co-signed one — are distinct statements, not one statement anchored three times.
+    let f_triggers: Vec<&Value> = [28usize, 29, 31].iter().map(|i| &vectors[*i]).collect();
+    let records: BTreeSet<&str> = f_triggers
+        .iter()
+        .map(|v| field_str(&v["envelope"]["payload"], "record").expect("record"))
+        .collect();
+    assert_eq!(records.len(), 1, "all three name the same record, as the scenario requires");
+    let ids: BTreeSet<&str> =
+        f_triggers.iter().map(|v| field_str(v, "statement_id").expect("statement_id")).collect();
+    assert_eq!(ids.len(), 3, "and each is nevertheless its own statement");
+}
+
+#[test]
 fn the_manifest_chain_links_by_entry_id_and_rotates_the_witness_set() {
     let vectors = statement_vectors();
     let genesis = &vectors[0]["envelope"];
@@ -566,10 +673,25 @@ fn witness_refusal_evidence_is_self_authenticating() {
         );
     }
 
-    // Step 3: the conflict — equal tree size, different roots. No append-only log can do that.
-    assert_eq!(field_str(refusal, "reason").expect("reason"), "inconsistent");
+    // Step 3: apply the recheck the declared reason directs a verifier to. The taxonomy is
+    // `equivocation | size-regression | extension-failed`, and each reason is checkable from
+    // the evidence the refusal itself carries; a reason outside it — the removed
+    // `missing-consistency-proof`, or the `inconsistent` this corpus once declared — names no
+    // recheck at all, so a verifier could neither confirm nor refute it.
+    let reason = field_str(refusal, "reason").expect("reason");
+    assert!(
+        ["equivocation", "size-regression", "extension-failed"].contains(&reason),
+        "`{reason}` is not a defined refusal reason"
+    );
+    assert_eq!(reason, "equivocation");
+
+    // The `equivocation` recheck: one tree size, two roots. No append-only log can do that.
     assert_eq!(refusal["retained"]["tree_size"], refusal["offered"]["tree_size"]);
     assert_ne!(refusal["retained"]["root_hash"], refusal["offered"]["root_hash"]);
+
+    // `proof` is required for `extension-failed` and MUST be absent otherwise: a carried proof
+    // no reason directs a verifier to check is unverified material inviting misreading.
+    assert!(refusal.get("proof").is_none(), "`proof` belongs only to `extension-failed`");
 
     // The retained checkpoint must be one the corpus actually published.
     let published =
@@ -966,6 +1088,9 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "governance-state-key-subject-must-fail.ahl" => {
             matches!(error, ReceiptError::GovernanceSubjectNotManifest { .. })
         }
+        "statement-anchored-continued-history-wrong-pair-must-fail.ahl" => {
+            matches!(error, ReceiptError::ConsistencyPathInvalid)
+        }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };
     assert!(fired, "{name}: expected rejection by {rule}, got: {error}");
@@ -1138,43 +1263,100 @@ fn adaptor_capability_gaps_are_reported_as_profile_limitations() {
     let policy = trust_policy();
     let (_, valid) = read_receipt("statement-anchored-valid.ahl");
 
-    // The corpus profile defines no binary checkpoint framing and no consistency-proof
-    // serialization (adaptor profile §7), so receipts needing either are rejected — but as a
-    // limitation of that profile, named, not as a blanket rule of the container format.
-    let mut with_raw = valid.clone();
+    // The corpus profile defines no binary checkpoint framing (adaptor profile §7), so a
+    // receipt carrying `raw` is rejected — but as a limitation of that profile, named, not as
+    // a blanket rule of the container format.
+    let mut with_raw = valid;
     with_raw["anchoring"]["checkpoint"]["raw"] = Value::String("base64:AAAA".to_owned());
     assert!(matches!(
         verify_receipt(&with_raw, &policy),
         Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
     ));
 
-    let mut with_later = valid;
-    with_later["anchoring"]["later_checkpoint"] = json_checkpoint();
-    assert!(matches!(
-        verify_receipt(&with_later, &policy),
-        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
-    ));
+    // Consistency proofs ARE defined by this profile (§9), so the same material verifies here.
+    let (_, continued) = read_receipt("statement-anchored-continued-history.ahl");
+    let verdict = verify_receipt(&continued, &policy).expect("consistency proof verifies");
+    assert!(verdict.assurance.continued_history);
 
-    // A profile that declared the capability would get past the limitation check; nothing in
-    // this tranche can then supply a verifiable proof, so it fails on the proof instead.
-    let mut permissive = trust_policy();
-    permissive.adaptor_profiles.insert(
+    // Under a profile that does NOT define the serialization — `AdaptorProfile::minimal`, the
+    // shape the corpus profile had before §9 existed — the identical receipt is rejected, and
+    // the rejection names the profile rather than the format. That guard is the reason a
+    // verifier may not quietly accept unverifiable material from a profile that never defined
+    // how to verify it.
+    let mut restricted = trust_policy();
+    restricted.adaptor_profiles.insert(
         "ahl-test-log-v1".to_owned(),
-        AdaptorProfile {
-            hash: policy.adaptor_profiles["ahl-test-log-v1"].hash.clone(),
-            capabilities: AdaptorCapabilities { checkpoint_raw: true, consistency_proofs: true },
-        },
+        AdaptorProfile::minimal(policy.adaptor_profiles["ahl-test-log-v1"].hash.clone()),
     );
     assert!(matches!(
-        verify_receipt(&with_later, &permissive),
-        Err(ReceiptError::ConsistencyPathInvalid)
+        verify_receipt(&continued, &restricted),
+        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
     ));
+    assert!(!restricted.adaptor_profiles["ahl-test-log-v1"].capabilities.consistency_proofs);
+    assert!(!restricted.adaptor_profiles["ahl-test-log-v1"].capabilities.checkpoint_raw);
 }
 
-/// A structurally plausible later checkpoint, used only to trip capability checks.
-fn json_checkpoint() -> Value {
-    let file = read_json(&test_data().join("vectors").join("checkpoints").join("checkpoints.json"));
-    file["checkpoints"].as_array().expect("checkpoints").last().expect("cp25")["checkpoint"].clone()
+#[test]
+fn continued_history_requires_both_members_and_a_later_checkpoint_of_its_own() {
+    // Receipt §2.3 states the equivalence: `continued_history` is true iff `later_checkpoint`
+    // and `consistency_path` are present and verify. Each half alone is malformed.
+    assert_rejects(
+        "statement-anchored-continued-history.ahl",
+        |r| {
+            r["anchoring"].as_object_mut().expect("anchoring").remove("consistency_path");
+        },
+        |e| matches!(e, ReceiptError::Malformed(_)),
+        "§2.3 — a later checkpoint without a proof is malformed",
+    );
+    assert_rejects(
+        "statement-anchored-continued-history.ahl",
+        |r| {
+            r["anchoring"].as_object_mut().expect("anchoring").remove("later_checkpoint");
+        },
+        |e| matches!(e, ReceiptError::Malformed(_)),
+        "§2.3 — a proof without a later checkpoint is malformed",
+    );
+
+    // A "later" checkpoint smaller than the one the subject is included under proves no
+    // continued history: it is the size regression a witness refuses to cosign over.
+    assert_rejects(
+        "statement-anchored-continued-history.ahl",
+        |r| {
+            let earlier = read_receipt("propagation-complete-valid.ahl").1["claim_material"]
+                ["corpus_checkpoint"]
+                .clone();
+            r["anchoring"]["later_checkpoint"] = earlier;
+        },
+        |e| matches!(e, ReceiptError::ConsistencyPathInvalid),
+        "adaptor §9.2 — later_checkpoint.tree_size >= checkpoint.tree_size",
+    );
+
+    // The later checkpoint is authenticated on its own terms (§2.1): a corrupted signature on
+    // it fails exactly as one on the anchoring checkpoint would.
+    assert_rejects(
+        "statement-anchored-continued-history.ahl",
+        |r| corrupt(&mut r["anchoring"]["later_checkpoint"]["signature"]),
+        |e| matches!(e, ReceiptError::CheckpointSignatureInvalid),
+        "§2.1 — the later checkpoint carries its own verified log signature",
+    );
+    assert_rejects(
+        "statement-anchored-continued-history.ahl",
+        |r| corrupt(&mut r["anchoring"]["later_checkpoint"]["log_id"]),
+        |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
+        "adaptor §5 — the later checkpoint names the log the active manifest declares",
+    );
+    assert_rejects(
+        "statement-anchored-continued-history.ahl",
+        |r| corrupt(&mut r["anchoring"]["consistency_path"][0]),
+        |e| matches!(e, ReceiptError::ConsistencyPathInvalid),
+        "adaptor §9.2 — the path must open the pair of roots",
+    );
+    assert_rejects(
+        "statement-anchored-continued-history.ahl",
+        |r| r["claim"]["assurance"]["continued_history"] = json!(false),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "continued_history" }),
+        "§2.3 — the assurance field must state what was proven",
+    );
 }
 
 #[test]
@@ -1339,6 +1521,100 @@ fn anchoring_rules_reject() {
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "adaptor §5 — checkpoint log_id matches the active manifest",
     );
+}
+
+/// Edit the genesis manifest's `log` object, then repair the receipt's own genesis anchor and
+/// the policy that must match it, and assert the §7.3 rejection.
+///
+/// Repairing the anchor is what makes the assertion mean anything: editing an anchored envelope
+/// changes its entry id, so without this the receipt would be rejected for carrying an anchor
+/// that no longer digests its genesis envelope — a true rejection, but not the one under test.
+fn reject_by_manifest_schema(mutate: impl FnOnce(&mut serde_json::Map<String, Value>), case: &str) {
+    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+    mutate(
+        receipt["governance"]["chain"][0]["envelope"]["payload"]
+            .as_object_mut()
+            .expect("manifest payload"),
+    );
+    let anchor = entry_id(&receipt["governance"]["chain"][0]["envelope"]);
+    receipt["governance"]["genesis_entry_id"] = json!(&anchor);
+    let policy = TrustPolicy { genesis_entry_id: anchor, ..trust_policy() };
+
+    let error = verify_receipt(&receipt, &policy)
+        .err()
+        .unwrap_or_else(|| panic!("{case}: must be rejected, but verified"));
+    match &error {
+        ReceiptError::GovernanceChainInvalid(detail) => assert!(
+            detail.contains("§7.3") && detail.contains("REQUIRED"),
+            "{case}: rejected, but not by the §7.3 schema rule: {error}"
+        ),
+        other => panic!("{case}: expected a §7.3 schema rejection, got: {other}"),
+    }
+}
+
+/// The same, scoped to the `log` object every §7.3 member lives in.
+fn reject_by_log_schema(mutate: impl FnOnce(&mut serde_json::Map<String, Value>), case: &str) {
+    reject_by_manifest_schema(
+        |payload| mutate(payload["log"].as_object_mut().expect("manifest log object")),
+        case,
+    );
+}
+
+#[test]
+fn the_manifest_log_object_schema_is_enforced_and_log_id_has_no_alias() {
+    // Renaming `log.log_id` to `log.id` — the spelling `ahl-core` once read — must break
+    // verification outright. If a verifier fell back to `id`, a corpus written in the old
+    // dialect would keep verifying against one implementation and fail against its siblings,
+    // and nothing would ever surface the divergence.
+    reject_by_log_schema(
+        |log| {
+            let value = log.remove("log_id").expect("log_id");
+            log.insert("id".to_owned(), value);
+        },
+        "log.log_id renamed to log.id",
+    );
+
+    // Spec §7.3: every member of the object is REQUIRED, so dropping any one is a rejection —
+    // including `cadence_epoch`, which no corpus in this family carried until it was noticed.
+    for member in [
+        "log_id",
+        "operator",
+        "checkpoint_cadence",
+        "cadence_epoch",
+        "witness_grace_period",
+        "adaptor",
+        "keys",
+    ] {
+        reject_by_log_schema(
+            |log| {
+                log.remove(member);
+            },
+            member,
+        );
+    }
+    for member in ["id", "hash"] {
+        reject_by_log_schema(
+            |log| {
+                log["adaptor"].as_object_mut().expect("adaptor object").remove(member);
+            },
+            member,
+        );
+    }
+
+    // Wrong shapes are rejected as firmly as absent ones: a member present but not a string
+    // proves nothing, and reading it as one would be reading whatever `serde_json` coerced.
+    reject_by_log_schema(|log| log["log_id"] = json!(7), "log_id is not a string");
+    reject_by_log_schema(|log| log["adaptor"] = json!("ahl-test-log-v1"), "adaptor is not object");
+    reject_by_log_schema(|log| log["keys"] = json!({}), "keys is not an array");
+
+    // And the whole object is required in the first place.
+    reject_by_manifest_schema(
+        |payload| {
+            payload.remove("log");
+        },
+        "the log object itself",
+    );
+    reject_by_manifest_schema(|payload| payload["log"] = json!("a log"), "log is not an object");
 }
 
 #[test]
