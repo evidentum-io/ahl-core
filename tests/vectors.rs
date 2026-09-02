@@ -26,7 +26,6 @@ use ahl_core::{
     leaf_hash, parse_hash_hex, proof_from_hex, range_proof, sha256_hex, statement_id, tree_root,
     verify_envelope, verify_inclusion_proof, verify_signature, TestKey,
 };
-use base64::Engine as _;
 use serde_json::{json, Value};
 
 /// The statement vectors, in entry-index order. Entry 28 is an intentional non-verifying-
@@ -1534,92 +1533,97 @@ fn checkpoint_raw_capability_requires_a_known_parser() {
     );
 }
 
-/// A genuinely valid corpus receipt, relabeled to pin the ATL adaptor profile
-/// (`ahl-adaptor-atl-v1`) instead of the corpus's own minimal `ahl-test-log-v1` — for testing
-/// `checkpoint.raw` reconciliation (I-D §7.1; adaptor profile `ahl-adaptor-atl-v1` §6).
-///
-/// The governance chain, checkpoint signature and witness cosignatures are untouched by the
-/// relabeling and remain genuinely valid; `reconcile_checkpoint_raw` runs BEFORE any of that is
-/// even read (right after `checkpoint_object`'s own shape check, ahead of the signature check),
-/// so a `raw` that fails to parse or fails to match is rejected there, before the rest of the
-/// receipt's own validity could matter either way.
-fn atl_pinned(raw: Value) -> (Value, TrustPolicy) {
-    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
-    let mut policy = trust_policy();
-    let hash = policy.adaptor_profiles["ahl-test-log-v1"].hash.clone();
-    receipt["anchoring"]["adaptor"]["id"] = json!("ahl-adaptor-atl-v1");
-    policy.adaptor_profiles.insert(
-        "ahl-adaptor-atl-v1".to_owned(),
-        AdaptorProfile {
-            hash,
-            capabilities: AdaptorCapabilities { checkpoint_raw: true, consistency_proofs: false },
-        },
-    );
-    receipt["anchoring"]["checkpoint"]["raw"] = raw;
-    (receipt, policy)
+fn atl_test_data() -> PathBuf {
+    test_data().join("atl")
 }
 
-fn base64_raw(bytes: &[u8]) -> Value {
-    json!(format!("base64:{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+fn atl_receipt(name: &str) -> Value {
+    read_json(&atl_test_data().join("receipts").join(name))
 }
 
-#[test]
-fn atl_checkpoint_raw_wrong_length_is_rejected() {
-    // Adaptor profile `ahl-adaptor-atl-v1` §6.1: the blob is fixed at 98 bytes. Ten zero bytes
-    // decode as valid base64 but not as that blob at all — the FIRST thing the parser checks,
-    // before magic, before any field.
-    let (receipt, policy) = atl_pinned(base64_raw(&[0u8; 10]));
-    assert!(
-        matches!(
-            verify_receipt(&receipt, &policy),
-            Err(ReceiptError::Malformed(detail)) if detail.contains("98 octets")
-        ),
-        "a `raw` that does not decode to exactly 98 octets must be rejected"
-    );
-}
-
-#[test]
-fn atl_checkpoint_raw_wrong_magic_is_rejected() {
-    // 98 zero bytes decode to the right LENGTH but carry none of the required magic
-    // `ATL-Protocol-v1-CP` (§6.1) — proving the parser actually reads the blob's content, not
-    // merely its length.
-    let (receipt, policy) = atl_pinned(base64_raw(&[0u8; 98]));
-    assert!(
-        matches!(
-            verify_receipt(&receipt, &policy),
-            Err(ReceiptError::Malformed(detail)) if detail.contains("magic")
-        ),
-        "a `raw` blob with the wrong magic must be rejected"
-    );
+/// The trust policy for the SEPARATE, minimal corpus pinned to adaptor profile
+/// `ahl-adaptor-atl-v1` (`test_data/atl/`) — distinct throughout from the main corpus's own
+/// `ahl-test-log-v1`, adaptor document included, so profile dispatch (I-D §3.2) is exercised
+/// against a genuinely different profile rather than a relabeled receipt still governed by the
+/// other one's manifest.
+fn atl_trust_policy() -> TrustPolicy {
+    let index = read_json(&atl_test_data().join("receipts").join("index.json"));
+    let policy = &index["policy"];
+    TrustPolicy {
+        genesis_entry_id: field_str(policy, "genesis_entry_id").expect("genesis anchor").to_owned(),
+        genesis_key_ids: None,
+        adaptor_profiles: policy["adaptor_profiles"]
+            .as_object()
+            .expect("adaptor profiles")
+            .iter()
+            .map(|(id, profile)| {
+                let capabilities = &profile["capabilities"];
+                (
+                    id.clone(),
+                    AdaptorProfile {
+                        hash: field_str(profile, "hash").expect("profile hash").to_owned(),
+                        capabilities: AdaptorCapabilities {
+                            checkpoint_raw: capabilities["checkpoint_raw"] == Value::Bool(true),
+                            consistency_proofs: capabilities["consistency_proofs"]
+                                == Value::Bool(true),
+                        },
+                    },
+                )
+            })
+            .collect(),
+        dataset_keys: BTreeMap::new(),
+        trusted_witness_key_ids: BTreeSet::new(),
+        limits: Limits::default(),
+    }
 }
 
 #[test]
-fn atl_checkpoint_raw_field_mismatch_is_rejected() {
-    // Correct magic AND correct Origin ID (the corpus's real `log_id`, decoded), but a
-    // deliberately wrong tree size — proving this is genuine field-by-field reconciliation
-    // (adaptor profile `ahl-adaptor-atl-v1` §6.2), not merely a magic-and-length gate. The
-    // timestamp and root bytes after it are never reached once tree_size itself disagrees.
-    let (_, valid) = read_receipt("statement-anchored-valid.ahl");
-    let log_id = field_str(&valid["anchoring"]["checkpoint"], "log_id").expect("log_id");
-    let origin =
-        hex::decode(log_id.strip_prefix("sha256:").expect("family string")).expect("valid hex");
-    assert_eq!(origin.len(), 32, "a SHA-256 digest is 32 octets");
+fn atl_adaptor_profile_checkpoint_verifies_over_its_own_binary_form() {
+    // Adaptor `ahl-adaptor-atl-v1` §6.1/§6.5: the log signs the 98-byte blob, not
+    // `JCS(checkpoint minus "signature")` (that is `ahl-test-log-v1`'s own form, its §5). A
+    // genuinely separate, minimal corpus pinned to this profile — distinct from the main
+    // corpus throughout, adaptor document included — proves the dispatch (I-D §3.2) actually
+    // reaches this profile's own procedure and accepts it: the strongest possible proof this
+    // is real reconciliation, not a gate that merely rejects everything.
+    let policy = atl_trust_policy();
+    let receipt = atl_receipt("atl-statement-anchored-valid.ahl");
+    let verdict = verify_receipt(&receipt, &policy).expect("ATL-form checkpoint must verify");
+    assert_eq!(verdict.claim_type, "statement-anchored");
+}
 
-    let mut blob = Vec::with_capacity(98);
-    blob.extend_from_slice(b"ATL-Protocol-v1-CP");
-    blob.extend_from_slice(&origin);
-    blob.extend_from_slice(&999_999_999u64.to_le_bytes()); // tree_size: deliberately wrong
-    blob.extend_from_slice(&0u64.to_le_bytes()); // timestamp: never reached
-    blob.extend_from_slice(&[0u8; 32]); // root: never reached
-    assert_eq!(blob.len(), 98);
-
-    let (receipt, policy) = atl_pinned(base64_raw(&blob));
+#[test]
+fn atl_checkpoint_raw_must_equal_the_assembled_blob() {
+    // Adaptor §6.4/§6.5: "compare it byte for byte with the assembled blob; a mismatch is a
+    // rejection." `raw` is corrupted after signing; the JSON members, and the log's own
+    // signature over them, stay genuinely valid.
+    let policy = atl_trust_policy();
+    let receipt = atl_receipt("atl-checkpoint-raw-blob-mismatch-must-fail.ahl");
     assert!(
         matches!(
             verify_receipt(&receipt, &policy),
-            Err(ReceiptError::Malformed(detail)) if detail.contains("tree size")
+            Err(ReceiptError::Malformed(detail))
+                if detail.contains("does not equal the blob assembled")
         ),
-        "a `raw` blob whose tree size disagrees with the JSON `tree_size` must be rejected"
+        "a raw blob that no longer matches the JSON checkpoint members must be rejected"
+    );
+}
+
+#[test]
+fn atl_checkpoint_raw_does_not_rehabilitate_an_altered_json_member() {
+    // The reverse direction: `raw` stays the blob the log genuinely signed, but a JSON
+    // sibling member (`tree_size`) is altered afterward. I-D §7.5 step 2: the JSON members
+    // govern — a correctly-signed `raw` for the ORIGINAL values does not make the altered
+    // receipt valid.
+    let policy = atl_trust_policy();
+    let receipt = atl_receipt("atl-checkpoint-raw-json-altered-must-fail.ahl");
+    assert!(
+        matches!(
+            verify_receipt(&receipt, &policy),
+            Err(ReceiptError::Malformed(detail))
+                if detail.contains("does not equal the blob assembled")
+        ),
+        "an altered JSON member must not be rehabilitated by a raw blob signed before the \
+         alteration"
     );
 }
 
@@ -2146,6 +2150,54 @@ fn the_manifest_scope_fields_are_enforced() {
     reject_by_manifest_schema(
         |payload| payload["properties"]["reproducible_reconstruction"] = json!(true),
         "reproducible reconstruction claimed without retention.artifacts",
+    );
+}
+
+#[test]
+fn l3_witness_requirements_are_enforced() {
+    // I-D §6.2: "Witnesses: at L3, witness ids with key objects" — the corpus genesis manifest
+    // is L3, so its `witnesses` array is REQUIRED and non-empty; a schema failure otherwise.
+    reject_by_manifest_schema(
+        |payload| {
+            payload.remove("witnesses");
+        },
+        "L3 manifest without witnesses",
+    );
+
+    // I-D §3.3, §7.5: "At L3 a verifier accepts a checkpoint C only with a valid witness
+    // cosignature" — the corpus's PRIMARY checkpoint (governed by the same L3 genesis
+    // manifest) must therefore carry at least one verifying cosignature; emptying
+    // `anchoring.witnesses` must be rejected, not merely leave `assurance.witnessed` false.
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |receipt| receipt["anchoring"]["witnesses"] = json!([]),
+        |error| matches!(error, ReceiptError::CheckpointUnwitnessed { .. }),
+        "AT L3, the primary checkpoint needs a verifying witness cosignature",
+    );
+}
+
+#[test]
+fn anchoring_adaptor_must_match_the_active_manifests_own_pin() {
+    // I-D §3.2: "the profile id and hash are pinned in the manifest and carried in every
+    // Evidence Receipt" — the two carriers of the SAME fact, which MUST agree. A receipt
+    // naming a DIFFERENT profile in `anchoring.adaptor` than its governance chain's manifest
+    // pins in `log.adaptor` must not reach that other profile's capabilities merely because
+    // local policy happens to recognize it too.
+    let atl_policy = atl_trust_policy();
+    let mut policy = trust_policy();
+    for (id, profile) in atl_policy.adaptor_profiles {
+        policy.adaptor_profiles.insert(id, profile);
+    }
+    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+    receipt["anchoring"]["adaptor"]["id"] = json!("ahl-adaptor-atl-v1");
+    receipt["anchoring"]["adaptor"]["hash"] =
+        json!(policy.adaptor_profiles["ahl-adaptor-atl-v1"].hash.clone());
+    assert!(
+        matches!(
+            verify_receipt(&receipt, &policy),
+            Err(ReceiptError::AdaptorBindingInvalid { .. })
+        ),
+        "`anchoring.adaptor` naming a profile the manifest itself does not pin must be rejected"
     );
 }
 
