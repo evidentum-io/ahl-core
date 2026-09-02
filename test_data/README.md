@@ -3,9 +3,11 @@
 The canonical conformance corpus for the AHL Protocol, generated from committed constants and
 re-verified from disk on every test run. Everything here is derived; nothing is hand-edited.
 
-Normative sources: **AHL Core Specification** v0.3-draft (statements, commitments, tree rules,
-conformance levels, corpus manifest) and the **AHL Evidence Receipt (`.ahl`) container format**
-1-draft r3 (claim registry, assurance semantics, cross-field rules, resource limits).
+Normative sources: **AHL Core Specification** v0.3-draft (statements, tree rules, conformance
+levels, corpus manifest), the **AHL Internet-Draft** draft-zatona-ahl-00 revision 0.4 §2.6 and
+§6.3 (record identity, canonicalization descriptors, commitment modes, and canonicalization
+identifier conformance) and the **AHL Evidence Receipt (`.ahl`) container format** 1-draft r3
+(claim registry, assurance semantics, cross-field rules, resource limits).
 
 ## Layout
 

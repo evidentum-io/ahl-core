@@ -4,17 +4,17 @@
     "id": "ahl-test-log-v1"
   },
   "affected_count": 1,
-  "affected_root": "sha256:5a40fa564bc4d3d9d87ef1a09b0187ae44bbe919ef6abaa6fc1274d937f0f7d6",
+  "affected_root": "sha256:aa18cfc1797f1eadfe2c05bbf09020ff37ed9ba1afd07ab79efc174e19062c07",
   "description": "Disposition tree committed by the propagation statement at entry 22. The tree itself is well formed; the propagation it belongs to names a CHALLENGE as its trigger (core spec §2.3.3), so no `propagation-complete` receipt over it can verify — see receipts/propagation-complete-challenge-trigger-must-fail.ahl.",
   "inclusion": {
     "leaf": {
       "dataset": "scores",
       "disposition": "invalidated",
-      "record": "sha256:a37addcc94a342604dc765939fb85c71dd0f21a1906bbf62d64a77f4cb25e233"
+      "record": "sha256:a05363e5dcd8abbb8fb292aaf4c096cba619b82e6ada016ecd66d8c87fac0825"
     },
     "leaf_index": 0,
     "path": [],
-    "root": "sha256:5a40fa564bc4d3d9d87ef1a09b0187ae44bbe919ef6abaa6fc1274d937f0f7d6",
+    "root": "sha256:aa18cfc1797f1eadfe2c05bbf09020ff37ed9ba1afd07ab79efc174e19062c07",
     "tree_size": 1
   },
   "leaf_rule": "sha256(0x00 || JCS(leaf))",
@@ -22,7 +22,7 @@
     {
       "dataset": "scores",
       "disposition": "invalidated",
-      "record": "sha256:a37addcc94a342604dc765939fb85c71dd0f21a1906bbf62d64a77f4cb25e233"
+      "record": "sha256:a05363e5dcd8abbb8fb292aaf4c096cba619b82e6ada016ecd66d8c87fac0825"
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",

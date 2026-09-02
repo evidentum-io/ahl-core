@@ -1,32 +1,32 @@
 {
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:679d5064158e89f7c7d6fae9c6d32eb447b6295cf1061488fcbe81e0ca136c24",
+    "root_hash": "sha256:f87a506e1ff1492023fc19e61f5032c8a465d8c2b90dd301c572286d5e578388",
     "tree_size": 20
   },
   "description": "Revocation closure `non-retroactive-retraction` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",
-      "record": "sha256:bf90b471d24713c16ef7cd945651ed9bd755cf7769eef4b58da51c61bf53d810"
+      "record": "sha256:9c3e8e9721b8e7d52d410f6f1901fadf7bc3118c7877dd01ddead7276f7bb06b"
     }
   ],
   "expected_seeds": [
     {
       "dataset": "customers",
-      "record": "hmac-sha256:1efd18a919cf85ddc216d57e1d78bc13321bfa14ba62aa1649eea13c2a811127"
+      "record": "hmac-sha256:82bad2f9ef219e5823e211425d49e9fa7e68c40fe27af118b7e1dcb6f45ec74b"
     }
   ],
-  "note": "The retraction at entry 17 is `retroactive: false` with `effective_from` 2026-08-01T00:00:00Z, so a derivation is affected only if its `valid_time` intersects [2026-08-01T00:00:00Z, infinity) (core spec §2.3.3). E1 (sha256:45ba3f89a447033c240b5dc4200594364b56afc2f17e7a0d4e5cb3ba1f455aef) has point valid_time 2026-06-01T00:00:00Z and is NOT affected. E3 (sha256:379d83c68710a543d20b2b782d209221472f4adaa29edf6937f8cdbdb212c675) has the closed interval [2026-05-01T00:00:00Z, 2026-07-01T00:00:00Z], whose upper bound precedes the boundary, and is NOT affected. E2 (sha256:bf90b471d24713c16ef7cd945651ed9bd755cf7769eef4b58da51c61bf53d810) has the open interval [2026-09-01T00:00:00Z, null) and IS affected. All three consume the retracted record C, so only the scope rule separates them.",
+  "note": "The retraction at entry 17 is `retroactive: false` with `effective_from` 2026-08-01T00:00:00Z, so a derivation is affected only if its `valid_time` intersects [2026-08-01T00:00:00Z, infinity) (core spec §2.3.3). E1 (sha256:f4bbb82132d1f1c42ba19cdb91aad9a1feee461fd6c6330eba8c153fde8c5b8e) has point valid_time 2026-06-01T00:00:00Z and is NOT affected. E3 (sha256:c0fbf82a10aa9df83ecb78734ccef51604f3f5ca56040ee325bc33037a573266) has the closed interval [2026-05-01T00:00:00Z, 2026-07-01T00:00:00Z], whose upper bound precedes the boundary, and is NOT affected. E2 (sha256:9c3e8e9721b8e7d52d410f6f1901fadf7bc3118c7877dd01ddead7276f7bb06b) has the open interval [2026-09-01T00:00:00Z, null) and IS affected. All three consume the retracted record C, so only the scope rule separates them.",
   "trigger": {
     "dataset": "customers",
     "entry_index": 17,
-    "record": "hmac-sha256:1efd18a919cf85ddc216d57e1d78bc13321bfa14ba62aa1649eea13c2a811127",
+    "record": "hmac-sha256:82bad2f9ef219e5823e211425d49e9fa7e68c40fe27af118b7e1dcb6f45ec74b",
     "scope": {
       "effective_from": "2026-08-01T00:00:00Z",
       "retroactive": false
     },
-    "statement_id": "sha256:646a01bd7fba7aa27b7f112a518196cb35e277587085709f2155b10f7f8a233c",
+    "statement_id": "sha256:e3ad713916adbb636b97c89bc63f109243a308bb92d655da712220ed9b166988",
     "type": "retraction"
   }
 }

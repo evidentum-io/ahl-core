@@ -7,39 +7,39 @@
   "inclusion": {
     "leaf": {
       "dataset": "customers",
-      "record": "hmac-sha256:04de2effaa7ad9f21761b7338449a4aba8c9edb59a90fd96236c31fdcd8ab46d",
-      "role": "reference",
-      "statement": "sha256:ac1d89dd26702f442ea58aa81e9c9e769a4e38e8d581d06a9423cfb050fff4db"
+      "record": "hmac-sha256:51a4718e28a2283b75772e206c83992cdd32e91533566e8738d628e048cb2bfa",
+      "role": "feature",
+      "statement": "sha256:c54de3c12b1155f6f47534beeab3edeb6f196b6005194c1f12c0f783015b6e09"
     },
     "leaf_index": 0,
     "path": [
-      "sha256:f571ceadbc0203dd018d98b63a1306d05edfcb96b446d42a1f9a1073be61437e",
-      "sha256:31e87766ebbe9acde16223e0b74e54cf97b3b4f78bca21e270a141d016c109b2"
+      "sha256:b27888d9c5e2931ec182b669619c7bf53f938e12fa3d9531ea030ec68090c4fb",
+      "sha256:33fc04fbab2151dab90586be399105e988d5c48a425625113a58f3623e4901a6"
     ],
-    "root": "sha256:6a6bee080dc4aeceab8ad96144f33f8968e2d62f250c598cfb5c4dd896eac490",
+    "root": "sha256:e91ccc8d43d3cdb51a1c0b8bc9fd9f9eee2c8fca5c3982cf106feb4954c74ce1",
     "tree_size": 3
   },
   "input_set_count": 3,
-  "input_set_root": "sha256:6a6bee080dc4aeceab8ad96144f33f8968e2d62f250c598cfb5c4dd896eac490",
+  "input_set_root": "sha256:e91ccc8d43d3cdb51a1c0b8bc9fd9f9eee2c8fca5c3982cf106feb4954c74ce1",
   "leaf_rule": "sha256(0x00 || JCS(leaf))",
   "leaves": [
     {
       "dataset": "customers",
-      "record": "hmac-sha256:04de2effaa7ad9f21761b7338449a4aba8c9edb59a90fd96236c31fdcd8ab46d",
-      "role": "reference",
-      "statement": "sha256:ac1d89dd26702f442ea58aa81e9c9e769a4e38e8d581d06a9423cfb050fff4db"
+      "record": "hmac-sha256:51a4718e28a2283b75772e206c83992cdd32e91533566e8738d628e048cb2bfa",
+      "role": "feature",
+      "statement": "sha256:c54de3c12b1155f6f47534beeab3edeb6f196b6005194c1f12c0f783015b6e09"
     },
     {
       "dataset": "customers",
-      "record": "hmac-sha256:a2d4ab5d728fa03cd366fac0f6b4d65c419c353f56521302926604f11d3471c1",
-      "role": "feature",
-      "statement": "sha256:fc391aff2b5bc3856e6fa27658fdceb108b4aa0893ee4512257942909a055abd"
+      "record": "hmac-sha256:d83e2681eea39febf28afc59eb81053cf7ac1f4921c2a4aed0f6ec0c14db0ad6",
+      "role": "reference",
+      "statement": "sha256:6d1831cd6f605f09039fbe2fa2da997951e177dbbac830e2e9913f333cf212a7"
     },
     {
       "dataset": "scores",
-      "record": "sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c",
+      "record": "sha256:e5f83af3b1fc03898a1c31871a12b82bce702f41b27abb182fda0de1d9e7dba7",
       "role": "feature",
-      "statement": "sha256:bffd19a6fd251101b5cd6e4daa4e1565c17857b7aa669ebb4c1787d1a42178b9"
+      "statement": "sha256:d0b90d4c0c7334800594e1619eb73f185ab55fc5abeeb779cd1f603fe708f1dc"
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",

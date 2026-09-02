@@ -7,14 +7,14 @@
       "manifest": "sha256:8aa7aebb081f2254732b1f3dc7cbc2555f61f9027a4ec1e578bf2a570bbdc551",
       "producer": "producer-1",
       "reason_code": "consent_withdrawn",
-      "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
+      "record": "hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb",
       "type": "retraction",
       "valid_time": "2026-08-16T12:00:00Z"
     },
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:GJi4kDplZIkOra2E2ECMHm6ZeWm8XTvvI85JjroMLw8oLP1Q2ecH17OwY6EHdebQnDnjy/QEXO5YW193NvXEAg=="
+        "sig": "base64:NCuwp/Rt0NZDWGE1EtcNfyl3SV9JlgZqGjNFoGhk9l3SudD9xR4qYi+UIQbQFH9/m6CKrW+vlnaTH7dAHkMOBw=="
       }
     ]
   },

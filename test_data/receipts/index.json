@@ -71,7 +71,7 @@
       "claim_type": "record-ingested",
       "expect": "reject",
       "file": "record-ingested-content-mismatch-must-fail.ahl",
-      "reason": "content binding `keyed-authorized` failed: carried bytes commit to `hmac-sha256:04de2effaa7ad9f21761b7338449a4aba8c9edb59a90fd96236c31fdcd8ab46d`, not `hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510`",
+      "reason": "content binding `keyed-authorized` failed: carried bytes commit to `hmac-sha256:d83e2681eea39febf28afc59eb81053cf7ac1f4921c2a4aed0f6ec0c14db0ad6`, not `hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb`",
       "rule": "receipt §2.1 — carried record bytes must recompute to the anchored commitment"
     },
     {
@@ -127,7 +127,7 @@
       "claim_type": "trigger-effective",
       "expect": "reject",
       "file": "trigger-effective-non-authority-issuer-must-fail.ahl",
-      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
+      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:b566730b2532c6e516ffd7477855e4f4fa182597cbd6f6f423bfb788c683cba9`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "spec §2.3.3 — a trigger not signed by the record's authority is a challenge"
     },
     {
@@ -211,7 +211,7 @@
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-missing-leaf-must-fail.ahl",
-      "reason": "tree material for `sha256:666457c5534dfcb45502fec62fa5387a462f32ebd773946f39d55c3dad26a800` is invalid: commits 3 leaves, 2 carried",
+      "reason": "tree material for `sha256:74f336dd2b2e41a7a947fa280916e8f5cfd0ab09bca97bb9f6cc27bf58fcc7a7` is invalid: commits 3 leaves, 2 carried",
       "rule": "spec §2.5/§3.5 — committed tree material must open its anchored root and count"
     },
     {
@@ -225,7 +225,7 @@
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-challenge-trigger-must-fail.ahl",
-      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:c306f62418fb7d02e901603129cf35a0d542ab3551c8930a092a90f8652b2757`; spec §2.3.3 anchors it as a challenge, never traversed",
+      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:b566730b2532c6e516ffd7477855e4f4fa182597cbd6f6f423bfb788c683cba9`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "receipt §3 / spec §2.3.3 — propagation-complete must embed a trigger-effective receipt; challenges are never traversed"
     },
     {

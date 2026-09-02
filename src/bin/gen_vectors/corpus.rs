@@ -6,6 +6,7 @@ use std::path::Path;
 use base64::Engine as _;
 
 use ahl_core::closure::{affected_set, RecordRef, TreeMaterial};
+use ahl_core::descriptor::CanonicalizationDescriptor;
 use ahl_core::{
     checkpoint, checkpoint_signing_bytes, commit_keyed, commit_plain, consistency_path_hex,
     consistency_proof, cosignature_bytes, entry_id, envelope, field_str, hash_hex, inclusion_proof,
@@ -16,9 +17,9 @@ use ahl_core::{
 use serde_json::{json, Value};
 
 use crate::scenario::{
-    leaf_bytes, manifest, payload, signed, transform, write_json, Keys, ADAPTOR_ID, DS_CUSTOMERS,
-    DS_SCORES, LEAF_FORMAT, LOG_OPERATOR, LOG_SEED, PIPELINE, T0, T_EARLY, T_OPEN_FROM,
-    T_PAST_FROM, T_PAST_TO, T_RETRACTION, WITNESS_1, WITNESS_2,
+    leaf_bytes, manifest, payload, signed, transform, write_json, Keys, ADAPTOR_ID,
+    CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, LEAF_FORMAT, LOG_OPERATOR, LOG_SEED, PIPELINE, T0,
+    T_EARLY, T_OPEN_FROM, T_PAST_FROM, T_PAST_TO, T_RETRACTION, WITNESS_1, WITNESS_2,
 };
 
 /// Entry-index labels, one per anchored envelope.
@@ -1259,6 +1260,9 @@ impl Corpus {
         );
     }
 
+    // A flat list of statement-vector writes, one per corpus entry plus the malformed fixtures;
+    // splitting adds no clarity, matching `write_merkle` below.
+    #[allow(clippy::too_many_lines)]
     fn write_statements(&self, root: &Path, keys: &Keys) {
         let statements = root.join("vectors").join("statements");
         for (index, env) in self.envelopes.iter().enumerate() {
@@ -1374,6 +1378,38 @@ impl Corpus {
                 "envelope": unsigned,
             }),
         );
+
+        // I-D revision 0.4 §2.6 / §6.3: "A dataset id MUST NOT contain a control octet: any
+        // octet in 0x00 through 0x1F inclusive, or 0x7F" — stated as its own normative
+        // requirement because it is load-bearing (an implementation validating only length and
+        // printability could still admit it). §6.3's conformance table then makes a
+        // syntactically invalid dataset declaration reject the WHOLE manifest, not merely the
+        // affected dataset's claims: "A dataset's canonicalization descriptor is a required
+        // manifest member (§6.2), and statements derive their governance from that manifest
+        // (§2.2)". Each vector below is an otherwise-genuine genesis manifest with the `scores`
+        // dataset renamed to an id carrying the offending octet.
+        for (label, octet_char, octet_name) in [
+            ("dataset-id-control-octet-0x1f", '\u{1f}', "0x1F"),
+            ("dataset-id-control-octet-0x7f", '\u{7f}', "0x7F"),
+        ] {
+            let mut bad_manifest = manifest(keys, &self.log_id, &self.adaptor_hash, 0, None);
+            let datasets = bad_manifest["datasets"].as_object_mut().expect("datasets object");
+            let scores = datasets.remove(DS_SCORES).expect("scores dataset declared");
+            datasets.insert(format!("scores{octet_char}bad"), scores);
+            write_json(
+                &malformed.join(format!("{label}.json")),
+                &json!({
+                    "name": label,
+                    "expect": format!(
+                        "reject: I-D revision 0.4 §2.6 — \"A dataset id MUST NOT contain a \
+                         control octet\" ({octet_name} here); §6.3's conformance table makes a \
+                         syntactically invalid dataset declaration reject the WHOLE manifest, \
+                         not merely the affected dataset's claims",
+                    ),
+                    "envelope": envelope(bad_manifest, &keys.producer_1),
+                }),
+            );
+        }
     }
 
     // A flat list of tree-vector writes, one per committed tree; splitting adds no clarity.
@@ -1854,10 +1890,21 @@ fn closure_cases(r: &Records) -> Vec<ClosureCase> {
 
 impl Records {
     fn build(dataset_key: &[u8]) -> Self {
+        // I-D §2.6: the descriptor digest `ddig` is part of every commitment preimage. Both
+        // corpus datasets declare the identical descriptor (`{"canonicalization":
+        // "jcs-v1"}`, no `media_type` — `jcs-v1` does not require one, see the manifest's
+        // `datasets` block in `scenario::manifest`), so `ddig` is the same value for both; the
+        // two datasets still commit to disjoint preimages, because domain separation by `dsid`
+        // holds unconditionally, independent of whether `ddig` also differs (I-D §2.6).
+        let ddig = CanonicalizationDescriptor::new(CANONICALIZATION, None)
+            .expect("committed canonicalization identifier is syntactically valid")
+            .ddig();
         let keyed = |value: &Value| {
-            commit_keyed(dataset_key, DS_CUSTOMERS, &jcs(value)).expect("32-byte dataset key")
+            commit_keyed(dataset_key, DS_CUSTOMERS, &ddig, &jcs(value))
+                .expect("32-byte dataset key and a valid dataset id")
         };
-        let plain = |value: &Value| commit_plain(DS_SCORES, &jcs(value));
+        let plain =
+            |value: &Value| commit_plain(DS_SCORES, &ddig, &jcs(value)).expect("valid dataset id");
 
         let a = json!({ "customer_id": "C-1001", "country": "DE", "segment": "retail" });
         let b = json!({ "customer_id": "C-2002", "country": "FR", "segment": "sme" });
