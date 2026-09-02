@@ -7,7 +7,9 @@
 //!
 //! * RFC 8785 (JCS) canonicalization and the two AHL identifiers — statement id and entry id
 //!   (spec §2.1);
-//! * domain-separated record commitments in `plain` and `keyed` mode (spec §2.4);
+//! * canonicalization descriptors, descriptor digests and dataset id validation, and
+//!   descriptor-bound, domain-separated record commitments in `plain` and `keyed` mode (AHL I-D
+//!   draft-zatona-ahl-00 revision 0.4 §2.6 — see [`descriptor`]);
 //! * Ed25519 statement envelopes and signed checkpoints;
 //! * AHL Merkle trees — leaf `0x00 || bytes`, node `0x01 || left || right` (spec §2.5);
 //! * validated committed-tree material (spec §2.5, §3.5) and authenticated range proofs
@@ -29,18 +31,24 @@
 //! suitable for production key handling.
 //!
 //! ```
+//! use ahl_core::descriptor::CanonicalizationDescriptor;
 //! use ahl_core::{commit_plain, jcs};
 //! use serde_json::json;
 //!
-//! // A `plain` commitment is domain-separated by the dataset id (spec §2.4).
+//! // A `plain` commitment is domain-separated by the dataset id, and bound to the dataset's
+//! // canonicalization descriptor through its digest `ddig` (I-D revision 0.4 §2.6).
+//! let descriptor = CanonicalizationDescriptor::new("jcs", None).expect("valid identifier");
 //! let bytes = jcs(&json!({ "customer_id": "C-1001" }));
-//! assert!(commit_plain("scores", &bytes).starts_with("sha256:"));
+//! let commitment =
+//!     commit_plain("scores", &descriptor.ddig(), &bytes).expect("valid dataset id");
+//! assert!(commitment.starts_with("sha256:"));
 //! ```
 
 #![forbid(unsafe_code)]
 
 pub mod bitemporal;
 pub mod closure;
+pub mod descriptor;
 mod error;
 pub mod range_proof;
 pub mod receipt;
@@ -71,7 +79,12 @@ pub const LEAF_PREFIX: u8 = 0x00;
 /// adaptor profile document and this crate cannot disagree about it.
 pub const NODE_PREFIX: u8 = 0x01;
 
-/// Separator between the dataset id and the canonical record bytes (spec §2.4).
+/// Commitment preimage separator (AHL I-D revision 0.4 §2.6).
+///
+/// The preimage is `dsid || 0x1F || ddig || 0x1F || canonical bytes`: this literal octet
+/// separates `dsid` from the descriptor digest `ddig`, and separates `ddig` from the canonical
+/// record bytes. A dataset id MUST NOT contain this octet ([`descriptor::validate_dataset_id`]),
+/// which is what keeps the first occurrence in the preimage unambiguous.
 pub const DATASET_SEPARATOR: u8 = 0x1F;
 
 const SHA256_PREFIX: &str = "sha256:";
@@ -122,39 +135,66 @@ pub fn entry_id(envelope: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Record commitments (spec §2.4)
+// Record commitments (AHL I-D revision 0.4 §2.6)
 // ---------------------------------------------------------------------------
 
-/// `dsid || 0x1F || canonical bytes` — the domain-separated commitment input.
-fn commitment_input(dataset: &str, canonical: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(dataset.len() + 1 + canonical.len());
+/// `dsid || 0x1F || ddig || 0x1F || canonical bytes` — the commitment preimage (I-D §2.6).
+///
+/// `dsid` is validated here — both the length/printable-ASCII syntax and, as its own check, the
+/// dataset id control-octet prohibition ([`descriptor::validate_dataset_id`]) — because an
+/// invalid `dsid` would make the preimage's own field boundaries ambiguous.
+///
+/// # Errors
+///
+/// Returns [`AhlError::DatasetIdSyntax`] or [`AhlError::DatasetIdControlOctet`] if `dataset` is
+/// not a valid dataset id.
+fn commitment_input(dataset: &str, ddig: &[u8; 32], canonical: &[u8]) -> AhlResult<Vec<u8>> {
+    descriptor::validate_dataset_id(dataset)?;
+    let mut buf = Vec::with_capacity(dataset.len() + 1 + ddig.len() + 1 + canonical.len());
     buf.extend_from_slice(dataset.as_bytes());
     buf.push(DATASET_SEPARATOR);
+    buf.extend_from_slice(ddig);
+    buf.push(DATASET_SEPARATOR);
     buf.extend_from_slice(canonical);
-    buf
+    Ok(buf)
 }
 
-/// `plain` commitment — `SHA-256(dsid || 0x1F || canonical bytes)` (spec §2.4).
-#[must_use]
-pub fn commit_plain(dataset: &str, canonical: &[u8]) -> String {
-    sha256_hex(&commitment_input(dataset, canonical))
+/// `plain` commitment — `SHA-256(dsid || 0x1F || ddig || 0x1F || canonical bytes)` (I-D §2.6).
+///
+/// `ddig` is the dataset's canonicalization descriptor digest
+/// ([`descriptor::CanonicalizationDescriptor::ddig`]).
+///
+/// # Errors
+///
+/// Returns [`AhlError::DatasetIdSyntax`] or [`AhlError::DatasetIdControlOctet`] if `dataset` is
+/// not a valid dataset id.
+pub fn commit_plain(dataset: &str, ddig: &[u8; 32], canonical: &[u8]) -> AhlResult<String> {
+    Ok(sha256_hex(&commitment_input(dataset, ddig, canonical)?))
 }
 
-/// `keyed` commitment — `HMAC-SHA-256(k_dataset, dsid || 0x1F || canonical bytes)` (spec §2.4).
+/// `keyed` commitment —
+/// `HMAC-SHA-256(k_dataset, dsid || 0x1F || ddig || 0x1F || canonical bytes)` (I-D §2.6).
 ///
 /// Required for personal or sensitive data. The dataset key is never packaged into a
 /// receipt; only an authorized verifier can recompute this value.
 ///
 /// # Errors
 ///
-/// Returns [`AhlError::BadLength`] if `key` cannot be used as an HMAC key.
-pub fn commit_keyed(key: &[u8], dataset: &str, canonical: &[u8]) -> AhlResult<String> {
+/// Returns [`AhlError::BadLength`] if `key` cannot be used as an HMAC key, or
+/// [`AhlError::DatasetIdSyntax`] / [`AhlError::DatasetIdControlOctet`] if `dataset` is not a
+/// valid dataset id.
+pub fn commit_keyed(
+    key: &[u8],
+    dataset: &str,
+    ddig: &[u8; 32],
+    canonical: &[u8],
+) -> AhlResult<String> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| AhlError::BadLength {
         what: "hmac dataset key",
         expected: 32,
         got: key.len(),
     })?;
-    mac.update(&commitment_input(dataset, canonical));
+    mac.update(&commitment_input(dataset, ddig, canonical)?);
     Ok(format!("{HMAC_PREFIX}{}", hex::encode(mac.finalize().into_bytes())))
 }
 
@@ -586,18 +626,37 @@ mod tests {
         assert_eq!(sid, statement_id(&env).expect("well-formed envelope"));
     }
 
+    fn ddig() -> [u8; 32] {
+        descriptor::CanonicalizationDescriptor::new("jcs", None).expect("valid identifier").ddig()
+    }
+
     #[test]
     fn commitments_are_domain_separated_by_dataset() {
         let bytes = jcs(&json!({ "a": 1 }));
-        assert_ne!(commit_plain("customers", &bytes), commit_plain("scores", &bytes));
+        let ddig = ddig();
+        assert_ne!(
+            commit_plain("customers", &ddig, &bytes).expect("valid dataset id"),
+            commit_plain("scores", &ddig, &bytes).expect("valid dataset id")
+        );
     }
 
     #[test]
     fn keyed_commitment_differs_from_plain() {
         let bytes = jcs(&json!({ "a": 1 }));
-        let keyed = commit_keyed(&[7u8; 32], "customers", &bytes).expect("32-byte key");
+        let ddig = ddig();
+        let keyed = commit_keyed(&[7u8; 32], "customers", &ddig, &bytes).expect("32-byte key");
         assert!(keyed.starts_with("hmac-sha256:"));
-        assert_ne!(keyed, commit_plain("customers", &bytes));
+        assert_ne!(keyed, commit_plain("customers", &ddig, &bytes).expect("valid dataset id"));
+    }
+
+    #[test]
+    fn commit_plain_rejects_an_invalid_dataset_id() {
+        let bytes = jcs(&json!({ "a": 1 }));
+        let bad = format!("bad{}id", '\u{1f}');
+        assert!(matches!(
+            commit_plain(&bad, &ddig(), &bytes),
+            Err(AhlError::DatasetIdControlOctet { .. })
+        ));
     }
 
     #[test]
@@ -690,8 +749,9 @@ mod tests {
         // `Hmac::<Sha256>::new_from_slice` never rejects a length, so `commit_keyed`'s
         // `BadLength` arm is defensive only. The corpus pins 32-byte dataset keys by
         // convention, not by this call rejecting anything else.
-        assert!(commit_keyed(&[7u8; 8], "customers", b"bytes").is_ok());
-        assert!(commit_keyed(&[7u8; 64], "customers", b"bytes").is_ok());
+        let ddig = ddig();
+        assert!(commit_keyed(&[7u8; 8], "customers", &ddig, b"bytes").is_ok());
+        assert!(commit_keyed(&[7u8; 64], "customers", &ddig, b"bytes").is_ok());
     }
 
     #[test]
