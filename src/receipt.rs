@@ -896,6 +896,67 @@ fn is_family_hash(value: &str) -> bool {
     })
 }
 
+/// The receipt-borne checkpoint shape (I-D §7.1): `{log_id, tree_size, root_hash,
+/// checkpoint_time, key_id, signature}` — every member REQUIRED — plus an optional `raw`.
+/// Shared by `anchoring.checkpoint`, `anchoring.later_checkpoint`, and every
+/// `governance.rotation_proofs[].checkpoint` (I-D §7.1: rotation-proof checkpoints are "in the
+/// receipt-borne form defined above"), so a strict shape check written once cannot drift
+/// between the three call sites.
+fn checkpoint_object(value: &Value) -> Result<&Value> {
+    let invalid = |member: &str, detail: &str| {
+        ReceiptError::Malformed(format!("checkpoint {member}: {detail}"))
+    };
+    if !value.get("log_id").and_then(Value::as_str).is_some_and(is_family_hash) {
+        return Err(invalid("log_id", "REQUIRED, a `sha256:` family string in lowercase hex"));
+    }
+    if value.get("tree_size").and_then(Value::as_u64).is_none() {
+        return Err(invalid("tree_size", "REQUIRED, an entry count"));
+    }
+    if !value.get("root_hash").and_then(Value::as_str).is_some_and(is_family_hash) {
+        return Err(invalid("root_hash", "REQUIRED, a `sha256:` family string in lowercase hex"));
+    }
+    let checkpoint_time = value
+        .get("checkpoint_time")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("checkpoint_time", "REQUIRED"))?;
+    crate::bitemporal::parse_rfc3339("checkpoint_time", checkpoint_time)
+        .map_err(|source| invalid("checkpoint_time", &source.to_string()))?;
+    if !value.get("key_id").and_then(Value::as_str).is_some_and(is_family_hash) {
+        return Err(invalid("key_id", "REQUIRED, a `sha256:` family string in lowercase hex"));
+    }
+    if value.get("signature").and_then(Value::as_str).is_none() {
+        return Err(invalid("signature", "REQUIRED"));
+    }
+    Ok(value)
+}
+
+/// One witness-cosignature object in the shape of `anchoring.witnesses[]` (I-D §7.1):
+/// `{witness_id, key_id, cosignature, cosigned_at}` — every member REQUIRED. Shared by
+/// `anchoring.witnesses[]` and every `governance.rotation_proofs[].witnesses[]` element (I-D
+/// §7.1: "an array in the shape of `anchoring.witnesses[]`"), so EVERY element of such an array
+/// is checked against this shape, not merely the ones whose cosignature happens to verify.
+fn witness_cosignature_object(value: &Value) -> Result<&Value> {
+    let invalid = |member: &str, detail: &str| {
+        ReceiptError::Malformed(format!("witness cosignature {member}: {detail}"))
+    };
+    if value.get("witness_id").and_then(Value::as_str).is_none() {
+        return Err(invalid("witness_id", "REQUIRED"));
+    }
+    if !value.get("key_id").and_then(Value::as_str).is_some_and(is_family_hash) {
+        return Err(invalid("key_id", "REQUIRED, a `sha256:` family string in lowercase hex"));
+    }
+    if value.get("cosignature").and_then(Value::as_str).is_none() {
+        return Err(invalid("cosignature", "REQUIRED"));
+    }
+    let cosigned_at = value
+        .get("cosigned_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("cosigned_at", "REQUIRED"))?;
+    crate::bitemporal::parse_rfc3339("cosigned_at", cosigned_at)
+        .map_err(|source| invalid("cosigned_at", &source.to_string()))?;
+    Ok(value)
+}
+
 /// Parse the restricted duration grammar of spec §7.3, returning the value in nanoseconds.
 ///
 /// §7.3 admits `P[n]DT[n]H[n]M[n]S` and nothing else: days, hours, minutes and seconds. Years
@@ -1247,7 +1308,9 @@ fn verify_rotation_proof(
             )
         })?;
 
-    let checkpoint = obj(element, "checkpoint")?;
+    // I-D §7.1: the element's `checkpoint` is "in the receipt-borne form defined above" — the
+    // same strict shape `anchoring.checkpoint` takes, not a looser one.
+    let checkpoint = checkpoint_object(obj(element, "checkpoint")?)?;
     let tree_size = number(checkpoint, "tree_size")?;
     if tree_size <= manifest_entry_index {
         return Err(invalid(format!(
@@ -1300,9 +1363,15 @@ fn verify_rotation_proof(
     // declared `level` to decide whether L3 applies going forward.
     if rotating_manifest.get("level").and_then(Value::as_str) == Some("L3") {
         let outgoing_witnesses = witness_key_set(outgoing_manifest);
-        let candidates = element.get("witnesses").and_then(Value::as_array);
+        let candidates = element.get("witnesses").and_then(Value::as_array).unwrap_or(&empty);
+        // I-D §7.1: `witnesses` is "an array in the shape of `anchoring.witnesses[]`" — EVERY
+        // element of that array is held to the shape, not merely the ones a match happens to
+        // reach; a malformed entry is invalid whether or not some OTHER entry in the array
+        // would have cosigned successfully.
+        let candidates =
+            candidates.iter().map(witness_cosignature_object).collect::<Result<Vec<_>>>()?;
         let mut cosigned = false;
-        for witness in candidates.into_iter().flatten() {
+        for witness in &candidates {
             let witness_id = text(witness, "witness_id")?.to_owned();
             let key_id = text(witness, "key_id")?;
             let Some(pubkey) = outgoing_witnesses
@@ -1334,6 +1403,75 @@ fn verify_rotation_proof(
     Ok(())
 }
 
+/// The exact ascending sequence of GOVERNANCE-KEY ROTATION entry indices the carried chain
+/// contains (I-D §7.1), read structurally: each manifest's log/witness key SETS compared
+/// against the immediately preceding MANIFEST's (a `key` statement hop in between does not
+/// interrupt the comparison, since only manifests carry log/witness key objects at all).
+fn rotating_manifest_indices(chain: &[Value]) -> Result<Vec<u64>> {
+    let mut rotations = Vec::new();
+    let mut previous_manifest: Option<&Value> = None;
+    for hop in chain {
+        let envelope = obj(hop, "envelope")?;
+        let payload = payload_of(envelope)?;
+        if statement_type(payload)? != "manifest" {
+            continue;
+        }
+        if let Some(previous) = previous_manifest {
+            let rotated = log_key_set(payload) != log_key_set(previous)
+                || witness_key_set(payload) != witness_key_set(previous);
+            if rotated {
+                rotations.push(number(hop, "entry_index")?);
+            }
+        }
+        previous_manifest = Some(payload);
+    }
+    Ok(rotations)
+}
+
+/// I-D §7.1's collection-level rules for `governance.rotation_proofs[]`, checked BEFORE any
+/// element's own content: present with no rotation in the chain is invalid ("the member is
+/// ABSENT where the chain rotates neither set"); where rotations exist, the carried
+/// `manifest_entry_index` sequence must equal EXACTLY the ascending sequence of rotating
+/// manifests' entry indexes — no duplicates, no extras, no missing, no reordering ("one
+/// element per rotation, in ascending `manifest_entry_index` order").
+fn check_rotation_proofs_sequence(receipt: &Value, chain: &[Value]) -> Result<()> {
+    let expected = rotating_manifest_indices(chain)?;
+    let carried =
+        receipt.get("governance").and_then(|governance| governance.get("rotation_proofs"));
+    if expected.is_empty() {
+        return if carried.is_some() {
+            Err(ReceiptError::GovernanceChainInvalid(
+                "`governance.rotation_proofs` is present, but the carried chain rotates neither the log \
+                 nor the witness key set — I-D §7.1 requires the member to be ABSENT in that \
+                 case"
+                    .to_owned(),
+            ))
+        } else {
+            Ok(())
+        };
+    }
+    let carried_array = carried.and_then(Value::as_array).ok_or_else(|| {
+        ReceiptError::GovernanceChainInvalid(
+            "`governance.rotation_proofs` is REQUIRED: the carried chain contains a governance-key \
+             rotation (I-D §7.1)"
+                .to_owned(),
+        )
+    })?;
+    let carried_indices: Vec<u64> = carried_array
+        .iter()
+        .map(|element| number(element, "manifest_entry_index"))
+        .collect::<Result<_>>()?;
+    if carried_indices != expected {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "`governance.rotation_proofs[]`'s manifest_entry_index sequence {carried_indices:?} does \
+             not equal EXACTLY the ascending sequence of rotating manifests' entry indexes \
+             {expected:?} (I-D §7.1: one element per rotation, ascending order, no duplicates, \
+             no extras, no missing)"
+        )));
+    }
+    Ok(())
+}
+
 /// Build and structurally validate the governance chain (I-D §7.5.1 4a-4c): the base case,
 /// then the induction, each carried statement's SIGNATURE verified against K as established by
 /// its predecessors before anything about its own content is trusted.
@@ -1349,6 +1487,14 @@ fn read_chain<'a>(
     if chain.is_empty() {
         return Err(ReceiptError::GovernanceChainInvalid("chain is empty".to_owned()));
     }
+
+    // I-D §7.1: "REQUIRED IF AND ONLY IF the carried governance chain contains a
+    // GOVERNANCE-KEY ROTATION"; "The member is ABSENT where the chain rotates neither set";
+    // "one element per rotation, in ascending `manifest_entry_index` order." This is a
+    // key-independent ARITY/ORDERING check on the CONTAINER — like §7.5 step 3's family-string
+    // and ordering checks — so it runs before anything about any individual element's own
+    // content, crypto included, and before the induction below even starts.
+    check_rotation_proofs_sequence(receipt, chain)?;
 
     // --- I-D §7.5.1 4a. Base case: the genesis manifest is authenticated WITHOUT any key. ---
     //
@@ -1665,7 +1811,7 @@ fn verify_checkpoint(
     budget: &mut Budget,
 ) -> Result<Anchoring> {
     let anchoring = obj(receipt, "anchoring")?;
-    let checkpoint = obj(anchoring, "checkpoint")?;
+    let checkpoint = checkpoint_object(obj(anchoring, "checkpoint")?)?;
     // Whether these are usable is a property of the pinned profile document, not of this
     // verifier: `ahl-test-log-v1` defines neither, so receipts under it may carry neither.
     if checkpoint.get("raw").is_some() && !profile.capabilities.checkpoint_raw {
@@ -1735,6 +1881,7 @@ fn verify_checkpoint(
 
     let mut witnessed = false;
     for cosignature in anchoring.get("witnesses").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+        let cosignature = witness_cosignature_object(cosignature)?;
         let witness_id = text(cosignature, "witness_id")?.to_owned();
         let key_id = text(cosignature, "key_id")?;
         let pubkey = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
@@ -1818,7 +1965,7 @@ fn verify_continued_history(
         (Some(_), Some(_)) => {}
     }
 
-    let later = obj(anchoring, "later_checkpoint")?;
+    let later = checkpoint_object(obj(anchoring, "later_checkpoint")?)?;
     let to_size = number(later, "tree_size")?;
     if to_size < from_size {
         // A "later" checkpoint smaller than the one the subject is included under proves no
