@@ -2209,6 +2209,82 @@ fn a_rotation_proof_cosignature_binds_to_the_outgoing_manifests_identity() {
     );
 }
 
+/// I-D §7.1's transition exception: for a `governance.rotation_proofs[]` element "the
+/// corresponding `keys.log[]` and `keys.witness[]` entries carry `manifest-chain` bindings
+/// naming that predecessor version."
+///
+/// `local-policy` is not such a listing, however genuinely the verifier trusts the key. The
+/// point of the proof is what the RETIRING authority attested, and that is established by the
+/// outgoing manifest's own witness key object — not by this verifier's configuration, which
+/// could otherwise supply the whole of a handover attestation on its own.
+#[test]
+fn a_rotation_proof_witness_must_be_listed_as_manifest_chain() {
+    let witness_1 = test_key("witness-1");
+    let (_, mut receipt) = read_receipt("governance-state-valid.ahl");
+    for entry in receipt["keys"]["witness"].as_array_mut().expect("keys.witness array") {
+        if field_str(entry, "witness_id").ok() == Some("witness-1") {
+            entry["source"] = json!("local-policy");
+            entry.as_object_mut().expect("key object").remove("binding");
+        }
+    }
+    // Policy genuinely holds the key, under the very identity the outgoing manifest declares
+    // it by: everything about the cosignature is real. What is missing is the listing the
+    // transition exception requires.
+    let mut policy = trust_policy();
+    policy.trusted_witness_keys.insert(
+        witness_1.key_id(),
+        TrustedWitnessKey { pubkey: witness_1.pubkey(), witness_id: "witness-1".to_owned() },
+    );
+    assert!(
+        matches!(
+            verify_receipt(&receipt, &policy),
+            Err(ReceiptError::KeyNotBound { ref key_id, .. }) if key_id == &witness_1.key_id()
+        ),
+        "a rotation proof's outgoing witness must be listed as manifest-chain, bound to the \
+         predecessor version — a trusted local-policy key is not that listing"
+    );
+}
+
+/// I-D §2.1: a verifier rejects a family string whose prefix, alphabet, padding or encoding is
+/// not the strict one, and §7.1 subjects every byte-carrying member to that rule.
+///
+/// The two cases here are the ones decoding-at-the-point-of-use cannot reach: a rotation-proof
+/// cosignature the selection walk passes over, and a `keys.witness[]` entry no checkpoint
+/// resolves. Both are carried material, and both are `invalid` however little verification
+/// wanted them.
+#[test]
+fn every_carried_byte_field_is_a_family_string_even_where_unused() {
+    assert_rejects(
+        "governance-state-valid.ahl",
+        // A second rotation-proof cosignature, by a witness the OUTGOING manifest does not
+        // declare — so the selection walk skips it — carrying an ill-formed cosignature.
+        |r| {
+            let mut skipped = r["governance"]["rotation_proofs"][0]["witnesses"][0].clone();
+            skipped["witness_id"] = json!("witness-2");
+            skipped["cosignature"] = json!("base64:!");
+            r["governance"]["rotation_proofs"][0]["witnesses"]
+                .as_array_mut()
+                .expect("witnesses array")
+                .push(skipped);
+        },
+        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("cosignature")),
+        "I-D §2.1 — a skipped cosignature is still a family string",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        // A `keys.witness[]` entry nothing resolves, whose `pubkey` decodes only if trailing
+        // bits are discarded — which the strict rule forbids.
+        |r| {
+            let mut unused = r["keys"]["witness"][0].clone();
+            unused["witness_id"] = json!("witness-2");
+            unused["pubkey"] = json!("base64:AB==");
+            r["keys"]["witness"].as_array_mut().expect("keys.witness array").push(unused);
+        },
+        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("pubkey")),
+        "I-D §2.1 — an unused pubkey is still a family string",
+    );
+}
+
 /// I-D §7.1: "`source` is exactly one of `\"manifest-chain\"` or `\"local-policy\"`."
 ///
 /// There is no third token and no default. An unrecognized one is a schema failure over the
@@ -2854,7 +2930,9 @@ fn cross_field_consistency_rules_reject() {
     );
     assert_rejects(
         "governance-state-valid.ahl",
-        |r| r["subject"]["manifest"] = json!("sha256:00"),
+        // Well formed as a family string, so the PRESENCE rule is what fires rather than the
+        // §2.1 acceptance rule the shape pass applies to the member.
+        |r| r["subject"]["manifest"] = json!(format!("sha256:{}", "00".repeat(32))),
         |e| matches!(e, ReceiptError::SubjectManifestPresence { .. }),
         "§2.3 — subject.manifest absent for manifest subjects",
     );
