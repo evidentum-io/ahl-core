@@ -467,6 +467,180 @@ pub fn atl_checkpoint_blob(
     blob
 }
 
+/// Parse an `ahl-adaptor-atl-v1` §6.3 `checkpoint_time` rendering into its exact Unix
+/// nanosecond count — the inverse of [`atl_checkpoint_time`].
+///
+/// §6.3: "`checkpoint_time` MUST be the UTC rendering of the ATL nanosecond timestamp with
+/// EXACTLY NINE fractional digits and the `Z` suffix... verifiers MUST parse the nine
+/// fractional digits back to the exact u64 nanosecond value and MUST reject a `checkpoint_time`
+/// that is not in this form." This is stricter than the generic RFC 3339 grammar
+/// [`bitemporal::parse_rfc3339`] accepts elsewhere in this crate (any digit count, any numeric
+/// offset) — deliberately: only THIS exact rendering round-trips to the 98-byte blob a producer
+/// actually signed (§6.1), so any other rendering is rejected outright here rather than
+/// "generously" converted.
+///
+/// # Errors
+///
+/// Returns [`AhlError::AtlCheckpoint`] if `value` is not exactly this rendering.
+pub fn atl_checkpoint_time_nanos(value: &str) -> AhlResult<u64> {
+    let invalid = || {
+        AhlError::AtlCheckpoint(format!(
+            "checkpoint_time `{value}`: not the ATL adaptor's required rendering — exactly \
+             nine fractional-second digits and a literal `Z` (adaptor profile \
+             `ahl-adaptor-atl-v1` §6.3)"
+        ))
+    };
+    // "YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ" is exactly 30 ASCII bytes: a literal `.` at offset 19
+    // and a literal `Z` at the last byte, with nine ASCII digits between them — checked here
+    // directly rather than trusted to whatever the generic RFC 3339 parser happens to accept.
+    let bytes = value.as_bytes();
+    if bytes.len() != 30
+        || bytes[19] != b'.'
+        || bytes[29] != b'Z'
+        || !value[20..29].bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let parsed = bitemporal::parse_rfc3339("checkpoint_time", value).map_err(|_| invalid())?;
+    let seconds = u64::try_from(parsed.unix_timestamp()).map_err(|_| invalid())?;
+    let nanos = u64::from(parsed.nanosecond());
+    seconds.checked_mul(1_000_000_000).and_then(|s| s.checked_add(nanos)).ok_or_else(invalid)
+}
+
+/// Assemble the `ahl-adaptor-atl-v1` §6.1 98-byte blob FROM a receipt-borne checkpoint's own
+/// JSON members — `log_id`, `tree_size`, `checkpoint_time`, `root_hash` — under the §6.2
+/// mapping table.
+///
+/// This is the exact reverse of parsing `raw`: the same layout ([`atl_checkpoint_blob`]), built
+/// from the JSON side rather than read from the wire side, so [`reconcile_atl_checkpoint_raw`]
+/// (compare a carried `raw` against it) and [`checkpoint_signing_bytes_for`] (the bytes the log
+/// actually signs, §6.5 steps 1-2) share one assembler rather than two hand-written copies of
+/// the same layout.
+///
+/// # Errors
+///
+/// Returns [`AhlError::AtlCheckpoint`] if a required member is absent or malformed.
+pub fn atl_checkpoint_blob_from_json(checkpoint: &Value) -> AhlResult<[u8; 98]> {
+    let invalid = |detail: String| AhlError::AtlCheckpoint(format!("checkpoint: {detail}"));
+
+    let log_id = checkpoint
+        .get("log_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`log_id` is REQUIRED".to_owned()))?;
+    let origin = hex::decode(log_id.strip_prefix(SHA256_PREFIX).unwrap_or(log_id))
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .ok_or_else(|| {
+            invalid(
+                "`log_id` is not a `sha256:` family string in lowercase hex (adaptor profile \
+                 `ahl-adaptor-atl-v1` §6.2)"
+                    .to_owned(),
+            )
+        })?;
+    let tree_size = checkpoint
+        .get("tree_size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("`tree_size` is REQUIRED, an entry count".to_owned()))?;
+    let checkpoint_time = checkpoint
+        .get("checkpoint_time")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`checkpoint_time` is REQUIRED".to_owned()))?;
+    let timestamp_ns = atl_checkpoint_time_nanos(checkpoint_time)?;
+    let root_hash = checkpoint
+        .get("root_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`root_hash` is REQUIRED".to_owned()))?;
+    let root = hex::decode(root_hash.strip_prefix(SHA256_PREFIX).unwrap_or(root_hash))
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .ok_or_else(|| {
+            invalid(
+                "`root_hash` is not a `sha256:` family string in lowercase hex (adaptor \
+                 profile `ahl-adaptor-atl-v1` §6.2)"
+                    .to_owned(),
+            )
+        })?;
+
+    Ok(atl_checkpoint_blob(&origin, tree_size, timestamp_ns, &root))
+}
+
+/// The bytes a checkpoint's own log signature is verified over, dispatched on the resolved
+/// adaptor profile (I-D §3.2: the checkpoint's signing form is profile-defined).
+///
+/// `ahl-test-log-v1` signs `JCS(checkpoint minus "signature")` ([`checkpoint_signing_bytes`],
+/// its own §5); `ahl-adaptor-atl-v1` signs the 98-byte blob of [`atl_checkpoint_blob_from_json`]
+/// (its §6.1, §6.5). Any other profile id has no procedure here.
+///
+/// This is a MECHANICAL, profile-string dispatcher — a reusable primitive, not a policy
+/// decision. `ahl_core::receipt::verify_receipt` does NOT call this for `ahl-adaptor-atl-v1`:
+/// that profile's leaf construction (adaptor §4.2) and origin-derived `log_id` (§7.1) are not
+/// yet profile-dispatched anywhere in this crate, so a checkpoint signing over the RIGHT bytes
+/// would still rest on entries hashed the WRONG way, and until the profile document itself is
+/// released (adaptor §14: "Until this document is released as an immutable, openly published
+/// artifact… no manifest may pin it") no manifest may pin it either. This function exists so
+/// the checkpoint-level mechanism is available to a client integrating ATL directly, tested
+/// here at the unit level, without the receipt verifier presenting a false positive.
+///
+/// # Errors
+///
+/// Returns [`AhlError::Field`] for any profile id other than the two named above.
+pub fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> AhlResult<Vec<u8>> {
+    match profile_id {
+        "ahl-test-log-v1" => checkpoint_signing_bytes(checkpoint),
+        "ahl-adaptor-atl-v1" => Ok(atl_checkpoint_blob_from_json(checkpoint)?.to_vec()),
+        other => Err(AhlError::Field(format!(
+            "no checkpoint signing-bytes procedure for adaptor profile `{other}`"
+        ))),
+    }
+}
+
+/// Reconcile a carried `ahl-adaptor-atl-v1` `raw` framing against the assembled blob.
+///
+/// Compares against the blob assembled from a checkpoint's own JSON members (adaptor §6.4,
+/// §6.5 step 3: "compare it byte for byte with the assembled blob; a mismatch is a rejection")
+/// — not a looser field-by-field comparison that could accept a `raw` differing only in, say,
+/// unused padding no such blob has.
+///
+/// # Errors
+///
+/// Returns [`AhlError::AtlCheckpoint`] if `raw` does not decode to exactly 98 octets prefixed
+/// `base64:`, does not carry the `ATL-Protocol-v1-CP` magic, or does not equal the blob
+/// [`atl_checkpoint_blob_from_json`] assembles from `checkpoint`.
+pub fn reconcile_atl_checkpoint_raw(checkpoint: &Value, raw: &str) -> AhlResult<()> {
+    let invalid = |detail: String| AhlError::AtlCheckpoint(format!("raw: {detail}"));
+
+    let encoded = raw.strip_prefix(BASE64_PREFIX).ok_or_else(|| {
+        invalid(
+            "`raw` MUST be `base64:<...>` (adaptor profile `ahl-adaptor-atl-v1` §6.4)".to_owned(),
+        )
+    })?;
+    let bytes = B64
+        .decode(encoded)
+        .map_err(|source| invalid(format!("`raw` does not decode as base64: {source}")))?;
+    let Ok(carried): core::result::Result<[u8; 98], _> = bytes.try_into() else {
+        return Err(invalid(
+            "`raw` MUST decode to exactly 98 octets (adaptor profile `ahl-adaptor-atl-v1` §6.1)"
+                .to_owned(),
+        ));
+    };
+    if carried[0..18] != *b"ATL-Protocol-v1-CP" {
+        return Err(invalid(
+            "`raw`'s magic is not `ATL-Protocol-v1-CP` (adaptor profile `ahl-adaptor-atl-v1` \
+             §6.1)"
+                .to_owned(),
+        ));
+    }
+    let assembled = atl_checkpoint_blob_from_json(checkpoint)?;
+    if carried != assembled {
+        return Err(invalid(
+            "`raw` does not equal the blob assembled from the JSON checkpoint members — the \
+             JSON members govern (adaptor profile `ahl-adaptor-atl-v1` §6.2, §6.4, §6.5)"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Build a signed checkpoint under adaptor profile `ahl-adaptor-atl-v1`.
 ///
 /// The Ed25519 signature is over the 98-byte blob of [`atl_checkpoint_blob`] (§6.1, §6.5), not
@@ -956,5 +1130,122 @@ mod tests {
         let msg = checkpoint_signing_bytes(&cp).expect("checkpoint object");
         let sig = field_str(&cp, "signature").expect("signed checkpoint");
         assert!(verify_signature(&k.verifying_key(), &msg, sig).expect("well-formed signature"));
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Adaptor profile `ahl-adaptor-atl-v1` checkpoint-blob mechanism (§6.1-§6.5).
+    //
+    // Unit-level only, over a synthetic checkpoint: this profile's document is not yet
+    // released (adaptor §14: "Until this document is released as an immutable, openly
+    // published artifact… no manifest may pin it"), and its leaf construction (§4.2) and
+    // origin-derived `log_id` (§7.1) are not implemented anywhere in this crate, so no
+    // receipt vector may claim it end to end. These tests preserve the checkpoint-level
+    // mechanism — assemble, sign, verify, reconcile `raw` — for a client integrating ATL
+    // directly, without a false-positive receipt anywhere in the corpus.
+    // -----------------------------------------------------------------------------------
+
+    fn log_key() -> TestKey {
+        TestKey::from_seed_hex("log-1", &"11".repeat(32)).expect("valid 32-byte hex seed")
+    }
+
+    #[test]
+    fn atl_checkpoint_time_round_trips_through_its_own_parser() {
+        // The adaptor document's own §6.4 worked example.
+        let nanos = 1_767_225_600_123_456_789u64;
+        let rendered = atl_checkpoint_time(nanos);
+        assert_eq!(rendered, "2026-01-01T00:00:00.123456789Z");
+        assert_eq!(atl_checkpoint_time_nanos(&rendered).expect("strict rendering"), nanos);
+    }
+
+    #[test]
+    fn atl_checkpoint_time_nanos_rejects_anything_but_the_strict_rendering() {
+        for bad in ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.123Z", "not a timestamp"] {
+            assert!(
+                atl_checkpoint_time_nanos(bad).is_err(),
+                "`{bad}` must not parse as the ATL adaptor's nine-digit rendering"
+            );
+        }
+    }
+
+    /// Assemble a blob, sign it with a test log key, verify the signature over the bytes
+    /// `checkpoint_signing_bytes_for` computes for `ahl-adaptor-atl-v1`, and confirm a `raw`
+    /// built from that same blob reconciles byte-for-byte.
+    #[test]
+    fn atl_checkpoint_blob_assembles_signs_verifies_and_reconciles() {
+        let log_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root_hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let timestamp_ns = 1_767_225_600_123_456_789u64;
+        let key = log_key();
+
+        let cp = atl_checkpoint(log_id, 42, root_hash, timestamp_ns, &key)
+            .expect("valid family strings");
+
+        // The signature verifies over exactly the dispatched signing-bytes procedure for
+        // `ahl-adaptor-atl-v1` (adaptor §6.1, §6.5) — not `ahl-test-log-v1`'s JCS form.
+        let signing_bytes =
+            checkpoint_signing_bytes_for(&cp, "ahl-adaptor-atl-v1").expect("ATL dispatch");
+        let sig = field_str(&cp, "signature").expect("signed checkpoint");
+        assert!(verify_signature(&key.verifying_key(), &signing_bytes, sig).expect("valid sig"));
+
+        // A `raw` built from the SAME components reconciles byte-for-byte (adaptor §6.4/§6.5).
+        let origin = parse_hash_hex(log_id).expect("valid family string");
+        let root = parse_hash_hex(root_hash).expect("valid family string");
+        let blob = atl_checkpoint_blob(&origin, 42, timestamp_ns, &root);
+        assert_eq!(blob.to_vec(), signing_bytes, "the blob IS the signing bytes");
+        let raw = format!("base64:{}", B64.encode(blob));
+        reconcile_atl_checkpoint_raw(&cp, &raw).expect("raw matches the assembled blob");
+
+        // And the JSON-driven assembler agrees with the components-driven one.
+        assert_eq!(atl_checkpoint_blob_from_json(&cp).expect("well-formed checkpoint"), blob);
+    }
+
+    #[test]
+    fn atl_checkpoint_raw_mismatch_cases_are_rejected() {
+        let log_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root_hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let timestamp_ns = 1_767_225_600_123_456_789u64;
+        let cp = atl_checkpoint(log_id, 42, root_hash, timestamp_ns, &log_key())
+            .expect("valid family strings");
+        let origin = parse_hash_hex(log_id).expect("valid family string");
+        let root = parse_hash_hex(root_hash).expect("valid family string");
+        let blob = atl_checkpoint_blob(&origin, 42, timestamp_ns, &root);
+
+        // Wrong length.
+        assert!(matches!(
+            reconcile_atl_checkpoint_raw(&cp, "base64:AAAA"),
+            Err(AhlError::AtlCheckpoint(_))
+        ));
+
+        // Wrong magic (98 zero bytes: right length, wrong content).
+        let wrong_magic = format!("base64:{}", B64.encode([0u8; 98]));
+        assert!(matches!(
+            reconcile_atl_checkpoint_raw(&cp, &wrong_magic),
+            Err(AhlError::AtlCheckpoint(_))
+        ));
+
+        // Correct magic and origin, wrong tree size: genuine field-by-field disagreement.
+        let mut corrupted = blob;
+        corrupted[50] ^= 0x01;
+        let raw = format!("base64:{}", B64.encode(corrupted));
+        assert!(matches!(reconcile_atl_checkpoint_raw(&cp, &raw), Err(AhlError::AtlCheckpoint(_))));
+
+        // `raw` correctly signed for the ORIGINAL values, but a JSON sibling member is
+        // altered afterward — the JSON members govern (I-D §7.5 step 2).
+        let genuine_raw = format!("base64:{}", B64.encode(blob));
+        let mut altered = cp;
+        altered["tree_size"] = json!(43);
+        assert!(matches!(
+            reconcile_atl_checkpoint_raw(&altered, &genuine_raw),
+            Err(AhlError::AtlCheckpoint(_))
+        ));
+    }
+
+    #[test]
+    fn checkpoint_signing_bytes_for_rejects_unknown_profiles() {
+        let cp = checkpoint("sha256:00", 10, "sha256:11", "2026-08-16T12:00:00Z", &key());
+        assert!(matches!(
+            checkpoint_signing_bytes_for(&cp, "some-other-profile"),
+            Err(AhlError::Field(_))
+        ));
     }
 }

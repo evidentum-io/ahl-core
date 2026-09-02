@@ -169,6 +169,12 @@ pub enum AhlError {
     #[error("range proof invalid: {0}")]
     RangeProof(String),
 
+    /// An `ahl-adaptor-atl-v1` checkpoint blob (§6.1) or its `checkpoint_time` rendering
+    /// (§6.3) was malformed, or a carried `raw` blob did not match the one assembled from a
+    /// checkpoint's JSON members (§6.4, §6.5).
+    #[error("ATL checkpoint invalid: {0}")]
+    AtlCheckpoint(String),
+
     /// An Ed25519 public key was structurally invalid.
     #[error("invalid ed25519 public key: {0}")]
     PublicKey(ed25519_dalek::SignatureError),
