@@ -117,8 +117,11 @@ impl AdaptorProfile {
 pub struct TrustPolicy {
     /// The published genesis entry id of the corpus this verifier accepts.
     pub genesis_entry_id: String,
-    /// The published producer key fingerprints of the genesis manifest.
-    pub genesis_key_ids: BTreeSet<String>,
+    /// The published producer key fingerprints of the genesis manifest, WHERE local policy
+    /// holds them (I-D §7.5.1 4a: "WHERE LOCAL POLICY HOLDS initial key fingerprints... which
+    /// is optional... where it holds none, this comparison does not arise and its absence is
+    /// not a defect"). `None` — not held, no comparison; `Some(set)` — held, and MUST match.
+    pub genesis_key_ids: Option<BTreeSet<String>>,
     /// Locally possessed adaptor profiles, by profile id.
     pub adaptor_profiles: BTreeMap<String, AdaptorProfile>,
     /// Dataset HMAC keys this verifier is authorized to hold (`keyed-authorized` binding only).
@@ -831,7 +834,7 @@ fn producer_keys_at_in(
     let Some((snapshot_index, manifest)) = snapshot_manifest_in(manifests, index) else {
         return keys;
     };
-    for (key_id, pubkey) in key_objects(manifest).unwrap_or_default() {
+    for (key_id, pubkey) in producer_key_objects(manifest).unwrap_or_default() {
         keys.insert(key_id, BoundKey { pubkey, bound_at: snapshot_index });
     }
     // Only transitions anchored after that snapshot and at or before `index` apply; an
@@ -1129,13 +1132,13 @@ fn log_object(manifest: &Value) -> Result<&Value> {
     Ok(log)
 }
 
-/// Read the manifest key objects of `group` (`keys`, `log.keys`, `witnesses[].keys`), checking
-/// each against the §7.2 shape every manifest key object shares.
+/// Read manifest LOG or WITNESS key objects (`log.keys`, `witnesses[].keys`): the shared shape
+/// `{key_id, pubkey, valid_from_index}` (I-D §6.2). `key_id` is a family string and
+/// `valid_from_index` is an entry index, which is an unsigned integer: a negative or
+/// fractional value is not an index into an append-only log.
 ///
-/// Spec §7.2 gives producer, log and witness key objects one form —
-/// `{key_id, pubkey, valid_from_index}` — so they are validated in one place. `key_id` is a
-/// family string (§7.3) and `valid_from_index` is an entry index, which is an unsigned integer:
-/// a negative or fractional value is not an index into an append-only log.
+/// NOT for PRODUCER key objects — those take a stricter, different shape with no
+/// `valid_from_index` at all; see [`producer_key_objects`].
 fn key_objects(container: &Value) -> Result<Vec<(String, String)>> {
     array(container, "keys")?
         .iter()
@@ -1159,6 +1162,47 @@ fn key_objects(container: &Value) -> Result<Vec<(String, String)>> {
             if object.get("valid_from_index").and_then(Value::as_u64).is_none() {
                 return Err(invalid("valid_from_index", "not an entry index (spec §7.2, §7.3)"));
             }
+            Ok((key_id.to_owned(), pubkey.to_owned()))
+        })
+        .collect()
+}
+
+/// Read manifest PRODUCER key objects (`payload.keys`): I-D §6.2 — "Each entry is a producer
+/// key object `{key_id, pubkey}`. Both members are family strings... A producer key object
+/// carrying any member beyond those two is a schema failure." Deliberately stricter than
+/// [`key_objects`]: no `valid_from_index`, because the array itself IS the producer key state
+/// at the manifest's entry index (I-D §6.2), not a set of per-key activation records.
+fn producer_key_objects(container: &Value) -> Result<Vec<(String, String)>> {
+    const ALLOWED: [&str; 2] = ["key_id", "pubkey"];
+    array(container, "keys")?
+        .iter()
+        .enumerate()
+        .map(|(index, object)| {
+            let invalid = |member: &str, detail: &str| ReceiptError::ManifestSchemaInvalid {
+                object: format!("keys[{index}].{member}"),
+                detail: detail.to_owned(),
+            };
+            let map = object
+                .as_object()
+                .ok_or_else(|| invalid("", "a producer key object MUST be an object (I-D §6.2)"))?;
+            if let Some(extra) = map.keys().find(|member| !ALLOWED.contains(&member.as_str())) {
+                return Err(invalid(
+                    extra,
+                    "a producer key object carries `key_id` and `pubkey` ONLY — any other \
+                     member, `valid_from_index` included, is a schema failure (I-D §6.2)",
+                ));
+            }
+            let key_id = object
+                .get("key_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("key_id", "the member is REQUIRED (I-D §6.2)"))?;
+            if !is_family_hash(key_id) {
+                return Err(invalid("key_id", "not a `sha256:` family string in lowercase hex"));
+            }
+            let pubkey = object
+                .get("pubkey")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("pubkey", "the member is REQUIRED (I-D §6.2)"))?;
             Ok((key_id.to_owned(), pubkey.to_owned()))
         })
         .collect()
@@ -1279,38 +1323,45 @@ fn witness_key_set(payload: &Value) -> BTreeSet<(String, String, String, u64)> {
 /// `rotating_manifest`/`rotating_envelope` are this manifest's own payload/envelope;
 /// `outgoing_manifest` is its predecessor's payload — the state being retired, which is what the
 /// proof must be signed and cosigned under, never the incoming state the rotation installs.
-#[allow(clippy::too_many_lines)]
+///
+/// `element` is the specific `governance.rotation_proofs[]` element already selected, and its
+/// `manifest_entry_index` already matched, by the caller's positional walk (I-D §7.5.1): this
+/// function trusts neither the array nor the index — it validates the one element it was
+/// handed, nothing more.
+// Eight arguments: the element plus five independent pieces of already-established context
+// (the rotating hop's own envelope/entry-index/payload, its predecessor's payload, and the
+// adaptor profile the `raw` capability gate needs) that this function does not re-derive —
+// bundling them into a struct would only rename this list, not shorten it.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn verify_rotation_proof(
-    receipt: &Value,
+    element: &Value,
     rotating_envelope: &Value,
     manifest_entry_index: u64,
     rotating_manifest: &Value,
     outgoing_manifest: &Value,
+    profile: &AdaptorProfile,
+    profile_id: &str,
     budget: &mut Budget,
 ) -> Result<()> {
     let invalid =
         |detail: String| ReceiptError::RotationProofInvalid { manifest_entry_index, detail };
 
-    let empty = Vec::new();
-    let proofs = receipt
-        .get("governance")
-        .and_then(|governance| governance.get("rotation_proofs"))
-        .and_then(Value::as_array)
-        .unwrap_or(&empty);
-    let element = proofs
-        .iter()
-        .find(|element| number(element, "manifest_entry_index").ok() == Some(manifest_entry_index))
-        .ok_or_else(|| {
-            invalid(
-                "`governance.rotation_proofs[]` carries no element for this rotation (I-D §7.1: \
-                 REQUIRED where the carried chain rotates either governance key set)"
-                    .to_owned(),
-            )
-        })?;
-
     // I-D §7.1: the element's `checkpoint` is "in the receipt-borne form defined above" — the
     // same strict shape `anchoring.checkpoint` takes, not a looser one.
     let checkpoint = checkpoint_object(obj(element, "checkpoint")?)?;
+    // "WHERE `raw` is present, the verifier MUST check that it parses to the same values" —
+    // an adaptor-profile-defined, binary-framing capability. Exactly the same gate
+    // `verify_checkpoint` applies to `anchoring.checkpoint.raw` applies here: a profile that
+    // defines no framing cannot perform that check, so a rotation-proof checkpoint carrying
+    // `raw` under such a profile is rejected as a limitation of the profile, named, not
+    // silently ignored or silently trusted.
+    if checkpoint.get("raw").is_some() && !profile.capabilities.checkpoint_raw {
+        return Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: profile_id.to_owned(),
+            capability: "a binary checkpoint framing for \
+                         `governance.rotation_proofs[].checkpoint.raw`",
+        });
+    }
     let tree_size = number(checkpoint, "tree_size")?;
     if tree_size <= manifest_entry_index {
         return Err(invalid(format!(
@@ -1357,21 +1408,35 @@ fn verify_rotation_proof(
         budget,
     )?;
 
+    // I-D §7.1: `witnesses`, where PRESENT, is "an array in the shape of
+    // `anchoring.witnesses[]`" — EVERY element of that array is held to the shape whenever the
+    // member is present at all, regardless of level, not merely the ones a match happens to
+    // reach and not merely below L3. A malformed entry is invalid whether or not some OTHER
+    // entry in the array would have cosigned successfully, and whether or not a cosignature is
+    // even required at this level.
+    let witness_candidates = match element.get("witnesses") {
+        None => Vec::new(),
+        Some(value) => {
+            let array = value.as_array().ok_or_else(|| {
+                invalid(
+                    "`witnesses`, where present, MUST be an array in the shape of \
+                     `anchoring.witnesses[]` (I-D §7.1)"
+                        .to_owned(),
+                )
+            })?;
+            array.iter().map(witness_cosignature_object).collect::<Result<Vec<_>>>()?
+        }
+    };
+
     // AT L3, at least one `witnesses[]` cosignature MUST verify under a witness key of the
     // OUTGOING state, whichever set actually rotated — I-D §7.1: "a change to EITHER set is
     // attested under BOTH outgoing states". This build reads the rotating manifest's OWN
-    // declared `level` to decide whether L3 applies going forward.
+    // declared `level` to decide whether L3 applies going forward. Below L3, `witnesses` was
+    // already shape-checked above where present, but no cosignature is required from it.
     if rotating_manifest.get("level").and_then(Value::as_str) == Some("L3") {
         let outgoing_witnesses = witness_key_set(outgoing_manifest);
-        let candidates = element.get("witnesses").and_then(Value::as_array).unwrap_or(&empty);
-        // I-D §7.1: `witnesses` is "an array in the shape of `anchoring.witnesses[]`" — EVERY
-        // element of that array is held to the shape, not merely the ones a match happens to
-        // reach; a malformed entry is invalid whether or not some OTHER entry in the array
-        // would have cosigned successfully.
-        let candidates =
-            candidates.iter().map(witness_cosignature_object).collect::<Result<Vec<_>>>()?;
         let mut cosigned = false;
-        for witness in &candidates {
+        for witness in &witness_candidates {
             let witness_id = text(witness, "witness_id")?.to_owned();
             let key_id = text(witness, "key_id")?;
             let Some(pubkey) = outgoing_witnesses
@@ -1403,75 +1468,6 @@ fn verify_rotation_proof(
     Ok(())
 }
 
-/// The exact ascending sequence of GOVERNANCE-KEY ROTATION entry indices the carried chain
-/// contains (I-D §7.1), read structurally: each manifest's log/witness key SETS compared
-/// against the immediately preceding MANIFEST's (a `key` statement hop in between does not
-/// interrupt the comparison, since only manifests carry log/witness key objects at all).
-fn rotating_manifest_indices(chain: &[Value]) -> Result<Vec<u64>> {
-    let mut rotations = Vec::new();
-    let mut previous_manifest: Option<&Value> = None;
-    for hop in chain {
-        let envelope = obj(hop, "envelope")?;
-        let payload = payload_of(envelope)?;
-        if statement_type(payload)? != "manifest" {
-            continue;
-        }
-        if let Some(previous) = previous_manifest {
-            let rotated = log_key_set(payload) != log_key_set(previous)
-                || witness_key_set(payload) != witness_key_set(previous);
-            if rotated {
-                rotations.push(number(hop, "entry_index")?);
-            }
-        }
-        previous_manifest = Some(payload);
-    }
-    Ok(rotations)
-}
-
-/// I-D §7.1's collection-level rules for `governance.rotation_proofs[]`, checked BEFORE any
-/// element's own content: present with no rotation in the chain is invalid ("the member is
-/// ABSENT where the chain rotates neither set"); where rotations exist, the carried
-/// `manifest_entry_index` sequence must equal EXACTLY the ascending sequence of rotating
-/// manifests' entry indexes — no duplicates, no extras, no missing, no reordering ("one
-/// element per rotation, in ascending `manifest_entry_index` order").
-fn check_rotation_proofs_sequence(receipt: &Value, chain: &[Value]) -> Result<()> {
-    let expected = rotating_manifest_indices(chain)?;
-    let carried =
-        receipt.get("governance").and_then(|governance| governance.get("rotation_proofs"));
-    if expected.is_empty() {
-        return if carried.is_some() {
-            Err(ReceiptError::GovernanceChainInvalid(
-                "`governance.rotation_proofs` is present, but the carried chain rotates neither the log \
-                 nor the witness key set — I-D §7.1 requires the member to be ABSENT in that \
-                 case"
-                    .to_owned(),
-            ))
-        } else {
-            Ok(())
-        };
-    }
-    let carried_array = carried.and_then(Value::as_array).ok_or_else(|| {
-        ReceiptError::GovernanceChainInvalid(
-            "`governance.rotation_proofs` is REQUIRED: the carried chain contains a governance-key \
-             rotation (I-D §7.1)"
-                .to_owned(),
-        )
-    })?;
-    let carried_indices: Vec<u64> = carried_array
-        .iter()
-        .map(|element| number(element, "manifest_entry_index"))
-        .collect::<Result<_>>()?;
-    if carried_indices != expected {
-        return Err(ReceiptError::GovernanceChainInvalid(format!(
-            "`governance.rotation_proofs[]`'s manifest_entry_index sequence {carried_indices:?} does \
-             not equal EXACTLY the ascending sequence of rotating manifests' entry indexes \
-             {expected:?} (I-D §7.1: one element per rotation, ascending order, no duplicates, \
-             no extras, no missing)"
-        )));
-    }
-    Ok(())
-}
-
 /// Build and structurally validate the governance chain (I-D §7.5.1 4a-4c): the base case,
 /// then the induction, each carried statement's SIGNATURE verified against K as established by
 /// its predecessors before anything about its own content is trusted.
@@ -1481,6 +1477,8 @@ fn check_rotation_proofs_sequence(receipt: &Value, chain: &[Value]) -> Result<()
 fn read_chain<'a>(
     receipt: &'a Value,
     policy: &TrustPolicy,
+    profile: &AdaptorProfile,
+    profile_id: &str,
     budget: &mut Budget,
 ) -> Result<Governance<'a>> {
     let chain = array(obj(receipt, "governance")?, "chain")?;
@@ -1490,11 +1488,26 @@ fn read_chain<'a>(
 
     // I-D §7.1: "REQUIRED IF AND ONLY IF the carried governance chain contains a
     // GOVERNANCE-KEY ROTATION"; "The member is ABSENT where the chain rotates neither set";
-    // "one element per rotation, in ascending `manifest_entry_index` order." This is a
-    // key-independent ARITY/ORDERING check on the CONTAINER — like §7.5 step 3's family-string
-    // and ordering checks — so it runs before anything about any individual element's own
-    // content, crypto included, and before the induction below even starts.
-    check_rotation_proofs_sequence(receipt, chain)?;
+    // "one element per rotation, in ascending `manifest_entry_index` order." §7.5.1: "Type
+    // specific validation MUST NOT run on material whose signature has not verified" — so
+    // WHICH hops rotate can only be decided inside the signed per-hop walk below, never from
+    // an unverified pre-scan of the chain's own payloads. What IS safe to read here, before
+    // induction starts, is the CONTAINER shape of `governance.rotation_proofs` itself — its
+    // presence/absence and, where present, that it is an array — because that is a fact about
+    // the receipt's own structure, not a claim about any chain hop's unverified content.
+    let rotation_proofs_member =
+        receipt.get("governance").and_then(|governance| governance.get("rotation_proofs"));
+    let rotation_proofs: &[Value] = match rotation_proofs_member {
+        None => &[],
+        Some(value) => value.as_array().map(Vec::as_slice).ok_or_else(|| {
+            ReceiptError::GovernanceChainInvalid(
+                "`governance.rotation_proofs`, where present, MUST be an array (I-D §7.1)"
+                    .to_owned(),
+            )
+        })?,
+    };
+    let mut rotation_cursor = 0usize;
+    let mut saw_rotation = false;
 
     // --- I-D §7.5.1 4a. Base case: the genesis manifest is authenticated WITHOUT any key. ---
     //
@@ -1527,10 +1540,16 @@ fn read_chain<'a>(
     if carried_anchor != policy.genesis_entry_id {
         return Err(ReceiptError::GenesisAnchorMismatch);
     }
-    let genesis_key_ids: BTreeSet<String> =
-        key_objects(genesis_payload)?.into_iter().map(|(id, _)| id).collect();
-    if genesis_key_ids != policy.genesis_key_ids {
-        return Err(ReceiptError::GenesisAnchorMismatch);
+    // I-D §7.5.1 4a: the fingerprint comparison is optional local policy — WHERE `policy`
+    // holds no configured set, the comparison does not arise at all, and that absence is not
+    // itself a defect. WHERE it holds one, the genesis manifest's producer key ids MUST match
+    // it exactly.
+    if let Some(configured) = &policy.genesis_key_ids {
+        let genesis_key_ids: BTreeSet<String> =
+            producer_key_objects(genesis_payload)?.into_iter().map(|(id, _)| id).collect();
+        if &genesis_key_ids != configured {
+            return Err(ReceiptError::GenesisAnchorMismatch);
+        }
     }
 
     // "The genesis manifest is INSIDE the typed checks, not outside them... It earns exactly
@@ -1542,7 +1561,7 @@ fn read_chain<'a>(
             "the genesis manifest must carry no predecessor reference".to_owned(),
         ));
     }
-    key_objects(genesis_payload)?;
+    producer_key_objects(genesis_payload)?;
     log_object(genesis_payload)?;
     datasets_object(genesis_payload)?;
     if let Some(witnesses) = genesis_payload.get("witnesses").and_then(Value::as_array) {
@@ -1621,7 +1640,7 @@ fn read_chain<'a>(
                 // reaching that path would be swallowed by the tolerance and resurface as a
                 // missing key. A manifest that breaks the frozen schema must be refused as
                 // such, not reported as a key that happens not to resolve.
-                key_objects(payload)?;
+                producer_key_objects(payload)?;
                 log_object(payload)?;
                 datasets_object(payload)?;
                 if let Some(witnesses) = payload.get("witnesses").and_then(Value::as_array) {
@@ -1638,14 +1657,44 @@ fn read_chain<'a>(
                 let rotated = log_key_set(payload) != log_key_set(previous_manifest_payload)
                     || witness_key_set(payload) != witness_key_set(previous_manifest_payload);
                 if rotated {
+                    saw_rotation = true;
+                    // "The NEXT unconsumed `rotation_proofs[]` element must have
+                    // `manifest_entry_index` equal to this hop's entry index (else invalid),
+                    // and is validated then." Positional consumption, decided only now that
+                    // this hop's own signature (phase 1) and schema (phase 2, above) have
+                    // already passed.
+                    let element = rotation_proofs.get(rotation_cursor).ok_or_else(|| {
+                        ReceiptError::RotationProofInvalid {
+                            manifest_entry_index: index,
+                            detail: "the chain rotates the log or witness key set here, but \
+                                     `governance.rotation_proofs[]` carries no (further) \
+                                     element for it (I-D §7.1)"
+                                .to_owned(),
+                        }
+                    })?;
+                    let element_index = number(element, "manifest_entry_index")?;
+                    if element_index != index {
+                        return Err(ReceiptError::RotationProofInvalid {
+                            manifest_entry_index: index,
+                            detail: format!(
+                                "the next unconsumed `governance.rotation_proofs[]` element \
+                                 carries `manifest_entry_index` {element_index}, not {index} \
+                                 — one element per rotation, in ascending \
+                                 `manifest_entry_index` order (I-D §7.1)"
+                            ),
+                        });
+                    }
                     verify_rotation_proof(
-                        receipt,
+                        element,
                         envelope,
                         index,
                         payload,
                         previous_manifest_payload,
+                        profile,
+                        profile_id,
                         budget,
                     )?;
+                    rotation_cursor += 1;
                 }
                 // Phase 3: effect — replaces the log, witness, and producer key state in full.
                 previous_manifest_entry_id = entry_id(envelope);
@@ -1654,7 +1703,10 @@ fn read_chain<'a>(
                 manifests.push((index, payload));
             }
             "key" => {
-                // Phase 2, 4b(K): action and shape.
+                // Phase 2, 4b(K): action, key-object shape, key-id/pubkey binding, and
+                // `valid_from` (I-D §7.5.1 4b(K)): "before a `key` statement's effect touches
+                // K, validate its form... a failure is `invalid`, and the event is NOT
+                // applied."
                 let key = obj(payload, "key")?;
                 let added = match text(payload, "action")? {
                     "add" => true,
@@ -1666,7 +1718,47 @@ fn read_chain<'a>(
                     }
                 };
                 let key_id = text(key, "key_id")?.to_owned();
+                if !is_family_hash(&key_id) {
+                    return Err(ReceiptError::GovernanceChainInvalid(format!(
+                        "key statement at entry index {index} carries `key.key_id` that is \
+                         not a `sha256:` family string in lowercase hex (I-D §7.5.1 4b(K))"
+                    )));
+                }
                 let pubkey = text(key, "pubkey")?.to_owned();
+                // "`pubkey` decodes to exactly 32 octets" — `decode_pubkey` enforces exactly
+                // that (base64: prefix, valid base64, exactly 32 decoded octets).
+                let decoded = decode_pubkey(&pubkey).map_err(|_| {
+                    ReceiptError::GovernanceChainInvalid(format!(
+                        "key statement at entry index {index} carries `key.pubkey` that does \
+                         not decode to exactly 32 octets (I-D §7.5.1 4b(K))"
+                    ))
+                })?;
+                // "`key_id` RECOMPUTED from `pubkey` and equal to the carried one"
+                let recomputed = sha256_hex(decoded.as_bytes());
+                if recomputed != key_id {
+                    return Err(ReceiptError::GovernanceChainInvalid(format!(
+                        "key statement at entry index {index} carries `key.key_id` \
+                         (`{key_id}`) that does not equal `sha256:`-of-`key.pubkey` \
+                         (`{recomputed}`) (I-D §7.5.1 4b(K))"
+                    )));
+                }
+                // "`valid_from` REQUIRED and well-formed RFC 3339 (informative for ordering,
+                // but required)"
+                let valid_from =
+                    key.get("valid_from").and_then(Value::as_str).ok_or_else(|| {
+                        ReceiptError::GovernanceChainInvalid(format!(
+                            "key statement at entry index {index} carries no `key.valid_from` — \
+                         the member is REQUIRED (I-D §7.5.1 4b(K))"
+                        ))
+                    })?;
+                crate::bitemporal::parse_rfc3339("key.valid_from", valid_from).map_err(
+                    |source| {
+                        ReceiptError::GovernanceChainInvalid(format!(
+                            "key statement at entry index {index} carries `key.valid_from` \
+                             that is not well-formed RFC 3339 (I-D §7.5.1 4b(K)): {source}"
+                        ))
+                    },
+                )?;
                 // I-D §2.2: a `key` statement is not a manifest statement, so it carries a
                 // `manifest` field of its own, and that field is held to the SAME rule as the
                 // subject's copy (§7.6) — it must name the manifest version ACTIVE at THIS
@@ -1695,6 +1787,28 @@ fn read_chain<'a>(
                 )))
             }
         }
+    }
+
+    // I-D §7.1: "one element per rotation" — an element the walk never had occasion to
+    // consume is an extra, exactly as invalid as a missing one.
+    if rotation_cursor < rotation_proofs.len() {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "`governance.rotation_proofs[]` carries {} element(s) beyond the {} the chain \
+             walk actually consumed — I-D §7.1: one element per rotation, no extras",
+            rotation_proofs.len(),
+            rotation_cursor
+        )));
+    }
+    // "The member is ABSENT where the chain rotates neither set" — so a member present with
+    // no rotation ever encountered is invalid too, symmetric with the absent-but-rotated case
+    // caught inline above.
+    if rotation_proofs_member.is_some() && !saw_rotation {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "`governance.rotation_proofs` is present, but the carried chain rotates neither \
+             the log nor the witness key set — I-D §7.1 requires the member to be ABSENT in \
+             that case"
+                .to_owned(),
+        ));
     }
 
     Ok(Governance { manifests, events, manifest_by_version_id })
@@ -2175,7 +2289,7 @@ fn verify_nested(
         .ok_or_else(|| ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() })?;
 
     // --- §5 step 4 (chain structure first: key binding depends on it) ---------------
-    let governance = read_chain(receipt, policy, budget)?;
+    let governance = read_chain(receipt, policy, profile, adaptor_id, budget)?;
 
     // --- §5 step 3: checkpoint, keys, cosignatures, inclusion -----------------------
     let anchoring = verify_checkpoint(receipt, &governance, profile, adaptor_id, budget)?;
@@ -3558,7 +3672,13 @@ fn render(claim_type: &str, assurance: &Assurance) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{log_key_set, witness_key_set};
+    use super::{
+        log_key_set, verify_rotation_proof, witness_key_set, AdaptorProfile, Budget, Limits,
+        ReceiptError,
+    };
+    use crate::{
+        checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, tree_root, TestKey,
+    };
 
     /// I-D §6.2: "Each manifest version's log and witness key objects replace the prior set in
     /// full" — a SET, not a sequence, so re-listing the same key objects in a different order
@@ -3620,5 +3740,80 @@ mod tests {
         });
         assert_ne!(log_key_set(&forward), log_key_set(&genuinely_different));
         assert_ne!(witness_key_set(&forward), witness_key_set(&genuinely_different));
+    }
+
+    /// I-D §7.1: `governance.rotation_proofs[].witnesses[]` is "an array in the shape of
+    /// `anchoring.witnesses[]`" whenever PRESENT — every element held to that shape, whatever
+    /// the rotating manifest's level, even though a verifying cosignature is only REQUIRED at
+    /// L3. The full corpus's only rotation is a genuine L3 one (its manifest's `level` is
+    /// baked into signed, anchored bytes that cannot be changed to a lower level without
+    /// breaking either that hop's own signature or its own committed inclusion path before
+    /// this rule is ever reached — the same structural constraint documented on
+    /// `key_set_comparison_is_order_independent` above), so a below-L3 case can only be
+    /// exercised here, against `verify_rotation_proof` directly, with a hand-built one-off
+    /// checkpoint and a tiny two-leaf tree rather than the shared corpus.
+    #[test]
+    fn rotation_proof_witnesses_are_shape_checked_below_l3() {
+        let log_key = TestKey::from_seed_hex("log-1", &"11".repeat(32)).expect("test key");
+        let witness_key = TestKey::from_seed_hex("witness-1", &"22".repeat(32)).expect("test key");
+
+        let outgoing_manifest = json!({
+            "log": { "keys": [
+                { "key_id": log_key.key_id(), "pubkey": log_key.pubkey(), "valid_from_index": 0 },
+            ] },
+            "witnesses": [
+                { "witness_id": "witness-1", "keys": [
+                    {
+                        "key_id": witness_key.key_id(),
+                        "pubkey": witness_key.pubkey(),
+                        "valid_from_index": 0,
+                    },
+                ] },
+            ],
+        });
+        // Below L3: this level never REQUIRES a rotation-proof cosignature, but a `witnesses[]`
+        // member that IS present must still be shape-checked regardless.
+        let rotating_manifest = json!({ "level": "L1" });
+        let rotating_envelope = json!({ "payload": { "type": "manifest" }, "signatures": [] });
+
+        let leaves = vec![jcs(&rotating_envelope), jcs(&json!({ "padding": true }))];
+        let root = tree_root(&leaves);
+        let proof = inclusion_proof(&leaves, 0).expect("index within tree");
+        let inclusion_path: Vec<String> = proof.path.iter().map(hash_hex).collect();
+
+        let log_id = format!("sha256:{}", "aa".repeat(32));
+        let cp = checkpoint(&log_id, 2, &hash_hex(&root), "2026-08-16T12:00:00Z", &log_key);
+        // A SECOND `witnesses[]` entry, missing `cosigned_at` — malformed shape, present below
+        // L3 where no cosignature is required at all.
+        let element = json!({
+            "manifest_entry_index": 0,
+            "checkpoint": cp,
+            "inclusion_path": inclusion_path,
+            "witnesses": [
+                {
+                    "witness_id": "witness-1",
+                    "key_id": witness_key.key_id(),
+                    "cosignature": witness_key.sign(&cosignature_bytes(&cp, "witness-1")),
+                },
+            ],
+        });
+
+        let profile = AdaptorProfile::default();
+        let mut budget = Budget::new(Limits::default());
+        let result = verify_rotation_proof(
+            &element,
+            &rotating_envelope,
+            0,
+            &rotating_manifest,
+            &outgoing_manifest,
+            &profile,
+            "test-profile",
+            &mut budget,
+        );
+        assert!(
+            matches!(&result, Err(ReceiptError::Malformed(detail)) if detail.contains("cosigned_at")),
+            "a malformed `witnesses[]` entry must be rejected below L3 too, not merely at L3: \
+             {result:?}"
+        );
     }
 }
