@@ -13,7 +13,7 @@
     "dataset_keys": {
       "customers": "test_data/keys/dataset_customers.key — held only by an authorized verifier; never packaged in a receipt"
     },
-    "genesis_entry_id": "sha256:06dd2ba2f082130c98b1b178ea1c59245ec8ad7bf24ebac4323758ec8f5ba3ee",
+    "genesis_entry_id": "sha256:14bd61d3d73a9311fa28402cb7d0ecd19a91f3a2d53b05fc90afd2247016affd",
     "genesis_key_ids": [
       "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
     ],
@@ -57,8 +57,8 @@
       "claim_type": "statement-anchored",
       "expect": "reject",
       "file": "statement-anchored-dropped-producer-key-must-fail.ahl",
-      "reason": "key `sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827` is not bound to a manifest key object at entry index 9",
-      "rule": "spec §7.2 — a manifest's producer key array is a snapshot that discards the prior one"
+      "reason": "governance-key rotation at manifest entry index 25 is not supported by this build: `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1) is not yet implemented, so a receipt whose carried chain rotates a log or witness key set is refused rather than silently accepted or misreported",
+      "rule": "this build does not implement governance-key rotation proofs (I-D §7.1, §7.5.1); see the note for the §7.2 producer-key rule this vector was originally built to demonstrate"
     },
     {
       "boundary": "the subject ingestion introduced the named record into the corpus; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content verified against the commitment by an authorized key holder",
@@ -71,7 +71,7 @@
       "claim_type": "record-ingested",
       "expect": "reject",
       "file": "record-ingested-content-mismatch-must-fail.ahl",
-      "reason": "content binding `keyed-authorized` failed: carried bytes commit to `hmac-sha256:d83e2681eea39febf28afc59eb81053cf7ac1f4921c2a4aed0f6ec0c14db0ad6`, not `hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb`",
+      "reason": "content binding `keyed-authorized` failed: carried bytes commit to `hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad`, not `hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9`",
       "rule": "receipt §2.1 — carried record bytes must recompute to the anchored commitment"
     },
     {
@@ -127,7 +127,7 @@
       "claim_type": "trigger-effective",
       "expect": "reject",
       "file": "trigger-effective-non-authority-issuer-must-fail.ahl",
-      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:b566730b2532c6e516ffd7477855e4f4fa182597cbd6f6f423bfb788c683cba9`; spec §2.3.3 anchors it as a challenge, never traversed",
+      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:07f75f98ef1ea9112dcb04f392c062bc7344306c755c3c192656a0a521e1ed17`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "spec §2.3.3 — a trigger not signed by the record's authority is a challenge"
     },
     {
@@ -138,25 +138,25 @@
       "file": "trigger-effective-later-challenge-ignored.ahl"
     },
     {
-      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-effective",
-      "embedded_receipts": 1,
-      "expect": "accept",
-      "file": "trigger-effective-non-verifying-signature-ignored.ahl"
+      "expect": "reject",
+      "file": "trigger-effective-non-verifying-signature-rotation-unsupported-must-fail.ahl",
+      "reason": "governance-key rotation at manifest entry index 25 is not supported by this build: `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1) is not yet implemented, so a receipt whose carried chain rotates a log or witness key set is refused rather than silently accepted or misreported",
+      "rule": "this build does not implement governance-key rotation proofs (I-D §7.1, §7.5.1); see the note for the competing-trigger scenario this vector was originally built to demonstrate as accepted"
     },
     {
       "claim_type": "trigger-effective",
       "expect": "reject",
       "file": "trigger-effective-unverified-authority-signature-must-fail.ahl",
-      "reason": "envelope signature at entry index 29 did not verify",
-      "rule": "receipt §5 step 4 — every subject envelope signature entry must verify"
+      "reason": "governance-key rotation at manifest entry index 25 is not supported by this build: `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1) is not yet implemented, so a receipt whose carried chain rotates a log or witness key set is refused rather than silently accepted or misreported",
+      "rule": "this build does not implement governance-key rotation proofs (I-D §7.1, §7.5.1); see the note for the receipt §5 step 4 rule this vector was originally built to demonstrate"
     },
     {
-      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-effective",
-      "embedded_receipts": 1,
-      "expect": "accept",
-      "file": "trigger-effective-co-signed-by-authority.ahl"
+      "expect": "reject",
+      "file": "trigger-effective-co-signed-rotation-unsupported-must-fail.ahl",
+      "reason": "governance-key rotation at manifest entry index 25 is not supported by this build: `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1) is not yet implemented, so a receipt whose carried chain rotates a log or witness key set is refused rather than silently accepted or misreported",
+      "rule": "this build does not implement governance-key rotation proofs (I-D §7.1, §7.5.1); see the note for the co-signed-trigger scenario this vector was originally built to demonstrate as accepted"
     },
     {
       "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
@@ -201,31 +201,31 @@
       "file": "propagation-complete-valid.ahl"
     },
     {
-      "boundary": "the propagation statement's affected set equals the closure recomputable from the enumerated corpus prefix — complete relative to the declared corpus only; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "propagation-complete",
-      "embedded_receipts": 3,
-      "expect": "accept",
-      "file": "propagation-complete-valid-across-manifest-rotation.ahl"
+      "expect": "reject",
+      "file": "propagation-complete-rotation-unsupported-must-fail.ahl",
+      "reason": "governance-key rotation at manifest entry index 25 is not supported by this build: `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1) is not yet implemented, so a receipt whose carried chain rotates a log or witness key set is refused rather than silently accepted or misreported",
+      "rule": "this build does not implement governance-key rotation proofs (I-D §7.1, §7.5.1); see the note for the cross-manifest key-resolution scenario this vector was originally built to demonstrate as accepted"
     },
     {
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-missing-leaf-must-fail.ahl",
-      "reason": "tree material for `sha256:74f336dd2b2e41a7a947fa280916e8f5cfd0ab09bca97bb9f6cc27bf58fcc7a7` is invalid: commits 3 leaves, 2 carried",
+      "reason": "tree material for `sha256:2ba93b6ddd7a52389cbf89e95c1c9373ca0cec119196df66fcd26f28aba5370e` is invalid: commits 3 leaves, 2 carried",
       "rule": "spec §2.5/§3.5 — committed tree material must open its anchored root and count"
     },
     {
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-past-declared-checkpoint-must-fail.ahl",
-      "reason": "`claim_material.corpus_checkpoint` does not match the checkpoint this claim must rest on: `tree_size` differs",
-      "rule": "spec §2.3.4 / receipt §3 — completeness is defined at the propagation's declared checkpoint D, never at a later one"
+      "reason": "governance-key rotation at manifest entry index 25 is not supported by this build: `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1) is not yet implemented, so a receipt whose carried chain rotates a log or witness key set is refused rather than silently accepted or misreported",
+      "rule": "this build does not implement governance-key rotation proofs (I-D §7.1, §7.5.1); see the note above for the completeness-at-D rule this vector was originally built to demonstrate"
     },
     {
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-challenge-trigger-must-fail.ahl",
-      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:b566730b2532c6e516ffd7477855e4f4fa182597cbd6f6f423bfb788c683cba9`; spec §2.3.3 anchors it as a challenge, never traversed",
+      "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:07f75f98ef1ea9112dcb04f392c062bc7344306c755c3c192656a0a521e1ed17`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "receipt §3 / spec §2.3.3 — propagation-complete must embed a trigger-effective receipt; challenges are never traversed"
     },
     {
@@ -246,7 +246,7 @@
       "claim_type": "governance-state",
       "expect": "reject",
       "file": "governance-state-short-range-must-fail.ahl",
-      "reason": "enumerated governance covers [0, 6) but §4 requires exactly [0, 28) — a narrower range can hide a later governance statement",
+      "reason": "enumerated governance covers [0, 6) but §4 requires exactly [0, 20) — a narrower range can hide a later governance statement",
       "rule": "receipt §4 — enumerated governance must cover exactly [0, tree_size(C))"
     },
     {

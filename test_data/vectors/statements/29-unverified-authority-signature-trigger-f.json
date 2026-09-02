@@ -1,15 +1,15 @@
 {
-  "entry_id": "sha256:699c26515258db06332be9ff5762162ca8a4af1c5edbc67108cd0c71c550eebf",
+  "entry_id": "sha256:8b985c5afbb0daaf83110dd194d3817c7c97755b1842230740ec5a72ecd352ba",
   "entry_index": 29,
   "envelope": {
     "payload": {
-      "ahl_version": "0.3",
+      "ahl_version": "0.4",
       "dataset": "customers",
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:201480cc9cdda1f64533d755b1bc3b02922f7448a8f2befc13ac1c002d37aba7",
+      "manifest": "sha256:35f7435f758f91941631bb90bebde9e879836bec43d4f3fbfa6a2b234a61a453",
       "producer": "producer-1",
       "reason_code": "error",
-      "record": "hmac-sha256:b566730b2532c6e516ffd7477855e4f4fa182597cbd6f6f423bfb788c683cba9",
+      "record": "hmac-sha256:07f75f98ef1ea9112dcb04f392c062bc7344306c755c3c192656a0a521e1ed17",
       "scope": {
         "effective_from": "2026-08-16T12:00:00Z",
         "retroactive": true
@@ -20,7 +20,7 @@
     "signatures": [
       {
         "key_id": "sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827",
-        "sig": "base64:1C+qawhLTpRciv+Sz5SePkHHsIkln4avJZTPcmEm2/f/DIeHeETZvIS92BjaH2bqCDUBw92PoKbI5yPyktEpBA=="
+        "sig": "base64:uuLqDDk+TUAFK8V+TQMQI9Qll+EAA7jSD3/SD61bpkWYmlwIiY6sVbVIAhZ2VaECYopPL82V5yPLl8ZKo6v4Bg=="
       },
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
@@ -29,5 +29,5 @@
     ]
   },
   "note": "INTENTIONALLY NON-VERIFYING: `signatures[1].sig` (the entry naming the dataset authority's real key_id) does not verify against that key_id's real public key, even though `signatures[0]` is a genuine signature from a non-authority producer key. See trigger-effective-unverified-authority-signature-must-fail.ahl.",
-  "statement_id": "sha256:1b9096276a3df3410a5636762293252eafdd2d37809f214fc7070df28d9d830a"
+  "statement_id": "sha256:095f110d8bd061dc4716b241b89ee9a7bdae0f4e8b5668e95affcb919ab68386"
 }

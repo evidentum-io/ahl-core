@@ -1,7 +1,7 @@
 {
   "envelope": {
     "payload": {
-      "ahl_version": "0.3",
+      "ahl_version": "0.4",
       "datasets": {
         "customers": {
           "authority": {
@@ -10,12 +10,12 @@
             ],
             "producer": "producer-1"
           },
-          "canonicalization": "jcs-v1",
+          "canonicalization": "jcs",
           "commitment_mode": "keyed",
           "key_access": "authorized-verifiers-only"
         },
         "scores\u001fbad": {
-          "canonicalization": "jcs-v1",
+          "canonicalization": "jcs",
           "commitment_mode": "plain",
           "key_access": "not-applicable"
         }
@@ -82,7 +82,7 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:Ejixp0WasloxtS6HOToT1SmPQW6VtN4IG2Ni1LMm2Ow4y77tnKsk+uVVuAuUkG/x7wWV4dXmmvDNRIQZAT6WAg=="
+        "sig": "base64:LP27K1YInlHxN3d2WTbo68vFLE7udWcCpLg7ZI9dmHh+TLqiTD8kAuShB/Nofl22+beBJH9OKCep4wne64zbBA=="
       }
     ]
   },

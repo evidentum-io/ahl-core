@@ -1,6 +1,6 @@
 # ahl-core
 
-Core library and test vectors for AHL Protocol v0.3 (Anchored History Log).
+Core library and test vectors for AHL Protocol revision 0.4 (Anchored History Log).
 
 ## Documentation
 

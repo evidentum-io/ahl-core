@@ -1,24 +1,24 @@
 {
-  "entry_id": "sha256:4796f917daa2bbfe7687ee9b93b06504971d2c794a802ba481a47f6b92728f32",
+  "entry_id": "sha256:ef46572e4728a408772448c079ef90451fe0efb2f94dbc041deb9a74c19e2c0d",
   "entry_index": 21,
   "envelope": {
     "payload": {
-      "ahl_version": "0.3",
+      "ahl_version": "0.4",
       "inputs": [
         {
           "dataset": "customers",
-          "record": "hmac-sha256:b566730b2532c6e516ffd7477855e4f4fa182597cbd6f6f423bfb788c683cba9",
+          "record": "hmac-sha256:07f75f98ef1ea9112dcb04f392c062bc7344306c755c3c192656a0a521e1ed17",
           "role": "feature",
-          "statement": "sha256:14d328b346cf5ce0f4faebc47fa663dcd31c8f0c9b823b25bc1806051e8018f8"
+          "statement": "sha256:4777adf04c5e75d34381992668ba12ebcd02aba1f133181f10246be9dc505848"
         }
       ],
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:8aa7aebb081f2254732b1f3dc7cbc2555f61f9027a4ec1e578bf2a570bbdc551",
+      "manifest": "sha256:19227e22afd16e6a588810c475010b7d5da123f1baee229f11cbc9319a72b21d",
       "outputs": [
         {
           "dataset": "scores",
           "locator": "urn:ahl-test:scores/H",
-          "record": "sha256:a05363e5dcd8abbb8fb292aaf4c096cba619b82e6ada016ecd66d8c87fac0825"
+          "record": "sha256:439043623374fb4d3e193ff64e692849745bb986c18e592e3c4bb1b51026dd22"
         }
       ],
       "pipeline": "scoring-v1",
@@ -42,9 +42,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:9XsdN1KFN52QZNKVruxx169NbwBHkv0OXb6XcWRXESkH1cP4E5Cyyhr5BBRdTs/RsXDjlzlDDBtSlvw4TQObBg=="
+        "sig": "base64:KyoKB/IFRJHr7SNHjBNwzkmo1wg+YnVM0Pqc5Np5gt7nSuryuyhQYL5kYMA2sdRJh6INdhnnavlKBooyVBRkDQ=="
       }
     ]
   },
-  "statement_id": "sha256:23271d36d09f0e3cf2ebc89181af392d3ab36e3861befa1c01765fefc8050aea"
+  "statement_id": "sha256:506fcbb541c30ad04078d5ea8f7ac0082de5868cba2b222a1ca20f2bb0564169"
 }

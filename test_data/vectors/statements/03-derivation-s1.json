@@ -1,30 +1,30 @@
 {
-  "entry_id": "sha256:fdcbeb81ae8cfa9480c8f7d66b162418bc8425854a31563e4b4d5b5a2a9f77b5",
+  "entry_id": "sha256:bf93fcd3e4e35f5ada9997b6f89d39a4b330f18da7f4c4287b484f91653ed024",
   "entry_index": 3,
   "envelope": {
     "payload": {
-      "ahl_version": "0.3",
+      "ahl_version": "0.4",
       "inputs": [
         {
           "dataset": "customers",
-          "record": "hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb",
+          "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
           "role": "feature",
-          "statement": "sha256:42e871e9c0a51992ee5cdad0298f7ae31fa74f548fb085134c7594ac6577ed18"
+          "statement": "sha256:1e5ad504180468a6aa60e6d85ee2f8fa654926b6d10027f4d8f1d94f6b6fecef"
         },
         {
           "dataset": "customers",
-          "record": "hmac-sha256:d83e2681eea39febf28afc59eb81053cf7ac1f4921c2a4aed0f6ec0c14db0ad6",
+          "record": "hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad",
           "role": "reference",
-          "statement": "sha256:6d1831cd6f605f09039fbe2fa2da997951e177dbbac830e2e9913f333cf212a7"
+          "statement": "sha256:25ee160b2fc30483007b4de60121ed182d2cbac4a8abbb513afc2c15138ea6f1"
         }
       ],
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:8aa7aebb081f2254732b1f3dc7cbc2555f61f9027a4ec1e578bf2a570bbdc551",
+      "manifest": "sha256:19227e22afd16e6a588810c475010b7d5da123f1baee229f11cbc9319a72b21d",
       "outputs": [
         {
           "dataset": "scores",
           "locator": "urn:ahl-test:scores/S1",
-          "record": "sha256:d1ebb624c360db84bfc386c578bcaa02a1e6ec20b026fde46a6a946e347b992c"
+          "record": "sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3"
         }
       ],
       "pipeline": "scoring-v1",
@@ -48,9 +48,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:AmwqFkqYtKLgXkSCEe6YfKqFEmqN6QyN0Pt9GhPI5g/brFAIXOdYBunJ2DsC/S7B9yM/i48uZkGoA5WjsuMsDg=="
+        "sig": "base64:BAPJsZgkcwcD+jjdAF10E6gHf0quNpJcWQmIjrjmK8eRT4OcgtHhKZVcCbcO4SLq9qsTRncyc6uHacn8ACyXBw=="
       }
     ]
   },
-  "statement_id": "sha256:7dce22404b21569074779114bae9dde64f3c9ba1b47577553bafa17b01281c35"
+  "statement_id": "sha256:fe548ca678ec53649ed3920ea31f6fa76aafc2e6cece337abae55108cdc2188e"
 }

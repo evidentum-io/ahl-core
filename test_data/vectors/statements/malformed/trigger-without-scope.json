@@ -1,20 +1,20 @@
 {
   "envelope": {
     "payload": {
-      "ahl_version": "0.3",
+      "ahl_version": "0.4",
       "dataset": "customers",
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:8aa7aebb081f2254732b1f3dc7cbc2555f61f9027a4ec1e578bf2a570bbdc551",
+      "manifest": "sha256:19227e22afd16e6a588810c475010b7d5da123f1baee229f11cbc9319a72b21d",
       "producer": "producer-1",
       "reason_code": "consent_withdrawn",
-      "record": "hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb",
+      "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
       "type": "retraction",
       "valid_time": "2026-08-16T12:00:00Z"
     },
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:NCuwp/Rt0NZDWGE1EtcNfyl3SV9JlgZqGjNFoGhk9l3SudD9xR4qYi+UIQbQFH9/m6CKrW+vlnaTH7dAHkMOBw=="
+        "sig": "base64:JuxUWqu6yWrph1GKPsyBs2S+HBozkrEXrrZHBZ+F8Y7bZ8bj3YIfyrMxoPLtlSXwmNWGdFRONSf5GQUzT1fnDA=="
       }
     ]
   },

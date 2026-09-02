@@ -12,7 +12,11 @@
 //! asserts the expected verdict. Any mismatch aborts the run: a vector that cannot be
 //! self-verified must never reach the repository.
 //!
-//! Run with `cargo run --bin gen_vectors`.
+//! Run with `cargo run --bin gen_vectors`, or `cargo run --bin gen_vectors -- <output dir>` to
+//! write elsewhere — the latter is what proves determinism in CI (see
+//! `tests/vectors.rs::the_generator_is_deterministic_across_runs`), by writing to two fresh
+//! temporary directories and asserting they are byte-identical to each other and to the
+//! committed `test_data/`, rather than relying on this doc comment's claim alone.
 
 #![forbid(unsafe_code)]
 
@@ -26,7 +30,9 @@ use std::path::PathBuf;
 use corpus::Corpus;
 
 fn main() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
+    let root = std::env::args_os()
+        .nth(1)
+        .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data"), PathBuf::from);
     scenario::write_corpus_readme(&root);
     let keys = scenario::write_and_load_keys(&root);
     let dataset_key = scenario::load_dataset_key(&root);

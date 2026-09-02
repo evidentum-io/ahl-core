@@ -1,75 +1,75 @@
 {
   "affected_count": 4,
-  "affected_root": "sha256:703bd1a15a2b3f2392d724ecfeb433f70d9b1df2109ce69d4f6a92650a8f52ce",
+  "affected_root": "sha256:e06631de149ebd96bd897150c3c430179b17d813ca953903f4f242a4d9b3abec",
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:5e9cf0541692e2d46da59b8e94054529b47d774d2cefa1476220fd94d4ae8023",
+    "root_hash": "sha256:c90f7e4b57885d18e9d592e1b327c25c0d140588cf6c4c0711c57eb5668a8838",
     "tree_size": 28
   },
   "description": "Revocation closure `descendant-enlargement-past-declared-checkpoint` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",
-      "record": "sha256:2d390bdfb80cffc0617a4584457e00b7e229ef8145e6dc04043e2e2202acd364"
+      "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
     },
     {
       "dataset": "scores",
-      "record": "sha256:30a74eb6e84e2beddf1638664110dd93fb14c6e3c31a7efe8903da1ecd19edde"
+      "record": "sha256:2c102716d7a75211dec6c0054ce19e8f6336432ceb6652f432aeb1e7e5e418b1"
     },
     {
       "dataset": "scores",
-      "record": "sha256:59c3fc2fe55c44d4d5589d3a0fcdab52918723c73a891965ae3ce985eae17c85"
+      "record": "sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3"
     },
     {
       "dataset": "scores",
-      "record": "sha256:7ba7ce34502fc161cd10b90c39fbe6839393a711f257d36b97626a436669bfec"
+      "record": "sha256:a4d63cf8838a3ca209af1ae4bab6ba7f286b5c684c94b3890a7178996607ace6"
     },
     {
       "dataset": "scores",
-      "record": "sha256:d1ebb624c360db84bfc386c578bcaa02a1e6ec20b026fde46a6a946e347b992c"
+      "record": "sha256:d88442604d94989f8498f673e44a64198d1f19b64892539337cfc0b33be6717f"
     }
   ],
   "expected_dispositions": [
     {
       "dataset": "scores",
       "disposition": "invalidated",
-      "record": "sha256:2d390bdfb80cffc0617a4584457e00b7e229ef8145e6dc04043e2e2202acd364"
+      "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
+    },
+    {
+      "dataset": "scores",
+      "disposition": "recomputed",
+      "record": "sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3",
+      "successor_statement": "sha256:f1e47212755351f7e9b4b747d2a58573c15b6a001a19322daa723262109fa596"
     },
     {
       "assessment": "sha256:81af6cfe105fb10380549c7290b09c7910c90cd3e860777ab7bbccc5b91be396",
       "dataset": "scores",
       "disposition": "assessed_unaffected",
-      "record": "sha256:30a74eb6e84e2beddf1638664110dd93fb14c6e3c31a7efe8903da1ecd19edde"
+      "record": "sha256:a4d63cf8838a3ca209af1ae4bab6ba7f286b5c684c94b3890a7178996607ace6"
     },
     {
       "dataset": "scores",
       "disposition": "invalidated",
-      "record": "sha256:59c3fc2fe55c44d4d5589d3a0fcdab52918723c73a891965ae3ce985eae17c85"
-    },
-    {
-      "dataset": "scores",
-      "disposition": "recomputed",
-      "record": "sha256:d1ebb624c360db84bfc386c578bcaa02a1e6ec20b026fde46a6a946e347b992c",
-      "successor_statement": "sha256:d0b90d4c0c7334800594e1619eb73f185ab55fc5abeeb779cd1f603fe708f1dc"
+      "record": "sha256:d88442604d94989f8498f673e44a64198d1f19b64892539337cfc0b33be6717f"
     }
   ],
   "expected_seeds": [
     {
       "dataset": "customers",
-      "record": "hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb"
+      "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9"
     }
   ],
-  "note": "The SAME trigger as `toy-corpus`, recomputed at a much later checkpoint. At the propagation's declared checkpoint D (tree size 8) the affected set is four records; here it is five, because the derivation at entry 27 consumed S2 — an already-affected descendant — and produced Z (sha256:7ba7ce34502fc161cd10b90c39fbe6839393a711f257d36b97626a436669bfec). Core spec §2.3.2 bars re-consuming the triggered record A itself, but says nothing about its descendants, so entry 27 is perfectly legal. Closure is therefore NOT stable across checkpoints, and §2.3.4 defines completeness at D only: the propagation at entry 8 remains complete at D, and the enlargement creates a fresh propagation duty (§5.2) rather than retroactively invalidating it. A `propagation-complete` receipt grounded at any checkpoint later than D would be claiming something the producer never asserted and cannot support.",
+  "note": "The SAME trigger as `toy-corpus`, recomputed at a much later checkpoint. At the propagation's declared checkpoint D (tree size 8) the affected set is four records; here it is five, because the derivation at entry 27 consumed S2 — an already-affected descendant — and produced Z (sha256:2c102716d7a75211dec6c0054ce19e8f6336432ceb6652f432aeb1e7e5e418b1). Core spec §2.3.2 bars re-consuming the triggered record A itself, but says nothing about its descendants, so entry 27 is perfectly legal. Closure is therefore NOT stable across checkpoints, and §2.3.4 defines completeness at D only: the propagation at entry 8 remains complete at D, and the enlargement creates a fresh propagation duty (§5.2) rather than retroactively invalidating it. A `propagation-complete` receipt grounded at any checkpoint later than D would be claiming something the producer never asserted and cannot support.",
   "trigger": {
     "dataset": "customers",
     "entry_index": 6,
-    "record": "hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb",
-    "replacement": "hmac-sha256:51a4718e28a2283b75772e206c83992cdd32e91533566e8738d628e048cb2bfa",
+    "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
+    "replacement": "hmac-sha256:b3b4a463cabcc1fa963aa793097fb67ef3de110c1920539df7ba52ca68c597c7",
     "scope": {
       "effective_from": "2026-08-16T12:00:00Z",
       "retroactive": true
     },
-    "statement_id": "sha256:a148209a9fe7557f9a4ddb8dd68dde1c886514443aea62fb256755c84099f1ec",
+    "statement_id": "sha256:2f62560f534eb3d703304cc220aefea2f67143f680661caabbf9e1a702d93ed8",
     "type": "correction"
   }
 }

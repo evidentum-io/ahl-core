@@ -9,15 +9,15 @@
       "dataset": "scores",
       "inputs": {
         "input_set_count": 3,
-        "input_set_root": "sha256:e91ccc8d43d3cdb51a1c0b8bc9fd9f9eee2c8fca5c3982cf106feb4954c74ce1"
+        "input_set_root": "sha256:0c66a158121c72fd67509cb1f1745be64c0ed66f154842e49e2e86405d9c252c"
       },
-      "record": "sha256:6eca0a91a1a12e242da88ce414753edb6a6ae42a94fb588df1d2b2446638db33"
+      "record": "sha256:1350e3dc89dd6823ed3ff1a9c169e7687d1cea3f63076f5b2e055c1097506df2"
     },
     "leaf_index": 0,
     "path": [
-      "sha256:016b2451c6e82f65b89b1eaed6dad3106767d80e37fe2f563f5757392a26f864"
+      "sha256:253bae1b50ba8416c2f4bff1a8d303c81d1ba4c28e2a95a5f95a21a23ddaef74"
     ],
-    "root": "sha256:8cb67eea6979c08d3d8bacf4204ee6fc20e93fb383ac11d2138fae1673ac2ba9",
+    "root": "sha256:98765ef84983eb0cf65f60a81cb5046d867674a75938289581877e887eb96a8f",
     "tree_size": 2
   },
   "leaf_format": "ahl-leaf-v2",
@@ -27,21 +27,21 @@
       "dataset": "scores",
       "inputs": {
         "input_set_count": 3,
-        "input_set_root": "sha256:e91ccc8d43d3cdb51a1c0b8bc9fd9f9eee2c8fca5c3982cf106feb4954c74ce1"
+        "input_set_root": "sha256:0c66a158121c72fd67509cb1f1745be64c0ed66f154842e49e2e86405d9c252c"
       },
-      "record": "sha256:6eca0a91a1a12e242da88ce414753edb6a6ae42a94fb588df1d2b2446638db33"
+      "record": "sha256:1350e3dc89dd6823ed3ff1a9c169e7687d1cea3f63076f5b2e055c1097506df2"
     },
     {
       "dataset": "scores",
       "inputs": {
         "input_set_count": 3,
-        "input_set_root": "sha256:e91ccc8d43d3cdb51a1c0b8bc9fd9f9eee2c8fca5c3982cf106feb4954c74ce1"
+        "input_set_root": "sha256:0c66a158121c72fd67509cb1f1745be64c0ed66f154842e49e2e86405d9c252c"
       },
-      "record": "sha256:84833533ff0214718100ec170289a6efe1194dd40f5f2618865d10061015550d"
+      "record": "sha256:c6270655a635b5132fe72ea5c7903c3f990da09cdc51997e4fb59b804840d9da"
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",
   "outputs_count": 2,
-  "outputs_root": "sha256:8cb67eea6979c08d3d8bacf4204ee6fc20e93fb383ac11d2138fae1673ac2ba9",
+  "outputs_root": "sha256:98765ef84983eb0cf65f60a81cb5046d867674a75938289581877e887eb96a8f",
   "sort_rule": "leaves sorted ascending by the UTF-8 bytes of the canonical `record` commitment string; non-canonical strings and duplicates are rejected (core spec §2.5)"
 }

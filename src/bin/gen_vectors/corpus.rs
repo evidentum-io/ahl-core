@@ -120,10 +120,14 @@ pub struct Records {
     pub c_f: String,
     pub h: String,
     pub z: String,
-    /// Canonical bytes of record A, carried by the `record-ingested` receipt.
-    pub c_a_bytes: Vec<u8>,
     /// Canonical bytes of record B — the wrong bytes for the negative receipt.
     pub c_b_bytes: Vec<u8>,
+    /// Record A's content, encoded AS RECEIVED — non-canonical key order and insignificant
+    /// whitespace JCS strips — carried by `record-ingested-valid.ahl` (I-D §2.6/§7.2: the
+    /// verifier canonicalizes the record as received before recomputing the commitment; this is
+    /// what proves it actually does, rather than merely accepting already-canonical bytes and
+    /// looking like it canonicalizes).
+    pub c_a_bytes_as_received: Vec<u8>,
 }
 
 pub struct Corpus {
@@ -1891,11 +1895,11 @@ fn closure_cases(r: &Records) -> Vec<ClosureCase> {
 impl Records {
     fn build(dataset_key: &[u8]) -> Self {
         // I-D §2.6: the descriptor digest `ddig` is part of every commitment preimage. Both
-        // corpus datasets declare the identical descriptor (`{"canonicalization":
-        // "jcs-v1"}`, no `media_type` — `jcs-v1` does not require one, see the manifest's
-        // `datasets` block in `scenario::manifest`), so `ddig` is the same value for both; the
-        // two datasets still commit to disjoint preimages, because domain separation by `dsid`
-        // holds unconditionally, independent of whether `ddig` also differs (I-D §2.6).
+        // corpus datasets declare the identical descriptor (`{"canonicalization": "jcs"}`, no
+        // `media_type` — `jcs` does not require one, see the manifest's `datasets` block in
+        // `scenario::manifest`), so `ddig` is the same value for both; the two datasets still
+        // commit to disjoint preimages, because domain separation by `dsid` holds
+        // unconditionally, independent of whether `ddig` also differs (I-D §2.6).
         let ddig = CanonicalizationDescriptor::new(CANONICALIZATION, None)
             .expect("committed canonicalization identifier is syntactically valid")
             .ddig();
@@ -1932,8 +1936,14 @@ impl Records {
             c_f: keyed(&json!({ "customer_id": "C-5005", "country": "PT", "segment": "retail" })),
             h: plain(&json!({ "customer_id": "C-5005", "model": "risk-v4.2", "score": 421 })),
             z: plain(&json!({ "customer_id": "C-1001", "metric": "rollup", "value_bp": 4200 })),
-            c_a_bytes: jcs(&a),
             c_b_bytes: jcs(&b),
+            // Same value as `a` above (I-D §2.6 "canonicalization equality is syntactic, not
+            // semantic"), deliberately serialized in non-canonical key order with insignificant
+            // whitespace: JCS (RFC 8785) sorts object members and admits no whitespace between
+            // tokens, so `jcs()` of this text equals `jcs(&a)` exactly, and the record
+            // commitment `c_a` — computed from `jcs(&a)` above — is unchanged.
+            c_a_bytes_as_received:
+                br#"{"customer_id": "C-1001", "country": "DE", "segment": "retail"}"#.to_vec(),
         }
     }
 }

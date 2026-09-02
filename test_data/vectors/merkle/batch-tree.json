@@ -10,19 +10,19 @@
       "inputs": [
         {
           "dataset": "customers",
-          "record": "hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb",
+          "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
           "role": "feature",
-          "statement": "sha256:42e871e9c0a51992ee5cdad0298f7ae31fa74f548fb085134c7594ac6577ed18"
+          "statement": "sha256:1e5ad504180468a6aa60e6d85ee2f8fa654926b6d10027f4d8f1d94f6b6fecef"
         }
       ],
-      "record": "sha256:2d390bdfb80cffc0617a4584457e00b7e229ef8145e6dc04043e2e2202acd364"
+      "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
     },
     "leaf_index": 0,
     "path": [
-      "sha256:7765023623222d9d8f09a81d4b2a711e98dbe908a4022069e75ee88985c710eb",
-      "sha256:9b4b8c47ef32028cd41175d058a94f6b8010fbbf510512ed44b8e19e20130bc6"
+      "sha256:b88ba64d506eeb65e26d06a2a7efe78f0e8e3257db6c4932dd186673b33e8b62",
+      "sha256:7980c6b7d36b1aa8a3480dc0e4c38c2b9fde03ea81472c698a4cf0a276d27565"
     ],
-    "root": "sha256:74f336dd2b2e41a7a947fa280916e8f5cfd0ab09bca97bb9f6cc27bf58fcc7a7",
+    "root": "sha256:2ba93b6ddd7a52389cbf89e95c1c9373ca0cec119196df66fcd26f28aba5370e",
     "tree_size": 3
   },
   "leaf_format": "ahl-leaf-v2",
@@ -33,40 +33,40 @@
       "inputs": [
         {
           "dataset": "customers",
-          "record": "hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb",
+          "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
           "role": "feature",
-          "statement": "sha256:42e871e9c0a51992ee5cdad0298f7ae31fa74f548fb085134c7594ac6577ed18"
+          "statement": "sha256:1e5ad504180468a6aa60e6d85ee2f8fa654926b6d10027f4d8f1d94f6b6fecef"
         }
       ],
-      "record": "sha256:2d390bdfb80cffc0617a4584457e00b7e229ef8145e6dc04043e2e2202acd364"
+      "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
     },
     {
       "dataset": "scores",
       "inputs": [
         {
           "dataset": "customers",
-          "record": "hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb",
+          "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
           "role": "feature",
-          "statement": "sha256:42e871e9c0a51992ee5cdad0298f7ae31fa74f548fb085134c7594ac6577ed18"
+          "statement": "sha256:1e5ad504180468a6aa60e6d85ee2f8fa654926b6d10027f4d8f1d94f6b6fecef"
         }
       ],
-      "record": "sha256:30a74eb6e84e2beddf1638664110dd93fb14c6e3c31a7efe8903da1ecd19edde"
+      "record": "sha256:a4d63cf8838a3ca209af1ae4bab6ba7f286b5c684c94b3890a7178996607ace6"
     },
     {
       "dataset": "scores",
       "inputs": [
         {
           "dataset": "customers",
-          "record": "hmac-sha256:22ab978abf431a50b57a5643d9e459130f8324a24f96e7f96d944e1db3503fcb",
+          "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
           "role": "feature",
-          "statement": "sha256:42e871e9c0a51992ee5cdad0298f7ae31fa74f548fb085134c7594ac6577ed18"
+          "statement": "sha256:1e5ad504180468a6aa60e6d85ee2f8fa654926b6d10027f4d8f1d94f6b6fecef"
         }
       ],
-      "record": "sha256:59c3fc2fe55c44d4d5589d3a0fcdab52918723c73a891965ae3ce985eae17c85"
+      "record": "sha256:d88442604d94989f8498f673e44a64198d1f19b64892539337cfc0b33be6717f"
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",
   "outputs_count": 3,
-  "outputs_root": "sha256:74f336dd2b2e41a7a947fa280916e8f5cfd0ab09bca97bb9f6cc27bf58fcc7a7",
+  "outputs_root": "sha256:2ba93b6ddd7a52389cbf89e95c1c9373ca0cec119196df66fcd26f28aba5370e",
   "sort_rule": "leaves sorted ascending by the UTF-8 bytes of the canonical `record` commitment string; non-canonical strings and duplicates are rejected (core spec §2.5)"
 }

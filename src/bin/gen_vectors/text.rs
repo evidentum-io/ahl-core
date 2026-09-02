@@ -30,16 +30,61 @@ files from its own constants, so editing them by hand has no lasting effect.
 ";
 
 /// `test_data/README.md` — how the corpus is produced and re-checked.
-pub const CORPUS_README: &str = r"# AHL test-vector corpus
+pub const CORPUS_README: &str = r#"# AHL test-vector corpus
 
 The canonical conformance corpus for the AHL Protocol, generated from committed constants and
 re-verified from disk on every test run. Everything here is derived; nothing is hand-edited.
 
 Normative sources: **AHL Core Specification** v0.3-draft (statements, tree rules, conformance
-levels, corpus manifest), the **AHL Internet-Draft** draft-zatona-ahl-00 revision 0.4 §2.6 and
-§6.3 (record identity, canonicalization descriptors, commitment modes, and canonicalization
-identifier conformance) and the **AHL Evidence Receipt (`.ahl`) container format** 1-draft r3
-(claim registry, assurance semantics, cross-field rules, resource limits).
+levels, corpus manifest) for the pieces revision 0.4 has not restated, and the **AHL
+Internet-Draft** draft-zatona-ahl-00 revision 0.4 for everything it does cover — §2.2 (the
+`ahl_version`/`ahl_receipt_version`/`spec_version` clean break), §2.6 and §6.3 (canonicalization
+descriptors, commitment modes, canonicalization identifier conformance) and, since revision 0.4
+folded the receipt container into the core document, its own §7 (claim registry, assurance
+semantics, cross-field rules, resource limits, the governance-key rotation rule of §7.1/§7.5.1).
+Revision 0.4 verifies no material issued under any earlier revision (I-D §2.2, §7.1); this crate
+implements it as a clean break, not a superset.
+
+## Not yet implemented from revision 0.4
+
+This crate's `verify_receipt` does not yet implement every rule revision 0.4 states, and refuses
+rather than silently mis-verifying wherever the gap could otherwise be mistaken for a pass:
+
+*   **`governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1).** A manifest whose log
+    checkpoint-signing key objects or whose witness key objects differ from its predecessor's is
+    a GOVERNANCE-KEY ROTATION, and the I-D requires a rotation-anchoring proof under the
+    outgoing key state. This crate cannot check such a proof — present, absent, or malformed —
+    so ANY receipt whose carried governance chain rotates either key set is refused outright
+    under `ReceiptError::GovernanceKeyRotationUnsupported`, never silently accepted and never
+    reported as a definite schema defect it has not actually established. The corpus's own
+    manifest version 2 (entry 25) rotates the witness key set, so no vector in this corpus can
+    positively exercise material anchored under it: `governance-state-valid.ahl` and
+    `governance-state-short-range-must-fail.ahl` were rewritten to stay inside the genesis
+    manifest's era instead, and
+    `propagation-complete-rotation-unsupported-must-fail.ahl`,
+    `trigger-effective-co-signed-rotation-unsupported-must-fail.ahl` and
+    `trigger-effective-non-verifying-signature-rotation-unsupported-must-fail.ahl` are vectors
+    that used to be POSITIVE and now demonstrate the refusal instead — along with three existing
+    negative vectors (`statement-anchored-dropped-producer-key-must-fail.ahl`,
+    `trigger-effective-unverified-authority-signature-must-fail.ahl`,
+    `propagation-complete-past-declared-checkpoint-must-fail.ahl`) whose ORIGINAL rule is now
+    shadowed by this earlier-firing refusal. Each names both rules in its generator source
+    comment and its `note`.
+*   **The full three-valued verification-result model (I-D §7.7: `valid` / `invalid` /
+    `unverifiable`).** `verify_receipt` remains the binary `Result<Verdict, ReceiptError>` it
+    always was. A handful of `ReceiptError` variants represent the I-D's `unverifiable` outcome
+    rather than `invalid` — `UnsupportedVersion` (I-D §7.1 "Revision and rule selection"),
+    `CanonicalizationUnsupported` (I-D §6.3), and `GovernanceKeyRotationUnsupported` above — and
+    each says so on its own doc comment, but a caller that needs to DISTINGUISH `invalid` from
+    `unverifiable` must match on the specific variant; there is no separate return type or
+    finding enum carrying that distinction structurally.
+*   **Canonicalization procedures beyond `jcs` and `exact-bytes` (I-D §2.6).** These are the
+    only two the I-D itself defines, and the only two this crate implements. A dataset declaring
+    any other `canonicalization` identifier — a registered one this crate has not implemented,
+    or a private-use `x-` one — makes that dataset's content-binding finding `unverifiable`
+    (`ReceiptError::CanonicalizationUnsupported`), never `invalid` and never rehabilitated to
+    `content_binding: "none"`, exactly as I-D §6.3's conformance table requires. No vector in
+    this corpus currently exercises an unimplemented identifier end to end.
 
 ## Layout
 
@@ -162,10 +207,12 @@ recompute every `keyed` commitment in the corpus. They exist so the vectors are 
 
 ## Status
 
-Working draft, tracking spec v0.3-draft and receipt format 1-draft r3. Both are drafts, so the
-corpus is expected to change with them; the intended stable contract is the *shape* of the
-corpus, not yet its digests.
-";
+Working draft, tracking AHL Internet-Draft draft-zatona-ahl-00 revision 0.4 (which now defines
+both the core protocol and, in its own §7, the Evidence Receipt container) for everything it
+covers, and spec v0.3-draft for the rest. All are drafts, so the corpus is expected to change
+with them; the intended stable contract is the *shape* of the corpus, not yet its digests. See
+"Not yet implemented from revision 0.4" above for what `verify_receipt` does not yet check.
+"#;
 
 /// `test_data/adaptor/ahl-test-log-v1.md` — the content-addressed adaptor profile.
 pub const ADAPTOR_DOC: &str = r#"# Adaptor profile `ahl-test-log-v1`

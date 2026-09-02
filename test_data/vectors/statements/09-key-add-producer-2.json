@@ -1,17 +1,17 @@
 {
-  "entry_id": "sha256:906666d15974f0d383d7fe828f1ecdf4a0c4b7c41df7f674c9a61f09fc9f257e",
+  "entry_id": "sha256:2775e207bacd1f365836639cec2ead8f33ffc4cc85c1826f13877661a8d3280a",
   "entry_index": 9,
   "envelope": {
     "payload": {
       "action": "add",
-      "ahl_version": "0.3",
+      "ahl_version": "0.4",
       "issued_at": "2026-08-16T12:00:00Z",
       "key": {
         "key_id": "sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827",
         "pubkey": "base64:gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=",
         "valid_from": "2026-08-16T12:00:00Z"
       },
-      "manifest": "sha256:8aa7aebb081f2254732b1f3dc7cbc2555f61f9027a4ec1e578bf2a570bbdc551",
+      "manifest": "sha256:19227e22afd16e6a588810c475010b7d5da123f1baee229f11cbc9319a72b21d",
       "producer": "producer-1",
       "type": "key",
       "valid_time": "2026-08-16T12:00:00Z"
@@ -19,9 +19,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:gNNPlQmRQFW6yazLAcqcKB8UF/Gn2JwBz1YKzmpaKQfzyrJ3WIHclR1068kJ3zRP3a8AqpxgK98pwqfMqVK3Aw=="
+        "sig": "base64:xbnBSXt/Mhgt/o/d3UlVk/NaM6w8xrOYCwtWLpZdstRDzQdYrqadeBIubynLuuWrER+ilTmc8pLSBW14nsP3Ag=="
       }
     ]
   },
-  "statement_id": "sha256:86033d7d1d38951bbd1da954d63e21bb3b0126ff37f2ab656e0965e2bb8a1359"
+  "statement_id": "sha256:6b0529e8ac90e39ce85c0c67261433188d4e521bf57823ea5049c2842834bee7"
 }

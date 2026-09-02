@@ -1,9 +1,9 @@
 {
-  "entry_id": "sha256:03c518e59ecb53c615d9f63acdcf93e7739e0272a423f41a2c4a27fab1e95136",
+  "entry_id": "sha256:bf88181f8d038dafc028f5849c1535f9c399ecb4ca8e306abad1730bea3777e1",
   "entry_index": 25,
   "envelope": {
     "payload": {
-      "ahl_version": "0.3",
+      "ahl_version": "0.4",
       "datasets": {
         "customers": {
           "authority": {
@@ -12,12 +12,12 @@
             ],
             "producer": "producer-1"
           },
-          "canonicalization": "jcs-v1",
+          "canonicalization": "jcs",
           "commitment_mode": "keyed",
           "key_access": "authorized-verifiers-only"
         },
         "scores": {
-          "canonicalization": "jcs-v1",
+          "canonicalization": "jcs",
           "commitment_mode": "plain",
           "key_access": "not-applicable"
         }
@@ -55,7 +55,7 @@
           "scoring-v1"
         ]
       },
-      "predecessor": "sha256:06dd2ba2f082130c98b1b178ea1c59245ec8ad7bf24ebac4323758ec8f5ba3ee",
+      "predecessor": "sha256:14bd61d3d73a9311fa28402cb7d0ecd19a91f3a2d53b05fc90afd2247016affd",
       "producer": "producer-1",
       "properties": {
         "reproducible_reconstruction": false
@@ -85,9 +85,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:ZE+z890aVWIsnJuD4Qbtbsh7xIqSF0N24RZULUAP9GXJG4TXHe8D1vzlEHYrVZGOVHhOXExgaDOsk3/x/Tj7BA=="
+        "sig": "base64:jKtddEaJND7mpL3vlzEGsRXGNkT3jG+JKFvBmTPJqgldAhci96MwjNIJVu7RgR1W042gATWfXs5AoKYyqWWuAA=="
       }
     ]
   },
-  "statement_id": "sha256:201480cc9cdda1f64533d755b1bc3b02922f7448a8f2befc13ac1c002d37aba7"
+  "statement_id": "sha256:35f7435f758f91941631bb90bebde9e879836bec43d4f3fbfa6a2b234a61a453"
 }

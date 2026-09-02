@@ -10,8 +10,8 @@
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:09801c7e17b0289d5cd70c9c3b89ec5dd4fb71938efece5b7761a4a735a0b646",
-        "signature": "base64:mLpHkV4Wo2Lh63Alrs42n98z7/DqA79vBiudVDWztZBhzRu9hTTph39AVWMzoK8Dt5TUzm9ZpkViPmYz82FoAg==",
+        "root_hash": "sha256:be6f1056fe68c22d8e4c2b61b4dd079a493420b97f239104539fedf252ebb36c",
+        "signature": "base64:2av16jPjST3W2B/GN2icJQWHJejU+4cfYGF18i4yYTWrIetNGmcPod/GXgC0BVZb6GFr1ZPE/OYOg1J1LVPtAA==",
         "tree_size": 8
       },
       "name": "cp8"
@@ -22,8 +22,8 @@
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:544c1e91c3a55dd18a9b60b587f2af7ecb1c15f3ced5f688328268963f8732a5",
-        "signature": "base64:B1mWdSrlRRbJziv+HyWMoNO4/RHfRYQagZYQpc0adjhDZWi5qoHuk01WzLz2a3HqAFzt99zb7QDa+NstMjvdBQ==",
+        "root_hash": "sha256:dbecb6d62584fdb1efeded218038f72480ab27b3a38147219ccdd1da9a435a24",
+        "signature": "base64:ilCMaQ37QtWETQ9hi82UAhgw5WpascnZX4KuyGxUEtbM0r7GBK4WynuhMNsS+t8kbhff1x0bJK3Fpua7x/6xAg==",
         "tree_size": 13
       },
       "name": "cp13"
@@ -34,8 +34,8 @@
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:f87a506e1ff1492023fc19e61f5032c8a465d8c2b90dd301c572286d5e578388",
-        "signature": "base64:c+lkhBo82x27by48kDK4oNqW+uqsMNjI3GDcH9HhEMjW6C/CtZ058d4eePq94T0YgjK5RYEmFPQ4nm2ihjm3Aw==",
+        "root_hash": "sha256:e02a7cd3e419b28a98d8095788df9681fde515cd65c5d6486d167d364e40f9d0",
+        "signature": "base64:9FhaQNYAW+eQ0i96QSQUqP9oRvpTnE8+ciw7DYum5IRxCEPgOfMnLTzXbqEshN6DjGHy0RQpr1pfEJVhn0FlCw==",
         "tree_size": 20
       },
       "name": "cp20"
@@ -46,8 +46,8 @@
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:a03f9ef6c2af06dfb9ddf0a8694191e33f9b35e67c5657a57f60dadaa4823616",
-        "signature": "base64:UVtAmKDjC9ISvNFflH2vJX1ijATymHjqfUEhXsvvF+JJpXLOFnLiqZq8uKU73FavJunrv0E2uDuGiBIPlgmoCA==",
+        "root_hash": "sha256:bfb04a41de7d367587a44d81b78daf3c13f7b7962764d69e8ff95c35cf72e9e6",
+        "signature": "base64:zW3y5B0/1kcSP925ukwWtPqEYQv+GL7csqxdk76F2dkfgk2rhGIxyf4DamMK1PNFdoHgBtR0vOY5+rn0aYjTAw==",
         "tree_size": 24
       },
       "name": "cp24"
@@ -58,8 +58,8 @@
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:a0ba35bfca6e04621d16a4cf2037397ac386fd82644588ba9881eccb2ef85831",
-        "signature": "base64:I1zk96LlqRITv9oXkZyt55kt/YNCTXvVvdg+G/HcbgTQfissVX6XIoXUL/6MIQAObtgOJIgyYn2NWi3zikGfDA==",
+        "root_hash": "sha256:70b197a10d49c4efe76db04226f8bd377ffb215956797e267e6fe77737b05748",
+        "signature": "base64:lOdD2ggV3Utd9cEcgJEjCbpmH/cZVkqo7UM6RhxoFjbdyqmQO2d9ewc6yzzMp4nxzaRq4iuPKtajlrBoefzrBA==",
         "tree_size": 25
       },
       "name": "cp25"
@@ -70,8 +70,8 @@
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:5e9cf0541692e2d46da59b8e94054529b47d774d2cefa1476220fd94d4ae8023",
-        "signature": "base64:hu0HLCFfeT+2BesrhmkpGgBHnUZxWLSqG6crjHnIZK7wzWbXIZQzb+Mgmi1VqqnEqfrVO2jtjv6JpQkq7IB5AQ==",
+        "root_hash": "sha256:c90f7e4b57885d18e9d592e1b327c25c0d140588cf6c4c0711c57eb5668a8838",
+        "signature": "base64:fg5NnmjqrTPsRn5J1whKPT83vIr98SPquBHAJR8yzkR4ELEfjxTB1jb6TPbnXR+OUy+GrqliAu9LFisnCbNcBw==",
         "tree_size": 28
       },
       "name": "cp28"
@@ -82,8 +82,8 @@
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:8bd2932b5c82f61ad9717e62c359e26f104ae14c070d63fc949a97c642a5609b",
-        "signature": "base64:qLC9S0MElZZ0mauhXhfyoLHVmK00/ouzVhiK9z6ftAK7MSQP82jbz5YNF9IG0+TS6Uzi8pWUuFaEDIas24mUAw==",
+        "root_hash": "sha256:976d2cf47da0ea48b47704568317d4e0718bae6445a487c20b843d1554cd93e5",
+        "signature": "base64:nQcL7bmPYEg5Equ9HSoipjlnb8qGNkGhUUZe1hJ1n8CDhsx5wgio3FCaD0euxI6MktjpfgtKhFkIOBUcl4+BAA==",
         "tree_size": 29
       },
       "name": "cp29"
@@ -94,8 +94,8 @@
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:d545c0c4b0c6b8726c6924501527cf42e4668818fccb86e51fc02e2c36bc6497",
-        "signature": "base64:o/ruso00QI5Zq2Do0i278jiw4ND3E8G3Y3KZC/YU9yr0zBdtbRiYzQXaFWj/i7otuBSXk5YZJKMvikhqAdaeDg==",
+        "root_hash": "sha256:00199de6b7984b02932877ff34ff90fda68cf6271384f67953b926dcb5efedf2",
+        "signature": "base64:SP3PLcP3iCrBTfF4NgAMqWDfYhkj66KCcY3KNRbHp/WK7gEsZrWhZmdywegyQI+Y2QUNI7avocqx5Cv9zzVJBQ==",
         "tree_size": 30
       },
       "name": "cp30"
@@ -106,8 +106,8 @@
         "checkpoint_time": "2026-08-16T12:00:00Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-        "root_hash": "sha256:0bd098ccb88d39d4e2a67b4e7c04ce99b88fe278d5fe520804c7689c7a4026fc",
-        "signature": "base64:W0cDLjemelQ8QBS07TqwG1a0vgnR0jezwWQh0HLRIeEvHxAzk2M5UZ3D/ayWlPL9Wwsy1RplhwK3kxRD5lBOBQ==",
+        "root_hash": "sha256:1d9f4634f92a49dc669d5de4723dcd5b2567fe139827db0cf203aa9cd59a32f6",
+        "signature": "base64:m7iIdj74zbdN0amzHg2CEI/2+EBT9Numu+b4HAxSG2Vb+Pzt1BLu3U0w8K7XihHnxp++y3ziT2Ev5rzHxpfWCg==",
         "tree_size": 32
       },
       "name": "cp32"
@@ -116,7 +116,7 @@
   "cosignatures": [
     {
       "checkpoint": "cp8",
-      "cosignature": "base64:hitOoF58p+/uBmNnsYci8/5lg3abed43qc/51DsGQaYN4Is8PQe+c6VaGVtjihm4MHIa57cjf2y4uZepYBa6Dg==",
+      "cosignature": "base64:cGZO4DXQBJTZOwnojmVJnKZMpMM7+6CZoWg/foiYXhP13EVKh8MRwHNyZVY0HNz9QyyLHG92H4dC5BVurgzsDg==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
       "signed_over": "JCS({\"checkpoint\": <signed cp8>, \"witness_id\": \"witness-1\"})",
@@ -124,7 +124,7 @@
     },
     {
       "checkpoint": "cp13",
-      "cosignature": "base64:q8SHi0PzCJM5VPNSGChUq/E+o+ECPluwOdAmdfOnoI90MdpaBNWcTGKbNyIhx7Y8ZKjhQoCgjxFbF4RvzA+OAw==",
+      "cosignature": "base64:wIaUbtJpBh248qqgnaZ+XM4H2gQUHamZ3Li3A8tl90qQ/p+vhfe9Tr3X2TaLVcwq3h+EHQAQra2xwRqoQlopAA==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
       "signed_over": "JCS({\"checkpoint\": <signed cp13>, \"witness_id\": \"witness-1\"})",
@@ -132,7 +132,7 @@
     },
     {
       "checkpoint": "cp20",
-      "cosignature": "base64:f6BOa9fBpOB4TChQhBfEEPb0N+p5oDjbOZlmMrLdVhWXnPOlQmh+pIqsC+OF6vKTlS5Ybw+NKq+ap+/7eJxoBQ==",
+      "cosignature": "base64:c00vgd5ulriIcJDXhTGaGcIuJJEH08WRXaBCiKBw7pH53X+T4/q684VlkQGLVZvo2ee9MXMfyvgrQwll1cW1BQ==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
       "signed_over": "JCS({\"checkpoint\": <signed cp20>, \"witness_id\": \"witness-1\"})",
@@ -140,7 +140,7 @@
     },
     {
       "checkpoint": "cp24",
-      "cosignature": "base64:4t2/Dn+Rr3v9JsLbeiIlBsSPYYPNdHWW4a6p7b6XSra82Q8HyMEU6BWBvQvjZXDHJ4SjXLRvDqLmIE2TvSpKAg==",
+      "cosignature": "base64:c5CY2uYZ5CgmxKx2sxd1+Uc6liisBdJu8W/+40RC+3Zad47PFbHWkDJU5rVQccBdZKF/79KwGXDAkmuxsXyaCQ==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
       "signed_over": "JCS({\"checkpoint\": <signed cp24>, \"witness_id\": \"witness-1\"})",
@@ -148,7 +148,7 @@
     },
     {
       "checkpoint": "cp25",
-      "cosignature": "base64:MGlNg2jQd1fmV/aAcoWBHHIOVmRD+SuCnB+pWTMWRNkrAt5UzULEClcpMm6ZP/cU/Zt+eRSUmByeygSK/tshBA==",
+      "cosignature": "base64:sJxvqZhlZFD0uhvOVnnA3IvB8g20aO15X2CwY7dyakX9DVIMFVArD6Fit+gdEV4sbzflDUaKYoEr+jbK9CMKBg==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
       "signed_over": "JCS({\"checkpoint\": <signed cp25>, \"witness_id\": \"witness-1\"})",
@@ -156,7 +156,7 @@
     },
     {
       "checkpoint": "cp28",
-      "cosignature": "base64:kWKCRVu3mx/itZfl2rb87B4WUcdB62sckT8jI9C96Nj4riCMFRJp9cCWFXHkEqRY11+802/pvpac1xaSwMITBA==",
+      "cosignature": "base64:9uktQPA1rb2c8EmpCidGwvw79E/XkoopRA2BQ0qSkApZFdU/WK+XhXuBAU4f7NHegQRGyHc4lt1e+ocXz9wVCQ==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
       "signed_over": "JCS({\"checkpoint\": <signed cp28>, \"witness_id\": \"witness-2\"})",
@@ -164,7 +164,7 @@
     },
     {
       "checkpoint": "cp29",
-      "cosignature": "base64:wUbYnnzsbW7/cVPfMMj8Cf5nwZLL9S39eUgKytpk/11G4pqOHVAAzxUYD9PTdYLw9S65TxpS22TKgiVENOPxAw==",
+      "cosignature": "base64:dd7yDaHebmj4WsGKHB2uxg4RvtTKgX/ZmwO2OI87fgA16oU5J6dRsmq1RO/JC0GcIUncE7E4IXWKwkyO9CV4Aw==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
       "signed_over": "JCS({\"checkpoint\": <signed cp29>, \"witness_id\": \"witness-2\"})",
@@ -172,7 +172,7 @@
     },
     {
       "checkpoint": "cp30",
-      "cosignature": "base64:i0i5ucvuaEQ24eD1PepuQRiuG9gcUn3bgrQqwZkrV/x50L7m6ZVZOw3xJ1/LyZEsmftW+/HLrL6u/OfPXCbgAw==",
+      "cosignature": "base64:8bXG1vZZ44CRfjEtyWFwWZEpN/Ivt6h6DQqcRDGpHwCQXs9Gvkcbizs31W+y5xPxkG8b8P2Ucq9cbqzU8LYsAw==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
       "signed_over": "JCS({\"checkpoint\": <signed cp30>, \"witness_id\": \"witness-2\"})",
@@ -180,7 +180,7 @@
     },
     {
       "checkpoint": "cp32",
-      "cosignature": "base64:zsJBZCOOeg3PA+YkR9POGHQvXM64RFOt6/OGXWhpSHLOUrb1koi3b1zHZywbfwNtApQEJNXgezjyPWQQDat9DQ==",
+      "cosignature": "base64:QiMFw0rWOOR1DDOrYupSKsptENKWrD7CybnDyBhF7FHqk8JnFJA1PdjP9cgt4Q3Jhjj++q3Zj9510c5c3KBCBQ==",
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
       "signed_over": "JCS({\"checkpoint\": <signed cp32>, \"witness_id\": \"witness-2\"})",

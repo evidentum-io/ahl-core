@@ -1,9 +1,9 @@
 {
-  "entry_id": "sha256:06dd2ba2f082130c98b1b178ea1c59245ec8ad7bf24ebac4323758ec8f5ba3ee",
+  "entry_id": "sha256:14bd61d3d73a9311fa28402cb7d0ecd19a91f3a2d53b05fc90afd2247016affd",
   "entry_index": 0,
   "envelope": {
     "payload": {
-      "ahl_version": "0.3",
+      "ahl_version": "0.4",
       "datasets": {
         "customers": {
           "authority": {
@@ -12,12 +12,12 @@
             ],
             "producer": "producer-1"
           },
-          "canonicalization": "jcs-v1",
+          "canonicalization": "jcs",
           "commitment_mode": "keyed",
           "key_access": "authorized-verifiers-only"
         },
         "scores": {
-          "canonicalization": "jcs-v1",
+          "canonicalization": "jcs",
           "commitment_mode": "plain",
           "key_access": "not-applicable"
         }
@@ -84,9 +84,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:EInp0dy/qmGjNkvDQ6q8mStzw1IZ/w+jj5+Yjv1bFD8UfS+dgcATs4R2qDsKcd0ZHU72fwhopZ7UWOLH8r7wBQ=="
+        "sig": "base64:Gxnu37n1S+BsNWAosPSAYs3f1SKstuGHVVeT9WAj1iBId+XUqGfCbnrfrZeQhrIy8dGZlpLGnuui3yfjVoZNDA=="
       }
     ]
   },
-  "statement_id": "sha256:8aa7aebb081f2254732b1f3dc7cbc2555f61f9027a4ec1e578bf2a570bbdc551"
+  "statement_id": "sha256:19227e22afd16e6a588810c475010b7d5da123f1baee229f11cbc9319a72b21d"
 }

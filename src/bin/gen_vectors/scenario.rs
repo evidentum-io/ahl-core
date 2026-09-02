@@ -52,7 +52,7 @@ pub const PIPELINE: &str = "scoring-v1";
 pub const DS_CUSTOMERS: &str = "customers";
 pub const DS_SCORES: &str = "scores";
 pub const LEAF_FORMAT: &str = "ahl-leaf-v2";
-pub const CANONICALIZATION: &str = "jcs-v1";
+pub const CANONICALIZATION: &str = "jcs";
 
 /// Log id: `SHA-256("ahl-test-log-1")`.
 pub const LOG_SEED: &[u8] = b"ahl-test-log-1";

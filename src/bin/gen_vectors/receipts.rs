@@ -224,8 +224,8 @@ impl Spec<'_> {
         });
 
         json!({
-            "ahl_receipt_version": "1",
-            "spec_version": "0.3.0",
+            "ahl_receipt_version": "2",
+            "spec_version": "0.4.0",
             "claim": claim,
             "subject": subject_block,
             "envelope": subject,
@@ -411,6 +411,17 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     });
 
     // A key the manifest v2 snapshot dropped may not be listed as in force after entry 23.
+    //
+    // This vector's chain necessarily carries manifest v2 (entry 25), which rotates the
+    // witness key set relative to genesis — a GOVERNANCE-KEY ROTATION (I-D §7.1). This build
+    // does not implement `governance.rotation_proofs[]` verification, so ANY receipt whose
+    // carried chain rotates a log or witness key set is refused before the §7.2 producer-key
+    // snapshot rule this vector was built to demonstrate is ever reached
+    // (`GovernanceKeyRotationUnsupported`, checked at manifest-processing time in `read_chain`,
+    // ahead of `bind_producer_keys`). The scenario below — a dropped producer key asserted as
+    // still in force — is therefore no longer independently exercised through the full receipt
+    // pipeline by any vector in this corpus; see `test_data/README.md`'s "Not yet implemented"
+    // section.
     out.push(Vector {
         file: "statement-anchored-dropped-producer-key-must-fail.ahl",
         receipt: Spec {
@@ -429,21 +440,25 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 key_entry(&keys.producer_2, None, 9),
             ]),
             note: "MUST FAIL. The subject is anchored at entry 26, after manifest version 2 at \
-                   entry 25. Core spec §7.2: a manifest's producer `keys` array is the complete \
-                   snapshot effective from that manifest's entry index — it DISCARDS the prior \
-                   snapshot. Version 2 lists only `producer-1`, so the key that the `key` \
-                   statement at entry 9 added is no longer in force at entry 26, and a receipt \
-                   that lists it as `manifest-chain`-bound is asserting a key state the \
-                   governance chain does not support. A verifier that accumulated manifest key \
-                   arrays additively would accept this — and would then also accept a signature \
-                   made with the dropped key."
+                   entry 25, which rotates the witness key set (I-D §7.1 governance-key \
+                   rotation) — a feature this build does not implement checking, so the \
+                   receipt is refused for that reason before the producer-key snapshot rule \
+                   below is even reached. Core spec §7.2: a manifest's producer `keys` array is \
+                   the complete snapshot effective from that manifest's entry index — it \
+                   DISCARDS the prior snapshot. Version 2 lists only `producer-1`, so the key \
+                   that the `key` statement at entry 9 added is no longer in force at entry \
+                   26, and a receipt that lists it as `manifest-chain`-bound is asserting a key \
+                   state the governance chain does not support. A verifier that implemented \
+                   rotation proofs and accumulated manifest key arrays additively would accept \
+                   this — and would then also accept a signature made with the dropped key."
                 .to_owned(),
         }
         .build(corpus, keys),
         expect: Expect::Reject {
-            rule: "spec §7.2 — a manifest's producer key array is a snapshot that discards the \
-                   prior one",
-            matches: |e| matches!(e, ReceiptError::KeyNotBound { .. }),
+            rule: "this build does not implement governance-key rotation proofs (I-D §7.1, \
+                   §7.5.1); see the note for the §7.2 producer-key rule this vector was \
+                   originally built to demonstrate",
+            matches: |e| matches!(e, ReceiptError::GovernanceKeyRotationUnsupported { .. }),
         },
     });
 
@@ -472,12 +487,16 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "record-ingested-valid.ahl",
         receipt: ingested(
             "keyed-authorized",
-            &r.c_a_bytes,
+            &r.c_a_bytes_as_received,
             "Proves that the entry-1 ingestion introduced record A into dataset `customers`, \
              and — for a verifier authorized to hold the dataset key — that the carried \
-             canonical bytes recompute to the anchored HMAC commitment. The dataset key is NOT \
-             packaged: an unauthorized verifier still checks the signature, the anchoring and \
-             the graph, but reads `content_binding` as unverifiable.",
+             bytes recompute to the anchored HMAC commitment. `record_bytes` is deliberately \
+             carried AS RECEIVED — non-canonical key order, insignificant whitespace JCS \
+             strips — rather than pre-canonicalized, so this vector proves the verifier \
+             actually applies the canonicalization procedure (I-D §2.6, §7.2) rather than \
+             merely accepting bytes that already happen to be canonical. The dataset key is \
+             NOT packaged: an unauthorized verifier still checks the signature, the anchoring \
+             and the graph, but reads `content_binding` as unverifiable.",
         ),
         expect: Expect::Accept,
     });
@@ -831,8 +850,16 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     // verify each candidate's signature cryptographically before comparing authority, or an
     // envelope that merely reuses a real `key_id` with a non-verifying signature can displace
     // the genuinely authorized trigger by anchoring at a later index.
+    //
+    // This scenario needs cp29, whose active manifest is v2 (entry 25) — a GOVERNANCE-KEY
+    // ROTATION (I-D §7.1) this build does not implement `rotation_proofs[]` verification for.
+    // The receipt this vector used to be is therefore no longer ACCEPTABLE: this build refuses
+    // it outright (`GovernanceKeyRotationUnsupported`) rather than silently reporting the
+    // competing-trigger logic as proven. What was a positive vector is now the demonstration of
+    // that refusal instead; see `test_data/README.md`'s "Not yet implemented" section for what
+    // this costs.
     out.push(Vector {
-        file: "trigger-effective-non-verifying-signature-ignored.ahl",
+        file: "trigger-effective-non-verifying-signature-rotation-unsupported-must-fail.ahl",
         receipt: Spec {
             claim_type: "trigger-effective",
             subject_index: 22,
@@ -849,23 +876,23 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 "competing": { "corpus_range": corpus.enumeration(20, 29, cp29) },
             }),
             producer_keys: None,
-            note: "Proves that the retraction at entry 22 governs record F at cp29, EVEN THOUGH \
-                   a THIRD trigger naming the same record sits at the greatest entry index, 28. \
-                   That entry's signature does not verify: `signatures[0].key_id` correctly \
-                   names `producer-1`'s real key_id — the genuine `customers` dataset authority \
-                   — but `signatures[0].sig` does not verify against that key's actual public \
-                   key. A verifier that treated a matching `key_id` as proof of authorization, \
-                   without cryptographically checking the signature it is attached to, would let \
-                   this entry unseat the real trigger merely by anchoring later. Effectiveness \
-                   requires BOTH the claimed key_id to be the record's authority AND the \
-                   signature to verify against it — checked before the greatest-entry-index \
-                   rule is applied, exactly as for a non-authority-but-genuine challenge \
-                   (compare `trigger-effective-later-challenge-ignored.ahl`), because a \
-                   non-verifying signature is never traversed either."
+            note: "MUST FAIL — under this build. The receipt would otherwise prove that the \
+                   retraction at entry 22 governs record F at cp29, even though a non-verifying \
+                   later trigger at entry 28 names the genuine authority's `key_id` without a \
+                   valid signature (see the code comment above for the full scenario this once \
+                   demonstrated as a POSITIVE vector). cp29's active manifest is v2, a \
+                   governance-key rotation this build cannot check `rotation_proofs[]` for, so \
+                   it refuses the receipt outright rather than silently accepting an unproven \
+                   rotation."
                 .to_owned(),
         }
         .build(corpus, keys),
-        expect: Expect::Accept,
+        expect: Expect::Reject {
+            rule: "this build does not implement governance-key rotation proofs (I-D §7.1, \
+                   §7.5.1); see the note for the competing-trigger scenario this vector was \
+                   originally built to demonstrate as accepted",
+            matches: |e| matches!(e, ReceiptError::GovernanceKeyRotationUnsupported { .. }),
+        },
     });
 
     // Entry 29: the SUBJECT of its own `trigger-effective` claim carries two signature
@@ -884,6 +911,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     // `trigger-effective-non-verifying-signature-ignored.ahl`'s competing candidate at entry
     // 28, which reaches the identical `is_authorized_trigger` machinery via the
     // competing-trigger enumeration route that bypasses this subject-level gate.)
+    // This vector's chain necessarily carries manifest v2 (entry 25), a GOVERNANCE-KEY
+    // ROTATION (I-D §7.1) this build does not implement `rotation_proofs[]` verification for,
+    // so the receipt is now refused at manifest-processing time
+    // (`GovernanceKeyRotationUnsupported`) before the §5 step 4 envelope-signature rule below —
+    // the one this vector was built to demonstrate — is ever reached. The scenario is no
+    // longer independently exercised through the full receipt pipeline by this or any other
+    // vector in this corpus; see `test_data/README.md`'s "Not yet implemented" section.
     out.push(Vector {
         file: "trigger-effective-unverified-authority-signature-must-fail.ahl",
         receipt: Spec {
@@ -910,13 +944,17 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    key's actual public key. Receipt §5 step 4 requires every signature entry on \
                    the subject's own envelope to verify; naming the authority's key_id is not \
                    enough when that entry's own signature does not verify, so this envelope \
-                   cannot ground any claim, let alone one asserting it is an effective trigger."
+                   cannot ground any claim, let alone one asserting it is an effective trigger. \
+                   This receipt's chain also carries manifest v2's witness-key rotation, which \
+                   this build refuses before reaching that rule at all — see `rule` below."
                 .to_owned(),
         }
         .build(corpus, keys),
         expect: Expect::Reject {
-            rule: "receipt §5 step 4 — every subject envelope signature entry must verify",
-            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 29 }),
+            rule: "this build does not implement governance-key rotation proofs (I-D §7.1, \
+                   §7.5.1); see the note for the receipt §5 step 4 rule this vector was \
+                   originally built to demonstrate",
+            matches: |e| matches!(e, ReceiptError::GovernanceKeyRotationUnsupported { .. }),
         },
     });
 
@@ -928,8 +966,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     // trigger is authorized when signed BY the record's authority, not signed EXCLUSIVELY by
     // authority keys — so this legitimately co-signed envelope must still classify as
     // authorized and must still govern.
+    //
+    // This scenario needs cp32, whose active manifest is v2 (entry 25) — a GOVERNANCE-KEY
+    // ROTATION (I-D §7.1) this build does not implement `rotation_proofs[]` verification for.
+    // What was a positive vector is now the demonstration of the resulting refusal instead;
+    // see `test_data/README.md`'s "Not yet implemented" section for what this costs.
     out.push(Vector {
-        file: "trigger-effective-co-signed-by-authority.ahl",
+        file: "trigger-effective-co-signed-rotation-unsupported-must-fail.ahl",
         receipt: Spec {
             claim_type: "trigger-effective",
             subject_index: 31,
@@ -949,19 +992,23 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 key_entry(&keys.producer_1, None, 25),
                 key_entry(&keys.producer_2, None, 30),
             ]),
-            note: "Proves that a trigger CO-SIGNED by both the `customers` dataset authority \
-                   (`producer-1`) and another active producer key (`producer-2`, re-added at \
-                   entry 30) is authorized and governs F at cp32. Every signature entry on \
-                   entry 31's envelope cryptographically verifies against a producer key active \
-                   at entry index 31 (receipt §5 step 3a's envelope-validity test), and at \
-                   least one of them — `producer-1`'s — is the record's authority (the \
-                   authorization test), so the extra, genuinely valid co-signature from \
-                   `producer-2` does not disqualify it: core spec §2.3.3 requires a trigger to \
-                   be signed BY the authority, never signed EXCLUSIVELY by authority keys."
+            note: "MUST FAIL — under this build. The receipt would otherwise prove that a \
+                   trigger CO-SIGNED by both the `customers` dataset authority (`producer-1`) \
+                   and another active producer key (`producer-2`, re-added at entry 30) is \
+                   authorized and governs F at cp32 (see the code comment above for the full \
+                   scenario this once demonstrated as a POSITIVE vector). cp32's active \
+                   manifest is v2, a governance-key rotation this build cannot check \
+                   `rotation_proofs[]` for, so it refuses the receipt outright rather than \
+                   silently accepting an unproven rotation."
                 .to_owned(),
         }
         .build(corpus, keys),
-        expect: Expect::Accept,
+        expect: Expect::Reject {
+            rule: "this build does not implement governance-key rotation proofs (I-D §7.1, \
+                   §7.5.1); see the note for the co-signed-trigger scenario this vector was \
+                   originally built to demonstrate as accepted",
+            matches: |e| matches!(e, ReceiptError::GovernanceKeyRotationUnsupported { .. }),
+        },
     });
 
     // A trigger on a DERIVED record, signed with a key added after the introduction.
@@ -1223,6 +1270,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     // whatever manifest governs A — not a byte-equality shortcut that happens to work only
     // when both checkpoints share one manifest version, as every other propagation-complete
     // vector until this one did.
+    //
+    // That substantive fix is no longer independently exercised end to end: A's chain must
+    // carry manifest v2, a GOVERNANCE-KEY ROTATION (I-D §7.1) this build does not implement
+    // `rotation_proofs[]` verification for, so the whole receipt is now refused
+    // (`GovernanceKeyRotationUnsupported`) before the two-manifest key-resolution logic above
+    // is exercised. What was a positive vector is now the demonstration of that refusal
+    // instead; see `test_data/README.md`'s "Not yet implemented" section.
     let mut cross_rotation_receipt = Spec {
         claim_type: "propagation-complete",
         subject_index: 8,
@@ -1249,7 +1303,10 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                this corpus, but each manifest version re-declares it independently, and both \
                bindings resolve through the ordinary `keys.log` source/binding contract \
                (receipt §2.2) rather than a shortcut that only happens to work when D and A \
-               share one manifest version, as in every other propagation-complete vector."
+               share one manifest version, as in every other propagation-complete vector. MUST \
+               FAIL under this build regardless: A's manifest v2 is a governance-key rotation \
+               this build cannot check `rotation_proofs[]` for, so it refuses the receipt \
+               outright rather than silently accepting an unproven rotation."
             .to_owned(),
     }
     .build(corpus, keys);
@@ -1261,9 +1318,14 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         .expect("keys.log is an array")
         .push(key_entry(&keys.log_1, None, 0));
     out.push(Vector {
-        file: "propagation-complete-valid-across-manifest-rotation.ahl",
+        file: "propagation-complete-rotation-unsupported-must-fail.ahl",
         receipt: cross_rotation_receipt,
-        expect: Expect::Accept,
+        expect: Expect::Reject {
+            rule: "this build does not implement governance-key rotation proofs (I-D §7.1, \
+                   §7.5.1); see the note for the cross-manifest key-resolution scenario this \
+                   vector was originally built to demonstrate as accepted",
+            matches: |e| matches!(e, ReceiptError::GovernanceKeyRotationUnsupported { .. }),
+        },
     });
 
     out.push(Vector {
@@ -1333,17 +1395,10 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         }
         .build(corpus, keys),
         expect: Expect::Reject {
-            rule: "spec §2.3.4 / receipt §3 — completeness is defined at the propagation's \
-                   declared checkpoint D, never at a later one",
-            matches: |e| {
-                matches!(
-                    e,
-                    ReceiptError::CheckpointNotBound {
-                        field: "claim_material.corpus_checkpoint",
-                        ..
-                    }
-                )
-            },
+            rule: "this build does not implement governance-key rotation proofs (I-D §7.1, \
+                   §7.5.1); see the note above for the completeness-at-D rule this vector was \
+                   originally built to demonstrate",
+            matches: |e| matches!(e, ReceiptError::GovernanceKeyRotationUnsupported { .. }),
         },
     });
 
@@ -1397,28 +1452,35 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     });
 
     // --- governance-state --------------------------------------------------------
+    //
+    // This claim type's positive vector used to prove state ACROSS manifest v2's entry-25
+    // rotation (see git history / the `-rotation-unsupported-must-fail.ahl` vectors for that
+    // richer scenario). It is rewritten here to stay entirely within the genesis manifest's
+    // era, because any chain carrying manifest v2 now trips
+    // `GovernanceKeyRotationUnsupported` (I-D §7.1, §7.5.1) before this claim's own §3/§4
+    // logic is ever reached. See `test_data/README.md`'s "Not yet implemented" section.
     out.push(Vector {
         file: "governance-state-valid.ahl",
         receipt: Spec {
             claim_type: "governance-state",
-            subject_index: 25,
-            anchor: cp28,
-            chain: vec![0, 9, 25],
+            subject_index: 0,
+            anchor: cp8,
+            chain: vec![0],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 28, cp28),
-            claim_material: json!({ "target_index": 26 }),
+            currency_material: corpus.enumeration(0, 8, cp8),
+            claim_material: json!({ "target_index": 5 }),
             producer_keys: None,
-            note: "Proves that manifest version 2, anchored at entry 25, is the governance \
-                   state active at entry index 26. The §4 material enumerates exactly \
-                   [0, 28) — the whole prefix of this receipt's verified checkpoint — and \
-                   contains no manifest or key statement in (25, 26], so nothing supersedes \
-                   version 2 before the target. Version 2 replaced the witness key set in full \
-                   and dropped `producer-2` from the producer snapshot (core §7.2), which is \
-                   why cp28 is cosigned by witness-2 while every earlier checkpoint is cosigned \
-                   by witness-1."
+            note: "Proves that the genesis manifest is the governance state active at entry \
+                   index 5. The §4 material enumerates exactly [0, 8) — the whole prefix of \
+                   this receipt's verified checkpoint — and contains no manifest or key \
+                   statement in (0, 5], so nothing supersedes the genesis manifest before the \
+                   target. Deliberately anchored before entry 9's `key` statement and entry \
+                   25's manifest v2, both of which this build cannot carry in a governance \
+                   chain without tripping the governance-key-rotation refusal (I-D §7.1) — see \
+                   `test_data/README.md`'s \"Not yet implemented\" section."
                 .to_owned(),
         }
         .build(corpus, keys),
@@ -1463,31 +1525,37 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             },
         },
     });
+    // Rewritten to stay within the genesis manifest's era for the same reason as
+    // `governance-state-valid.ahl` above: cp20 (tree_size 20) is the largest checkpoint before
+    // manifest v2 rotates the witness set at entry 25, so this vector's "true" upper bound is
+    // now [0, 20) instead of [0, 28) — the normative point (an authenticated but SHORT range
+    // proves nothing about what it does not cover) is unaffected; only the tree size and the
+    // later key event it used to hide (entry 25's rotation, not just entry 9's `key`
+    // statement) changed.
     out.push(Vector {
         file: "governance-state-short-range-must-fail.ahl",
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 0,
-            anchor: cp28,
-            // The chain presents every governance statement; what the short enumeration fails
-            // to prove is that these are the ONLY ones.
-            chain: vec![0, 9, 25],
+            anchor: cp20,
+            // The chain presents every governance statement in this range; what the short
+            // enumeration fails to prove is that these are the ONLY ones.
+            chain: vec![0, 9],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 6, cp28),
+            currency_material: corpus.enumeration(0, 6, cp20),
             claim_material: json!({ "target_index": 5 }),
             producer_keys: None,
             note: "MUST FAIL. The enumeration over [0, 6) is authenticated and internally \
                    correct, and it does prove that no governance statement sits in (0, 5]. That \
-                   is exactly the trap: it says nothing about entries 6 through 27, where the \
-                   `key` statement at entry 9 and manifest version 2 at entry 25 — which drops \
-                   a producer key — actually live. Receipt §4 therefore fixes enumerated \
-                   currency at exactly [0, tree_size(C)) for the receipt's verified checkpoint \
-                   C, here [0, 28). A verifier that accepted any authenticated sub-range would \
-                   let a receipt hide a later key retirement and validate signatures with a key \
-                   the corpus had already discarded."
+                   is exactly the trap: it says nothing about entries 6 through 19, where the \
+                   `key` statement at entry 9 actually lives. Receipt §4 therefore fixes \
+                   enumerated currency at exactly [0, tree_size(C)) for the receipt's verified \
+                   checkpoint C, here [0, 20). A verifier that accepted any authenticated \
+                   sub-range would let a receipt hide a later key retirement and validate \
+                   signatures with a key the corpus had already discarded."
                 .to_owned(),
         }
         .build(corpus, keys),
@@ -1499,7 +1567,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                     ReceiptError::GovernanceRangeNotComplete {
                         got_from: 0,
                         got_to: 6,
-                        tree_size: 28
+                        tree_size: 20
                     }
                 )
             },
