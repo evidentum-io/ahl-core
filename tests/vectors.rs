@@ -26,6 +26,7 @@ use ahl_core::{
     leaf_hash, parse_hash_hex, proof_from_hex, range_proof, sha256_hex, statement_id, tree_root,
     verify_envelope, verify_inclusion_proof, verify_signature, TestKey,
 };
+use base64::Engine as _;
 use serde_json::{json, Value};
 
 /// The statement vectors, in entry-index order. Entry 28 is an intentional non-verifying-
@@ -1247,6 +1248,12 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
                     if detail.contains("does not decode to exactly 32 octets")
             )
         }
+        "governance-key-statement-missing-issued-at-must-fail.ahl" => {
+            matches!(error, ReceiptError::Malformed(detail) if detail.contains("issued_at"))
+        }
+        "governance-key-statement-malformed-valid-time-must-fail.ahl" => {
+            matches!(error, ReceiptError::Malformed(detail) if detail.contains("valid_time"))
+        }
         "record-ingested-stale-manifest-must-fail.ahl" => {
             matches!(error, ReceiptError::SubjectManifestBindingInvalid(_))
         }
@@ -1498,6 +1505,122 @@ fn adaptor_capability_gaps_are_reported_as_profile_limitations() {
     ));
     assert!(!restricted.adaptor_profiles["ahl-test-log-v1"].capabilities.consistency_proofs);
     assert!(!restricted.adaptor_profiles["ahl-test-log-v1"].capabilities.checkpoint_raw);
+}
+
+#[test]
+fn checkpoint_raw_capability_requires_a_known_parser() {
+    // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values as the
+    // JSON members" — a capability BOOLEAN is not itself reconciliation. A policy claiming
+    // `checkpoint_raw: true` for a profile this build has no wire-format parser for (only
+    // `ahl-adaptor-atl-v1` has one) is refused as a POLICY defect, before any receipt content
+    // — `raw`'s own presence included — is even read.
+    let mut policy = trust_policy();
+    let hash = policy.adaptor_profiles["ahl-test-log-v1"].hash.clone();
+    policy.adaptor_profiles.insert(
+        "ahl-test-log-v1".to_owned(),
+        AdaptorProfile {
+            hash,
+            capabilities: AdaptorCapabilities { checkpoint_raw: true, consistency_proofs: true },
+        },
+    );
+    let (_, receipt) = read_receipt("statement-anchored-valid.ahl");
+    assert!(
+        matches!(
+            verify_receipt(&receipt, &policy),
+            Err(ReceiptError::AdaptorProfileMisconfigured { ref id, .. }) if id == "ahl-test-log-v1"
+        ),
+        "`checkpoint_raw: true` for a profile this build cannot parse must be a policy error, \
+         not silent acceptance"
+    );
+}
+
+/// A genuinely valid corpus receipt, relabeled to pin the ATL adaptor profile
+/// (`ahl-adaptor-atl-v1`) instead of the corpus's own minimal `ahl-test-log-v1` — for testing
+/// `checkpoint.raw` reconciliation (I-D §7.1; adaptor profile `ahl-adaptor-atl-v1` §6).
+///
+/// The governance chain, checkpoint signature and witness cosignatures are untouched by the
+/// relabeling and remain genuinely valid; `reconcile_checkpoint_raw` runs BEFORE any of that is
+/// even read (right after `checkpoint_object`'s own shape check, ahead of the signature check),
+/// so a `raw` that fails to parse or fails to match is rejected there, before the rest of the
+/// receipt's own validity could matter either way.
+fn atl_pinned(raw: Value) -> (Value, TrustPolicy) {
+    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+    let mut policy = trust_policy();
+    let hash = policy.adaptor_profiles["ahl-test-log-v1"].hash.clone();
+    receipt["anchoring"]["adaptor"]["id"] = json!("ahl-adaptor-atl-v1");
+    policy.adaptor_profiles.insert(
+        "ahl-adaptor-atl-v1".to_owned(),
+        AdaptorProfile {
+            hash,
+            capabilities: AdaptorCapabilities { checkpoint_raw: true, consistency_proofs: false },
+        },
+    );
+    receipt["anchoring"]["checkpoint"]["raw"] = raw;
+    (receipt, policy)
+}
+
+fn base64_raw(bytes: &[u8]) -> Value {
+    json!(format!("base64:{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+#[test]
+fn atl_checkpoint_raw_wrong_length_is_rejected() {
+    // Adaptor profile `ahl-adaptor-atl-v1` §6.1: the blob is fixed at 98 bytes. Ten zero bytes
+    // decode as valid base64 but not as that blob at all — the FIRST thing the parser checks,
+    // before magic, before any field.
+    let (receipt, policy) = atl_pinned(base64_raw(&[0u8; 10]));
+    assert!(
+        matches!(
+            verify_receipt(&receipt, &policy),
+            Err(ReceiptError::Malformed(detail)) if detail.contains("98 octets")
+        ),
+        "a `raw` that does not decode to exactly 98 octets must be rejected"
+    );
+}
+
+#[test]
+fn atl_checkpoint_raw_wrong_magic_is_rejected() {
+    // 98 zero bytes decode to the right LENGTH but carry none of the required magic
+    // `ATL-Protocol-v1-CP` (§6.1) — proving the parser actually reads the blob's content, not
+    // merely its length.
+    let (receipt, policy) = atl_pinned(base64_raw(&[0u8; 98]));
+    assert!(
+        matches!(
+            verify_receipt(&receipt, &policy),
+            Err(ReceiptError::Malformed(detail)) if detail.contains("magic")
+        ),
+        "a `raw` blob with the wrong magic must be rejected"
+    );
+}
+
+#[test]
+fn atl_checkpoint_raw_field_mismatch_is_rejected() {
+    // Correct magic AND correct Origin ID (the corpus's real `log_id`, decoded), but a
+    // deliberately wrong tree size — proving this is genuine field-by-field reconciliation
+    // (adaptor profile `ahl-adaptor-atl-v1` §6.2), not merely a magic-and-length gate. The
+    // timestamp and root bytes after it are never reached once tree_size itself disagrees.
+    let (_, valid) = read_receipt("statement-anchored-valid.ahl");
+    let log_id = field_str(&valid["anchoring"]["checkpoint"], "log_id").expect("log_id");
+    let origin =
+        hex::decode(log_id.strip_prefix("sha256:").expect("family string")).expect("valid hex");
+    assert_eq!(origin.len(), 32, "a SHA-256 digest is 32 octets");
+
+    let mut blob = Vec::with_capacity(98);
+    blob.extend_from_slice(b"ATL-Protocol-v1-CP");
+    blob.extend_from_slice(&origin);
+    blob.extend_from_slice(&999_999_999u64.to_le_bytes()); // tree_size: deliberately wrong
+    blob.extend_from_slice(&0u64.to_le_bytes()); // timestamp: never reached
+    blob.extend_from_slice(&[0u8; 32]); // root: never reached
+    assert_eq!(blob.len(), 98);
+
+    let (receipt, policy) = atl_pinned(base64_raw(&blob));
+    assert!(
+        matches!(
+            verify_receipt(&receipt, &policy),
+            Err(ReceiptError::Malformed(detail)) if detail.contains("tree size")
+        ),
+        "a `raw` blob whose tree size disagrees with the JSON `tree_size` must be rejected"
+    );
 }
 
 #[test]
@@ -1951,6 +2074,17 @@ fn the_manifest_log_object_value_grammars_are_enforced() {
         },
         "producer key object carrying an unknown member",
     );
+    // I-D §6.2: "`pubkey` decodes to exactly the 32 octets... `key_id` equals `sha256:`
+    // followed by the lowercase hex SHA-256 of those octets, so it is recomputable rather than
+    // merely declared." A syntactically well-formed `key_id` that simply belongs to a
+    // DIFFERENT key is exactly what recomputation catches, and a bare family-string shape
+    // check ([`is_family_hash`]) alone would miss.
+    reject_by_manifest_schema(
+        |payload| {
+            payload["keys"][0]["key_id"] = json!(sha256_hex(b"not the real producer key"));
+        },
+        "producer key object whose key_id does not match its pubkey",
+    );
 
     // The log/witness key-object shape DOES require `valid_from_index` (§7.2/§7.3, "same
     // form" as one another, but distinct from the producer shape above).
@@ -1962,6 +2096,56 @@ fn the_manifest_log_object_value_grammars_are_enforced() {
                 .remove("valid_from_index");
         },
         "witness key object without valid_from_index",
+    );
+}
+
+#[test]
+fn the_manifest_scope_fields_are_enforced() {
+    // I-D §6.2: the manifest "contains at minimum" `pipelines`, `windows`, `retention`, and
+    // `level`, beyond producer/log/witness keys and datasets (covered above). `level` in
+    // particular gates the L3 cosignature requirement elsewhere in this verifier, so an
+    // absent or out-of-vocabulary value must fail HERE, in schema — never be silently read as
+    // "not L3".
+    reject_by_manifest_schema(
+        |payload| {
+            payload.remove("level");
+        },
+        "manifest missing level",
+    );
+    reject_by_manifest_schema(
+        |payload| payload["level"] = json!("L4"),
+        "manifest level outside {L1, L2, L3}",
+    );
+    reject_by_manifest_schema(
+        |payload| {
+            payload.remove("retention");
+        },
+        "manifest missing retention",
+    );
+    reject_by_manifest_schema(
+        |payload| {
+            payload["retention"].as_object_mut().expect("retention object").remove("statements");
+        },
+        "manifest retention missing statements",
+    );
+    reject_by_manifest_schema(
+        |payload| {
+            payload.remove("pipelines");
+        },
+        "manifest missing pipelines",
+    );
+    reject_by_manifest_schema(
+        |payload| {
+            payload.remove("windows");
+        },
+        "manifest missing windows",
+    );
+    // "Retention: for statements, and for artifacts IF REPRODUCIBLE RECONSTRUCTION IS
+    // CLAIMED" — the second retention duration becomes REQUIRED exactly when that property
+    // claims true, so claiming it true without also carrying `retention.artifacts` is invalid.
+    reject_by_manifest_schema(
+        |payload| payload["properties"]["reproducible_reconstruction"] = json!(true),
+        "reproducible reconstruction claimed without retention.artifacts",
     );
 }
 
