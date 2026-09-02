@@ -126,6 +126,22 @@ impl AdaptorProfile {
     }
 }
 
+/// One witness key local policy holds, under the identity it holds it for (I-D §7.1).
+///
+/// `witness_id` is part of the entry rather than free-standing configuration because the
+/// identity is inside the cosignature preimage: a key trusted for one witness is not thereby a
+/// key trusted to cosign as another. The identity must ALSO be one the manifest version active
+/// for the checkpoint declares — that check is on the receipt's material, not on this entry,
+/// and lives in [`ReceiptError::WitnessNotDeclared`]'s call site.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrustedWitnessKey {
+    /// The public key cosignatures under this key are verified with, as a `base64:` family
+    /// string in the form the receipt carries it.
+    pub pubkey: String,
+    /// The witness identity policy trusts this key to cosign under.
+    pub witness_id: String,
+}
+
 /// The verifier's locally configured trust policy (format §1 design rule 1).
 ///
 /// Nothing in this struct may be taken from the receipt: that is the whole point of the trust
@@ -144,16 +160,17 @@ pub struct TrustPolicy {
     pub adaptor_profiles: BTreeMap<String, AdaptorProfile>,
     /// Dataset HMAC keys this verifier is authorized to hold (`keyed-authorized` binding only).
     pub dataset_keys: BTreeMap<String, Vec<u8>>,
-    /// Witness keys trusted by local policy rather than through the manifest chain, as
-    /// `key_id -> pubkey` (I-D §7.1: "`source: \"local-policy\"` is an acceptable source only
-    /// for witness keys the verifier ALREADY TRUSTS").
+    /// Witness keys trusted by local policy rather than through the manifest chain, by
+    /// `key_id` (I-D §7.1: "`source: \"local-policy\"` is an acceptable source only for
+    /// witness keys the verifier ALREADY TRUSTS").
     ///
-    /// Both members are compared, never the id alone: a receipt supplies the `pubkey` it wants
-    /// a cosignature verified under, so accepting a trusted `key_id` carrying a public key
-    /// policy never saw would let an unauthorized party choose the verification key. A policy
-    /// holding none — the default — makes every `local-policy` witness key unacceptable, which
-    /// is the correct reading of "already trusts" for a verifier that trusts none.
-    pub trusted_witness_keys: BTreeMap<String, String>,
+    /// Every member of the entry is compared, never the id alone: a receipt supplies the
+    /// `pubkey` a cosignature is verified under and the `witness_id` that goes into its
+    /// preimage, so accepting a trusted `key_id` carrying either of its own would let an
+    /// unauthorized party choose the verification key or the identity. A policy holding none —
+    /// the default — makes every `local-policy` witness key unacceptable, which is the correct
+    /// reading of "already trusts" for a verifier that trusts none.
+    pub trusted_witness_keys: BTreeMap<String, TrustedWitnessKey>,
     /// Resource limits.
     pub limits: Limits,
 }
@@ -398,6 +415,24 @@ pub enum ReceiptError {
     WitnessKeyNotTrusted {
         /// The offending key id.
         key_id: String,
+    },
+
+    /// A cosignature names a witness identity the manifest version active for the checkpoint
+    /// does not declare (I-D §7.1: each `anchoring.witnesses[]` element carries "the witness
+    /// identity as declared in the manifest").
+    ///
+    /// Applies whatever the key's source. A `local-policy` key establishes what the verifier
+    /// trusts, never what the corpus's governance declared, so an identity absent from the
+    /// active manifest is outside the witness set the receipt's own governance defines.
+    #[error(
+        "cosignature names witness `{witness_id}`, which the manifest version active for the \
+         checkpoint of tree_size {tree_size} does not declare (I-D §7.1)"
+    )]
+    WitnessNotDeclared {
+        /// The identity the cosignature carried.
+        witness_id: String,
+        /// The tree size of the checkpoint being cosigned.
+        tree_size: u64,
     },
 
     /// A cosignature names a `witness_id` other than the identity the manifest declares for
@@ -2338,10 +2373,10 @@ struct Anchoring {
 struct ResolvedKey {
     /// The public key a signature or cosignature is verified under.
     pubkey: String,
-    /// For a `manifest-chain` witness key, the identity the manifest declares that key object
-    /// under (I-D §7.1). `None` for a log key, which carries no identity member, and for a
-    /// `local-policy` witness key, which no manifest declares — there is no manifest-declared
-    /// identity to compare a cosignature against in either case.
+    /// For a witness key, the identity it was resolved under (I-D §7.1) — the manifest's own
+    /// declaration for a `manifest-chain` key, and the one local policy holds the key for
+    /// where the source is `local-policy`. `None` for a log key, which carries no identity
+    /// member and has no cosignature to bind one to.
     witness_id: Option<String>,
 }
 
@@ -2377,11 +2412,19 @@ fn bind_log_or_witness_key(
             if group != "witness" {
                 return Err(ReceiptError::KeyNotBound { key_id, entry_index: active_index });
             }
-            if policy.trusted_witness_keys.get(&key_id).map(String::as_str) != Some(pubkey.as_str())
+            // All three members, and the identity among them: §7.1 gives a witness key object
+            // "`witness_id`, the identity under which the manifest declares that witness", and
+            // a key policy trusts for one witness is not a key trusted to cosign as another.
+            // What policy CANNOT establish is that the identity is a declared one at all —
+            // that is a fact about the manifest, checked on the cosignature itself.
+            let witness_id = text(entry, "witness_id")?.to_owned();
+            let trusted = policy.trusted_witness_keys.get(&key_id);
+            if trusted.map(|held| (held.pubkey.as_str(), held.witness_id.as_str()))
+                != Some((pubkey.as_str(), witness_id.as_str()))
             {
                 return Err(ReceiptError::WitnessKeyNotTrusted { key_id });
             }
-            Ok(ResolvedKey { pubkey, witness_id: None })
+            Ok(ResolvedKey { pubkey, witness_id: Some(witness_id) })
         }
         "manifest-chain" => {
             let binding_index = number(obj(entry, "binding")?, "entry_index")?;
@@ -2482,9 +2525,10 @@ fn check_key_id(entry: &Value) -> Result<()> {
 /// straight out of the outgoing manifest by `(witness_id, key_id)` and so is bound to the same
 /// identity by construction ([`verify_rotation_proof`]).
 ///
-/// A `local-policy` witness key has no manifest-declared identity to compare against, so there
-/// is nothing to check for one: what makes it acceptable at all is that policy holds its
-/// `key_id` and `pubkey` ([`bind_log_or_witness_key`]).
+/// A `local-policy` witness key is held to the same rule from the other side: policy holds the
+/// identity alongside the key ([`TrustedWitnessKey`]), so the comparison here is against that
+/// held identity, and [`check_witness_declared`] separately requires it to be one the active
+/// manifest declares. Neither the receipt nor policy alone can invent a witness.
 fn check_witness_identity(resolved: &ResolvedKey, key_id: &str, carried: &str) -> Result<()> {
     match &resolved.witness_id {
         Some(declared) if declared != carried => Err(ReceiptError::WitnessIdentityMismatch {
@@ -2632,6 +2676,23 @@ fn check_container_shapes(receipt: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Require a cosignature's `witness_id` to be an identity the manifest version active for the
+/// checkpoint actually declares — WHATEVER the key's source (I-D §7.1: each
+/// `anchoring.witnesses[]` element carries "the witness identity as declared in the manifest").
+///
+/// For a `manifest-chain` key this is already implied, since the key bound to a manifest
+/// witness object carrying that identity. It is not implied for a `local-policy` key: policy
+/// establishes which KEY the verifier trusts, and no policy-side relation can establish that
+/// the corpus's own governance ever declared the witness. Without this, a verifier holding one
+/// trusted key would accept cosignatures under an identity the log's manifests never named,
+/// and the L3 requirement would be satisfied by a witness outside the corpus's governance.
+fn check_witness_declared(active_manifest: &Value, witness_id: &str, tree_size: u64) -> Result<()> {
+    if witness_key_set(active_manifest)?.iter().any(|(declared, ..)| declared == witness_id) {
+        return Ok(());
+    }
+    Err(ReceiptError::WitnessNotDeclared { witness_id: witness_id.to_owned(), tree_size })
+}
+
 /// The two `source` tokens I-D §7.1 admits for a key object, in the order it states them.
 const KEY_SOURCES: [&str; 2] = ["manifest-chain", "local-policy"];
 
@@ -2686,26 +2747,32 @@ fn check_keys_block(receipt: &Value) -> Result<()> {
                     "`local-policy` is an acceptable source only for witness keys (I-D §7.1)",
                 ));
             }
-            // "`binding` is the object `{ \"entry_index\": <integer> }`... it is REQUIRED
-            // where `source` is `\"manifest-chain\"`."
-            if source == "manifest-chain"
-                && !entry
-                    .get("binding")
-                    .is_some_and(|binding| binding.get("entry_index").is_some_and(Value::is_u64))
-            {
-                return Err(invalid(
-                    "`binding` is REQUIRED where `source` is `manifest-chain`, and is the \
-                     object `{\"entry_index\": <integer>}` (I-D §7.1)",
-                ));
+            // "`binding` is the object `{ \"entry_index\": <integer> }`, naming the entry
+            // index of the manifest statement the key is drawn from; it is REQUIRED where
+            // `source` is `\"manifest-chain\"`." Two rules, and the shape is the wider one:
+            // the member is REQUIRED only for one source, but WHEREVER it appears it is that
+            // object, because §7.1's member shapes are normative for every member it defines
+            // rather than only for the ones a given source obliges.
+            match entry.get("binding") {
+                None if source == "manifest-chain" => {
+                    return Err(invalid(
+                        "`binding` is REQUIRED where `source` is `manifest-chain` (I-D §7.1)",
+                    ))
+                }
+                None => {}
+                Some(binding) if binding.get("entry_index").is_some_and(Value::is_u64) => {}
+                Some(_) => {
+                    return Err(invalid(
+                        "`binding`, where present, is the object `{\"entry_index\": \
+                         <integer>}` (I-D §7.1)",
+                    ))
+                }
             }
             // "A witness key object additionally carries `witness_id`, the identity under
-            // which the manifest declares that witness."
-            //
-            // AMBIGUITY (I-D §7.1, keys block): that sentence is unconditional about the
-            // shape of a witness key object, but it explains the member by a manifest
-            // declaration a `local-policy` key does not have. Minimal reading: the member is
-            // part of the object's shape either way, and it is compared against a manifest
-            // only where the source is `manifest-chain`.
+            // which the manifest declares that witness" — unconditional about the shape, and
+            // the identity it names is a manifest-declared one whatever the key's source: a
+            // `local-policy` key supplies the KEY the verifier trusts, never a witness
+            // identity of its own ([`check_witness_identity`]).
             if group == "witness" && !entry.get("witness_id").is_some_and(Value::is_string) {
                 return Err(invalid("`witness_id` is REQUIRED on a witness key object (I-D §7.1)"));
             }
@@ -2837,6 +2904,7 @@ fn verify_checkpoint(
             entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
         })?;
         check_witness_identity(resolved, key_id, &witness_id)?;
+        check_witness_declared(active_manifest, &witness_id, tree_size)?;
         budget.spend(1)?;
         if !verify_signature(
             &decode_pubkey(&resolved.pubkey)?,
@@ -4392,6 +4460,7 @@ fn verify_later_witnesses(
             entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
         })?;
         check_witness_identity(resolved, key_id, &witness_id)?;
+        check_witness_declared(active_manifest, &witness_id, tree_size)?;
         budget.spend(1)?;
         if !verify_signature(
             &decode_pubkey(&resolved.pubkey)?,

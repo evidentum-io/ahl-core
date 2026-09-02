@@ -19,6 +19,7 @@ use ahl_core::closure::{affected_set, RecordRef, TreeMaterial};
 use ahl_core::descriptor;
 use ahl_core::receipt::{
     verify_receipt, AdaptorCapabilities, AdaptorProfile, Limits, ReceiptError, TrustPolicy,
+    TrustedWitnessKey,
 };
 use ahl_core::tree::ValidatedLeafSet;
 use ahl_core::{
@@ -2005,27 +2006,39 @@ fn anchoring_rules_reject() {
 #[test]
 fn a_local_policy_witness_key_is_accepted_only_from_the_verifiers_own_trusted_set() {
     let impostor = TestKey::from_seed_hex("impostor", &"ee".repeat(32)).expect("32-byte seed");
-    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
-    receipt["keys"]["witness"] = json!([{
-        "witness_id": "witness-of-its-own",
-        "key_id": impostor.key_id(),
-        "pubkey": impostor.pubkey(),
-        "source": "local-policy",
-    }]);
-    receipt["anchoring"]["witnesses"] = json!([{
-        "witness_id": "witness-of-its-own",
-        "key_id": impostor.key_id(),
-        "cosignature": impostor.sign(&cosignature_bytes(
-            &receipt["anchoring"]["checkpoint"],
-            "witness-of-its-own",
-        )),
-        "cosigned_at": "2026-08-16T12:00:00Z",
-    }]);
+
+    // The same receipt throughout, cosigned for real by a key no manifest declares, under
+    // whichever identity the case is about. Only the trust decision differs between cases.
+    let cosigned_as = |witness_id: &str| {
+        let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+        receipt["keys"]["witness"] = json!([{
+            "witness_id": witness_id,
+            "key_id": impostor.key_id(),
+            "pubkey": impostor.pubkey(),
+            "source": "local-policy",
+        }]);
+        receipt["anchoring"]["witnesses"] = json!([{
+            "witness_id": witness_id,
+            "key_id": impostor.key_id(),
+            "cosignature": impostor
+                .sign(&cosignature_bytes(&receipt["anchoring"]["checkpoint"], witness_id)),
+            "cosigned_at": "2026-08-16T12:00:00Z",
+        }]);
+        receipt
+    };
+    let holding = |pubkey: String, witness_id: &str| {
+        let mut policy = trust_policy();
+        policy.trusted_witness_keys.insert(
+            impostor.key_id(),
+            TrustedWitnessKey { pubkey, witness_id: witness_id.to_owned() },
+        );
+        policy
+    };
 
     // A verifier trusting no witness key of its own trusts none of the receipt's.
     assert!(
         matches!(
-            verify_receipt(&receipt, &trust_policy()),
+            verify_receipt(&cosigned_as("witness-1"), &trust_policy()),
             Err(ReceiptError::WitnessKeyNotTrusted { ref key_id }) if key_id == &impostor.key_id()
         ),
         "a local-policy witness key absent from the policy set must not be accepted"
@@ -2034,22 +2047,47 @@ fn a_local_policy_witness_key_is_accepted_only_from_the_verifiers_own_trusted_se
     // Nor does holding the id alone suffice: the receipt supplies the public key the
     // cosignature is verified under, so a trusted id carrying an unknown key would let the
     // presenter choose the verification key.
-    let mut wrong_pubkey = trust_policy();
-    wrong_pubkey.trusted_witness_keys.insert(impostor.key_id(), producer_key().pubkey());
     assert!(
         matches!(
-            verify_receipt(&receipt, &wrong_pubkey),
+            verify_receipt(
+                &cosigned_as("witness-1"),
+                &holding(producer_key().pubkey(), "witness-1")
+            ),
             Err(ReceiptError::WitnessKeyNotTrusted { .. })
         ),
         "a trusted key id carrying a public key policy never saw must not be accepted"
     );
 
-    // And a verifier that genuinely holds the key accepts it — the rule is the policy set, not
-    // a blanket refusal of the source.
-    let mut trusting = trust_policy();
-    trusting.trusted_witness_keys.insert(impostor.key_id(), impostor.pubkey());
-    let verdict = verify_receipt(&receipt, &trusting)
-        .expect("a local-policy witness key the verifier holds is admissible (I-D §7.1)");
+    // Nor is a key trusted for ONE witness a key trusted to cosign as another: the identity is
+    // in the cosignature preimage, and policy holds the key for a named witness.
+    assert!(
+        matches!(
+            verify_receipt(&cosigned_as("witness-2"), &holding(impostor.pubkey(), "witness-1")),
+            Err(ReceiptError::WitnessKeyNotTrusted { .. })
+        ),
+        "a local-policy key must cosign under the identity policy holds it for"
+    );
+
+    // And policy cannot invent a witness. `witness-of-its-own` is declared by no manifest in
+    // this corpus, so even a verifier that genuinely holds the key for exactly that identity
+    // is being asked to accept a witness the log's own governance never named.
+    assert!(
+        matches!(
+            verify_receipt(
+                &cosigned_as("witness-of-its-own"),
+                &holding(impostor.pubkey(), "witness-of-its-own")
+            ),
+            Err(ReceiptError::WitnessNotDeclared { ref witness_id, tree_size: 20 })
+                if witness_id == "witness-of-its-own"
+        ),
+        "a cosignature must name an identity the active manifest declares, whatever the source"
+    );
+
+    // Held for a declared identity, and cosigning under it: admissible. The rule is the policy
+    // set plus the manifest's own witness list, not a blanket refusal of the source.
+    let verdict =
+        verify_receipt(&cosigned_as("witness-1"), &holding(impostor.pubkey(), "witness-1"))
+            .expect("a local-policy witness key the verifier holds is admissible (I-D §7.1)");
     assert!(verdict.assurance.witnessed, "its cosignature is what makes the checkpoint witnessed");
 }
 
@@ -2196,7 +2234,29 @@ fn a_key_object_declares_one_of_the_two_sources_the_container_admits() {
             |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("`binding`")),
             "I-D §7.1 — binding is REQUIRED where source is manifest-chain",
         );
+        // The member's SHAPE is normative wherever it appears, and that is the wider rule:
+        // required for one source, but `{"entry_index": <integer>}` for both.
+        for wrong in [json!({}), json!({ "entry_index": "0" }), json!(0), json!([0])] {
+            let value = wrong.clone();
+            assert_rejects(
+                "statement-anchored-valid.ahl",
+                move |r| r["keys"][group][0]["binding"] = value,
+                |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("`binding`")),
+                "I-D §7.1 — a present binding is {\"entry_index\": <integer>}",
+            );
+        }
     }
+    // Including on a `local-policy` witness key, where the member is optional but not thereby
+    // shapeless.
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| {
+            r["keys"]["witness"][0]["source"] = json!("local-policy");
+            r["keys"]["witness"][0]["binding"] = json!({ "entry_index": "0" });
+        },
+        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("`binding`")),
+        "I-D §7.1 — a present binding is shaped even where it is optional",
+    );
 }
 
 /// Edit the genesis manifest's `log` object, then repair the receipt's own genesis anchor and
