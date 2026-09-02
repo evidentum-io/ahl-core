@@ -2323,6 +2323,68 @@ fn a_key_object_carries_no_member_beyond_the_closed_set() {
     );
 }
 
+/// I-D §7.3: `canonicalization_namespace` is "REQUIRED where `content_binding` is not `none`,
+/// and absent otherwise. `private-use`, where the carried descriptor's `canonicalization`
+/// identifier begins `x-`, so that the binding holds only for a verifier configured for this
+/// corpus and never across corpora; or `public` otherwise." §7.6 states the same as a
+/// cross-field rule.
+///
+/// The member is computable from the receipt alone, so every one of these is `invalid` rather
+/// than a capability gap — including the `x-` case, which a verifier that decided the namespace
+/// AFTER §6.3's capability outcome would report as unverifiable instead.
+#[test]
+fn the_canonicalization_namespace_tracks_the_carried_descriptor() {
+    assert_rejects(
+        "record-ingested-valid.ahl",
+        |r| {
+            r["claim"]["assurance"]
+                .as_object_mut()
+                .expect("assurance object")
+                .remove("canonicalization_namespace");
+        },
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "canonicalization_namespace" }),
+        "I-D §7.3 — REQUIRED where content_binding is not none",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        // `content_binding` is `none` here, so the member must be absent.
+        |r| r["claim"]["assurance"]["canonicalization_namespace"] = json!("public"),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "canonicalization_namespace" }),
+        "I-D §7.3 — absent where content_binding is none",
+    );
+    for unknown in [json!("registered"), json!("x-"), json!(true), json!("Public")] {
+        let value = unknown.clone();
+        assert_rejects(
+            "record-ingested-valid.ahl",
+            move |r| r["claim"]["assurance"]["canonicalization_namespace"] = value,
+            |e| {
+                matches!(e, ReceiptError::AssuranceMismatch { field: "canonicalization_namespace" })
+            },
+            "I-D §7.3 — the namespace is exactly `public` or `private-use`",
+        );
+    }
+
+    // `public` alongside an `x-` identifier. The rule is about the CARRIED descriptor and is
+    // "computable from the receipt alone" (§7.3), so it is decided without consulting the
+    // manifest — which is what lets it fire here rather than the descriptor-equality rule of
+    // §6.3, and rather than the capability outcome an `x-` identifier always reaches.
+    assert_rejects(
+        "record-ingested-valid.ahl",
+        |r| r["claim_material"]["canonicalization"] = json!("x-corpus-local"),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "canonicalization_namespace" }),
+        "I-D §7.6 — private-use if and only if the identifier begins `x-`",
+    );
+
+    // And the converse: `private-use` where the identifier is registered. `jcs` is not an `x-`
+    // identifier, so claiming the private-use namespace over it is equally a disagreement.
+    assert_rejects(
+        "record-ingested-valid.ahl",
+        |r| r["claim"]["assurance"]["canonicalization_namespace"] = json!("private-use"),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "canonicalization_namespace" }),
+        "I-D §7.6 — private-use only where the identifier begins `x-`",
+    );
+}
+
 /// I-D §7.1: `binding` "is the object `{ \"entry_index\": <integer> }`", and "the member shapes
 /// shown above are normative".
 ///
@@ -3173,7 +3235,16 @@ fn cross_field_consistency_rules_reject() {
     );
     assert_rejects(
         "record-ingested-valid.ahl",
-        |r| r["claim"]["assurance"]["content_binding"] = json!("none"),
+        |r| {
+            r["claim"]["assurance"]["content_binding"] = json!("none");
+            // Dropping the namespace member with it, since I-D §7.3 makes the two travel
+            // together — otherwise THAT rule fires and the content-evidence one is never
+            // reached.
+            r["claim"]["assurance"]
+                .as_object_mut()
+                .expect("assurance object")
+                .remove("canonicalization_namespace");
+        },
         |e| matches!(e, ReceiptError::AssuranceMismatch { field: "content_binding" }),
         "§2.1 — content evidence absent iff content_binding is none",
     );
@@ -3357,6 +3428,10 @@ fn dedup_keys_on_the_whole_receipt_not_the_envelope() {
     let mut invalid = honest.clone();
     // Same envelope — therefore the same entry id — but different claim material.
     invalid["claim"]["assurance"]["content_binding"] = json!("plain-verified");
+    // I-D §7.3: the member is REQUIRED wherever a content binding is asserted, and `jcs` is a
+    // registered identifier — without it the receipt fails on the assurance rule instead of
+    // reaching the commitment comparison this test is about.
+    invalid["claim"]["assurance"]["canonicalization_namespace"] = json!("public");
     invalid["claim_material"] = json!({
         // Valid JSON so it clears canonicalization (I-D §2.6/§7.2) and reaches the commitment
         // comparison this test is actually about; "jcs" matches the manifest's declared
