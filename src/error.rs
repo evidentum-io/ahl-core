@@ -45,6 +45,69 @@ pub enum AhlError {
     #[error("duplicate record `{0}` in a record-sorted tree (spec §2.5 prohibits duplicates)")]
     DuplicateRecord(String),
 
+    /// A dataset id violates the length/printable-ASCII production (I-D revision 0.4 §2.6).
+    ///
+    /// A dataset id is 1..=128 characters, each a printable US-ASCII character in `0x21..=0x7E`.
+    #[error(
+        "dataset id `{id}` violates the I-D §2.6 syntax: 1..=128 printable US-ASCII characters \
+         (0x21-0x7E)"
+    )]
+    DatasetIdSyntax {
+        /// The offending dataset id, as received (may itself contain unprintable octets).
+        id: String,
+    },
+
+    /// A dataset id contains a control octet (I-D revision 0.4 §2.6).
+    ///
+    /// Kept as its own check with its own error variant rather than folded into
+    /// [`Self::DatasetIdSyntax`], because the I-D states this check is load-bearing and "exactly
+    /// the check an implementation omits": a dataset id containing `0x1F` would make the
+    /// commitment preimage's `dsid`/`ddig` boundary ambiguous, letting two distinct records
+    /// collide.
+    #[error(
+        "dataset id `{id}` contains a control octet (0x00-0x1F or 0x7F), which I-D §2.6 \
+         prohibits because it would make the commitment preimage's `dsid` boundary ambiguous"
+    )]
+    DatasetIdControlOctet {
+        /// The offending dataset id.
+        id: String,
+    },
+
+    /// A `canonicalization` identifier violates the identifier production (I-D §2.6).
+    #[error(
+        "canonicalization identifier `{id}` violates the I-D §2.6 syntax: 1..=64 characters, \
+         `a`-`z`/`0`-`9`/`-` only, first character `a`-`z`"
+    )]
+    CanonicalizationIdentifierSyntax {
+        /// The offending identifier.
+        id: String,
+    },
+
+    /// A descriptor `media_type` violates the descriptor media-type production (I-D §2.6).
+    #[error("media_type `{media_type}` violates the I-D §2.6 descriptor media-type production: {detail}")]
+    MediaTypeSyntax {
+        /// The offending value, as declared.
+        media_type: String,
+        /// Which part of the production it fails.
+        detail: &'static str,
+    },
+
+    /// A descriptor `media_type` repeats one parameter name after lowercasing (I-D §2.6).
+    ///
+    /// Tested on the *lowercased* names: `text/plain;Foo=1;foo=2` is rejected even though the
+    /// two spellings differ case-sensitively, because normalization would otherwise make the
+    /// output depend on the order the parameters were written.
+    #[error(
+        "media_type `{media_type}` repeats parameter `{param}` (case-insensitively); I-D §2.6 \
+         never resolves this by first-wins or last-wins"
+    )]
+    MediaTypeDuplicateParam {
+        /// The offending value, as declared.
+        media_type: String,
+        /// The lowercased parameter name that repeats.
+        param: String,
+    },
+
     /// Caller-supplied leaf material does not recompute to the root it claims to open.
     #[error("tree material for `{root}` recomputes to `{recomputed}`")]
     TreeRootMismatch {
