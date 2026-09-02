@@ -2774,6 +2774,20 @@ fn step_3_path_checks_precede_the_step_4_induction() {
         "a chain hop whose signature does not verify is caught by the induction (4b phase 1)"
     );
 
+    // A `raw` checkpoint form on the same receipt: reconciling it is step 2, so it is reported
+    // ahead of the governance signature failure of step 4. This build wires no profile's `raw`
+    // parser, so its mere presence is the profile-limitation outcome (I-D §7.5 step 2).
+    let mut with_raw = signature_only.clone();
+    with_raw["anchoring"]["checkpoint"]["raw"] = json!("base64:AAAA");
+    assert!(
+        matches!(
+            verify_receipt(&with_raw, &trust_policy()),
+            Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. })
+                if id == "ahl-test-log-v1"
+        ),
+        "a carried `raw` form is reconciled at step 2, before the step 4 induction"
+    );
+
     // Both defects together: the path failure is what a verifier reports, because step 3 is
     // where it is decided.
     let mut both = signature_only;

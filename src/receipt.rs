@@ -1259,6 +1259,24 @@ fn reconcile_checkpoint_raw(checkpoint: &Value, profile_id: &str) -> Result<()> 
     Ok(())
 }
 
+/// Reconcile the `raw` form of every checkpoint the `anchoring` block carries (I-D §7.5
+/// step 2: "Where a raw checkpoint form is carried (`anchoring.checkpoint.raw`, Section 7.1),
+/// verify that it parses to the same values as the JSON members; a mismatch is `invalid`").
+///
+/// The check is profile-dependent — what `raw` even means is the adaptor's own framing — but
+/// it is key-independent, and §7.5 places it in step 2 alongside profile resolution rather
+/// than in the authenticated validation of 4f. Presence is read here without requiring the
+/// checkpoint object to be otherwise well formed: its shape is step 3's business, and reading
+/// one member for presence prejudges none of it.
+fn reconcile_anchoring_raw(anchoring: &Value, profile_id: &str) -> Result<()> {
+    for member in ["checkpoint", "later_checkpoint"] {
+        if let Some(checkpoint) = anchoring.get(member) {
+            reconcile_checkpoint_raw(checkpoint, profile_id)?;
+        }
+    }
+    Ok(())
+}
+
 /// One witness-cosignature object in the shape of `anchoring.witnesses[]` (I-D §7.1):
 /// `{witness_id, key_id, cosignature, cosigned_at}` — every member REQUIRED. Shared by
 /// `anchoring.witnesses[]` and every `governance.rotation_proofs[].witnesses[]` element (I-D
@@ -2868,13 +2886,6 @@ fn verify_checkpoint(
         ));
     }
 
-    // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values as the
-    // JSON members." Whether `raw` is usable at all is a property of the pinned profile
-    // document, not of this verifier — `ahl-test-log-v1` defines no framing, so receipts under
-    // it may carry none — but WHERE it is usable, this actually parses and compares it rather
-    // than merely gating on the capability flag.
-    reconcile_checkpoint_raw(checkpoint, profile_id)?;
-
     let (log_keys, log_attempted) =
         bind_keys_by_group(receipt, policy, governance, active_index, "log")?;
     let (witness_keys, witness_attempted) =
@@ -3285,6 +3296,12 @@ fn verify_nested(
             capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
         });
     }
+
+    // I-D §7.5 step 2: "Where a raw checkpoint form is carried… verify that it parses to the
+    // same values as the JSON members." Profile-dependent and key-independent, so it belongs
+    // with profile resolution — decided before step 3 reads a path and long before any
+    // signature is checked.
+    reconcile_anchoring_raw(anchoring_block, adaptor_id)?;
 
     // --- §7.5 step 3: key-independent structural and path checks --------------------
     // "No signature and no cosignature is verified in this step." The checkpoint's own members
@@ -4381,10 +4398,11 @@ fn authenticate_checkpoint(
         ));
     }
 
-    // I-D §7.1, §7.5 step 2: the same `raw` reconciliation every other receipt-borne
-    // checkpoint gets, applied identically here — `declared` is `anchoring.later_checkpoint`
-    // or `propagation-complete`'s own declared checkpoint D, both receipt-borne checkpoints in
-    // the same form.
+    // `declared` is `anchoring.later_checkpoint` or `propagation-complete`'s own declared
+    // checkpoint D. The first had its `raw` reconciled at §7.5 step 2 with the rest of the
+    // `anchoring` block ([`reconcile_anchoring_raw`]); D is claim material rather than an
+    // `anchoring` member, so this is the call that covers it, and repeating the check for
+    // `later_checkpoint` costs one absent-member read.
     reconcile_checkpoint_raw(declared, profile_id)?;
 
     // The log key resolves against the manifest active for this checkpoint's *own* tree size,
