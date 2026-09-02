@@ -229,6 +229,23 @@ pub enum ReceiptError {
         capability: &'static str,
     },
 
+    /// Locally configured policy claims a capability this build has no implementation for
+    /// (I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values as the
+    /// JSON members" — a claim this build cannot make good on for an unimplemented wire form).
+    ///
+    /// This is distinct from [`Self::AdaptorCapabilityUnsupported`], which names a per-receipt
+    /// limitation the RECEIPT ran into. This one names a limitation of the POLICY itself,
+    /// caught once, before any receipt content is even read: a `TrustPolicy` asserting
+    /// `checkpoint_raw: true` for a profile this build has no parser for is a configuration
+    /// error, never silently downgraded to "accept `raw` unparsed" or "treat it as false".
+    #[error("adaptor profile `{id}` policy claims {capability}, which this build cannot parse")]
+    AdaptorProfileMisconfigured {
+        /// The pinned profile id.
+        id: String,
+        /// The capability the policy claims.
+        capability: &'static str,
+    },
+
     /// A claim's checkpoint is not the checkpoint the claim is required to rest on (§3).
     ///
     /// For `trigger-effective` that reference is the receipt's own verified
@@ -694,6 +711,70 @@ fn check_ahl_version(payload: &Value) -> Result<()> {
     }
 }
 
+/// The seven statement types I-D §2.3 defines: five describe records, two govern the corpus.
+const STATEMENT_TYPES: [&str; 7] =
+    ["ingestion", "derivation", "retraction", "correction", "propagation", "manifest", "key"];
+
+/// Validate I-D §2.2's common payload fields on a carried statement, before its type-specific
+/// content or effect is trusted (§7.5.1 4b(K): "the common payload fields of Section 2.2 are
+/// present and well formed" — stated for `key` statements, but §2.2 states the same fields for
+/// EVERY statement type, manifest and the five record types included).
+///
+/// `ahl_version` carries its own distinct "unverifiable, not invalid" semantics and is checked
+/// separately by [`check_ahl_version`]; this function does not repeat it. Used for the subject
+/// envelope, every governance chain hop, and every enumerated envelope — one validator, so the
+/// rule cannot drift between call sites.
+fn common_payload_fields(payload: &Value) -> Result<()> {
+    let invalid =
+        |member: &str, detail: &str| ReceiptError::Malformed(format!("payload {member}: {detail}"));
+
+    let kind = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("type", "the member is REQUIRED (I-D §2.2)"))?;
+    if !STATEMENT_TYPES.contains(&kind) {
+        return Err(invalid("type", "not one of the seven defined statement types (I-D §2.3)"));
+    }
+
+    if !payload.get("producer").is_some_and(Value::is_string) {
+        return Err(invalid("producer", "the member is REQUIRED and MUST be a string (I-D §2.2)"));
+    }
+
+    // I-D §2.2: "<manifest version id; absent only in manifest statements>"; §2.4.5: "the
+    // `manifest` common field is absent" on a manifest statement's own payload.
+    match (kind, payload.get("manifest")) {
+        ("manifest", Some(_)) => {
+            return Err(invalid(
+                "manifest",
+                "MUST be absent on a manifest statement (I-D §2.2, §2.4.5)",
+            ))
+        }
+        ("manifest", None) => {}
+        (_, Some(value)) if value.is_string() => {}
+        (_, _) => {
+            return Err(invalid(
+                "manifest",
+                "the member is REQUIRED, and MUST be a string, except on a manifest \
+                 statement (I-D §2.2)",
+            ))
+        }
+    }
+
+    // `"<RFC 3339>" | {"from": "<RFC 3339>", "to": "<RFC 3339 or null>"}` — already implements
+    // exactly this shape, open interval and all, for trigger scoping; reused here purely for
+    // its shape validation.
+    crate::bitemporal::ValidTime::from_payload(payload)
+        .map_err(|source| invalid("valid_time", &source.to_string()))?;
+
+    let issued_at = payload.get("issued_at").and_then(Value::as_str).ok_or_else(|| {
+        invalid("issued_at", "the member is REQUIRED and MUST be a string (I-D §2.2)")
+    })?;
+    crate::bitemporal::parse_rfc3339("payload.issued_at", issued_at)
+        .map_err(|source| invalid("issued_at", &source.to_string()))?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Budget
 // ---------------------------------------------------------------------------
@@ -899,6 +980,22 @@ fn is_family_hash(value: &str) -> bool {
     })
 }
 
+/// Recompute a producer `key_id` from its `pubkey`: I-D §6.2 — "`pubkey` decodes to exactly
+/// the 32 octets of an Ed25519 public key; and `key_id` equals `sha256:` followed by the
+/// lowercase hex SHA-256 of those octets, so it is recomputable rather than merely declared."
+/// Shared by every place a PRODUCER key object's own id is trusted only once recomputed —
+/// manifest producer key objects ([`producer_key_objects`]) and `key` statements' own key
+/// object (I-D §7.5.1 4b(K)) alike; NOT for log or witness keys, whose id derivation is
+/// adaptor-profile-defined rather than this fixed rule (I-D §2.4.6).
+///
+/// # Errors
+///
+/// Returns [`AhlError::BadLength`] (via [`decode_pubkey`]) if `pubkey` does not decode to
+/// exactly 32 octets.
+fn recompute_producer_key_id(pubkey: &str) -> Result<String> {
+    Ok(sha256_hex(decode_pubkey(pubkey)?.as_bytes()))
+}
+
 /// The receipt-borne checkpoint shape (I-D §7.1): `{log_id, tree_size, root_hash,
 /// checkpoint_time, key_id, signature}` — every member REQUIRED — plus an optional `raw`.
 /// Shared by `anchoring.checkpoint`, `anchoring.later_checkpoint`, and every
@@ -931,6 +1028,172 @@ fn checkpoint_object(value: &Value) -> Result<&Value> {
         return Err(invalid("signature", "REQUIRED"));
     }
     Ok(value)
+}
+
+/// The only adaptor profile this build carries a `checkpoint.raw` wire-format parser for.
+///
+/// I-D §7.1 leaves the `raw` framing profile-defined; this crate implements exactly one, the
+/// pinned companion profile `ahl-adaptor-atl-v1` (its §6.1 "ATL binary form"). Any other
+/// profile id reaching [`reconcile_checkpoint_raw`] — including the corpus's own minimal
+/// `ahl-test-log-v1`, which §6.4 of that profile note explicitly defines no framing for at
+/// all — has no parser here, by construction.
+const ATL_ADAPTOR_PROFILE_ID: &str = "ahl-adaptor-atl-v1";
+
+/// Parse an `ahl-adaptor-atl-v1` §6.3 `checkpoint_time` rendering into its exact Unix
+/// nanosecond count.
+///
+/// §6.3: "`checkpoint_time` MUST be the UTC rendering of the ATL nanosecond timestamp with
+/// EXACTLY NINE fractional digits and the `Z` suffix... verifiers MUST parse the nine
+/// fractional digits back to the exact u64 nanosecond value and MUST reject a `checkpoint_time`
+/// that is not in this form." This is stricter than the generic RFC 3339 grammar
+/// [`crate::bitemporal::parse_rfc3339`] accepts elsewhere in this crate (any digit count, any
+/// numeric offset) — deliberately: only THIS exact rendering round-trips to the 98-byte blob a
+/// producer actually signed (§6.1), so any other rendering is rejected outright here rather
+/// than "generously" converted.
+fn atl_checkpoint_time_nanos(value: &str) -> Result<u64> {
+    let invalid = || {
+        ReceiptError::Malformed(format!(
+            "checkpoint_time `{value}`: not the ATL adaptor's required rendering — exactly \
+             nine fractional-second digits and a literal `Z` (adaptor profile \
+             `ahl-adaptor-atl-v1` §6.3)"
+        ))
+    };
+    // "YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ" is exactly 30 ASCII bytes: a literal `.` at offset 19
+    // and a literal `Z` at the last byte, with nine ASCII digits between them — checked here
+    // directly rather than trusted to whatever the generic RFC 3339 parser happens to accept.
+    let bytes = value.as_bytes();
+    if bytes.len() != 30
+        || bytes[19] != b'.'
+        || bytes[29] != b'Z'
+        || !value[20..29].bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let parsed =
+        crate::bitemporal::parse_rfc3339("checkpoint_time", value).map_err(|_| invalid())?;
+    let seconds = u64::try_from(parsed.unix_timestamp()).map_err(|_| invalid())?;
+    let nanos = u64::from(parsed.nanosecond());
+    seconds.checked_mul(1_000_000_000).and_then(|s| s.checked_add(nanos)).ok_or_else(invalid)
+}
+
+/// Reconcile a receipt-borne checkpoint's optional `raw` framing against its own JSON members,
+/// under the pinned adaptor profile's wire-format definition (I-D §7.1, §7.5 step 2: "WHERE
+/// `raw` is carried it MUST parse to the same values as the JSON members... the JSON members
+/// govern the comparison, and a mismatch is `invalid`").
+///
+/// Shared by every receipt-borne checkpoint this crate reads — `anchoring.checkpoint`,
+/// `anchoring.later_checkpoint`, `claim_material.corpus_checkpoint` (via
+/// [`authenticate_checkpoint`]), and every `governance.rotation_proofs[].checkpoint` — so this
+/// rule cannot drift between call sites the way a capability boolean alone would let it.
+///
+/// A boolean capability flag is not reconciliation: `raw` present under a profile that claims
+/// `checkpoint_raw` but that this build cannot parse is refused as a POLICY configuration
+/// error before any receipt is even read (`verify_nested`'s adaptor-profile resolution), so by
+/// the time this function runs with `profile.capabilities.checkpoint_raw` true, `profile_id` is
+/// already known to name a profile this build parses. The `profile_id` check below is
+/// defensive, not load-bearing — this function makes no other assumption about how it was
+/// reached, and refuses rather than guesses if that invariant is ever wrong.
+fn reconcile_checkpoint_raw(
+    checkpoint: &Value,
+    profile: &AdaptorProfile,
+    profile_id: &str,
+) -> Result<()> {
+    let Some(raw) = checkpoint.get("raw").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if !profile.capabilities.checkpoint_raw {
+        return Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: profile_id.to_owned(),
+            capability: "a binary checkpoint framing for `checkpoint.raw`",
+        });
+    }
+    if profile_id != ATL_ADAPTOR_PROFILE_ID {
+        return Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: profile_id.to_owned(),
+            capability: "a binary checkpoint framing for `checkpoint.raw`",
+        });
+    }
+    reconcile_atl_checkpoint_raw(checkpoint, raw)
+}
+
+/// The actual `ahl-adaptor-atl-v1` §6.1/§6.2 parse-and-compare: decode the 98-byte blob and
+/// require EVERY mapped field to equal the JSON checkpoint's own member.
+fn reconcile_atl_checkpoint_raw(checkpoint: &Value, raw: &str) -> Result<()> {
+    const MAGIC: &[u8; 18] = b"ATL-Protocol-v1-CP";
+
+    let invalid = |detail: String| ReceiptError::Malformed(format!("checkpoint raw: {detail}"));
+
+    let encoded = raw.strip_prefix("base64:").ok_or_else(|| {
+        invalid(
+            "`raw` MUST be `base64:<...>` (adaptor profile `ahl-adaptor-atl-v1` §6.4)".to_owned(),
+        )
+    })?;
+    let bytes = B64
+        .decode(encoded)
+        .map_err(|source| invalid(format!("`raw` does not decode as base64: {source}")))?;
+    let Ok(blob): core::result::Result<[u8; 98], _> = bytes.try_into() else {
+        return Err(invalid(
+            "`raw` MUST decode to exactly 98 octets (adaptor profile `ahl-adaptor-atl-v1` §6.1)"
+                .to_owned(),
+        ));
+    };
+    if blob[0..18] != *MAGIC {
+        return Err(invalid(
+            "`raw`'s magic is not `ATL-Protocol-v1-CP` (adaptor profile `ahl-adaptor-atl-v1` \
+             §6.1)"
+                .to_owned(),
+        ));
+    }
+
+    let origin_hex = format!("sha256:{}", hex::encode(&blob[18..50]));
+    if Some(origin_hex.as_str()) != checkpoint.get("log_id").and_then(Value::as_str) {
+        return Err(invalid(
+            "`raw`'s Origin ID does not match `log_id` (adaptor profile `ahl-adaptor-atl-v1` \
+             §6.2)"
+                .to_owned(),
+        ));
+    }
+
+    let raw_tree_size = u64::from_le_bytes(blob[50..58].try_into().unwrap_or_default());
+    if Some(raw_tree_size) != checkpoint.get("tree_size").and_then(Value::as_u64) {
+        return Err(invalid(
+            "`raw`'s tree size does not match `tree_size` (adaptor profile \
+             `ahl-adaptor-atl-v1` §6.2)"
+                .to_owned(),
+        ));
+    }
+
+    let raw_ts_ns = u64::from_le_bytes(blob[58..66].try_into().unwrap_or_default());
+    let json_ts_ns = checkpoint
+        .get("checkpoint_time")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`checkpoint_time` is REQUIRED".to_owned()))
+        .and_then(|value| {
+            atl_checkpoint_time_nanos(value).map_err(|_| {
+                invalid(format!(
+                    "`checkpoint_time` (`{value}`) is not the ATL adaptor's required rendering \
+             (adaptor profile `ahl-adaptor-atl-v1` §6.3)"
+                ))
+            })
+        })?;
+    if raw_ts_ns != json_ts_ns {
+        return Err(invalid(
+            "`raw`'s timestamp does not match `checkpoint_time` (adaptor profile \
+             `ahl-adaptor-atl-v1` §6.2, §6.3)"
+                .to_owned(),
+        ));
+    }
+
+    let root_hex = format!("sha256:{}", hex::encode(&blob[66..98]));
+    if Some(root_hex.as_str()) != checkpoint.get("root_hash").and_then(Value::as_str) {
+        return Err(invalid(
+            "`raw`'s root hash does not match `root_hash` (adaptor profile \
+             `ahl-adaptor-atl-v1` §6.2)"
+                .to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// One witness-cosignature object in the shape of `anchoring.witnesses[]` (I-D §7.1):
@@ -1203,6 +1466,14 @@ fn producer_key_objects(container: &Value) -> Result<Vec<(String, String)>> {
                 .get("pubkey")
                 .and_then(Value::as_str)
                 .ok_or_else(|| invalid("pubkey", "the member is REQUIRED (I-D §6.2)"))?;
+            // "`pubkey` decodes to exactly the 32 octets... `key_id` equals `sha256:` ...of
+            // those octets, so it is recomputable rather than merely declared" (I-D §6.2).
+            let recomputed = recompute_producer_key_id(pubkey).map_err(|_| {
+                invalid("pubkey", "does not decode to exactly 32 octets (I-D §6.2)")
+            })?;
+            if recomputed != key_id {
+                return Err(invalid("key_id", "does not equal `sha256:`-of-`pubkey` (I-D §6.2)"));
+            }
             Ok((key_id.to_owned(), pubkey.to_owned()))
         })
         .collect()
@@ -1263,6 +1534,128 @@ fn datasets_object(manifest: &Value) -> Result<()> {
         CanonicalizationDescriptor::new(canonicalization, media_type)
             .map_err(|source| invalid(source.to_string()))?;
     }
+    Ok(())
+}
+
+/// Validate I-D §6.2's remaining manifest-scope members — the ones §6.2 lists as part of what
+/// the manifest "contains at minimum" beyond producer/log/witness keys and datasets, which are
+/// checked elsewhere ([`producer_key_objects`], [`log_object`], [`datasets_object`]):
+/// `pipelines`, `windows`, `retention`, and `level`.
+///
+/// `level` in particular gates the L3 cosignature requirement in [`verify_rotation_proof`]
+/// (`rotating_manifest.get("level") == Some("L3")`); an absent or malformed `level` MUST fail
+/// HERE, in schema, rather than be silently read by that later, unrelated `==` comparison as
+/// simply "not L3" — this function running before that comparison is what makes the guarantee
+/// hold, not any check inside the comparison itself.
+fn manifest_scope_fields(manifest: &Value) -> Result<()> {
+    let invalid = |object: &str, detail: &str| ReceiptError::ManifestSchemaInvalid {
+        object: object.to_owned(),
+        detail: detail.to_owned(),
+    };
+
+    // `windows.*` and `retention.*` are durations in name and by example ("PT24H", "P30D",
+    // "P10Y"), but — unlike `log.checkpoint_cadence`/`log.witness_grace_period` — §6.2 states
+    // NO restricted grammar for them; §7.3's `Y`/date-part-`M` prohibition is stated for those
+    // two log-timing fields specifically, not for every duration a manifest carries, and a
+    // 10-year retention period is an ordinary value this crate must not invent a reason to
+    // reject. So this checks only that the value is duration-SHAPED — non-empty and
+    // `P`-prefixed — not the full restricted grammar [`duration_nanos`] enforces elsewhere.
+    let duration_shaped = |member: &str, value: &str| -> Result<()> {
+        if value.starts_with('P') && value.len() > 1 {
+            Ok(())
+        } else {
+            Err(invalid(member, "MUST be an ISO 8601 duration, `P`-prefixed (I-D §6.2)"))
+        }
+    };
+
+    match manifest.get("level").and_then(Value::as_str) {
+        Some("L1" | "L2" | "L3") => {}
+        Some(_) => {
+            return Err(invalid("level", "MUST be exactly `L1`, `L2`, or `L3` (I-D §6.1, §6.2)"))
+        }
+        None => return Err(invalid("level", "the member is REQUIRED (I-D §6.2)")),
+    }
+
+    let pipelines = manifest
+        .get("pipelines")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| invalid("pipelines", "the object is REQUIRED (I-D §6.2)"))?;
+    for member in ["include", "exclude"] {
+        let list = pipelines.get(member).and_then(Value::as_array).ok_or_else(|| {
+            invalid(
+                &format!("pipelines.{member}"),
+                "the member is REQUIRED and MUST be an array (I-D §6.2)",
+            )
+        })?;
+        if !list.iter().all(Value::is_string) {
+            return Err(invalid(
+                &format!("pipelines.{member}"),
+                "every element MUST be a string (I-D §6.2)",
+            ));
+        }
+    }
+
+    let windows = manifest
+        .get("windows")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| invalid("windows", "the object is REQUIRED (I-D §6.2)"))?;
+    for member in ["anchoring", "propagation"] {
+        let value = windows.get(member).and_then(Value::as_str).ok_or_else(|| {
+            invalid(
+                &format!("windows.{member}"),
+                "the member is REQUIRED and MUST be a string (I-D §6.2)",
+            )
+        })?;
+        duration_shaped(&format!("windows.{member}"), value)?;
+    }
+
+    let retention = manifest
+        .get("retention")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| invalid("retention", "the object is REQUIRED (I-D §6.2)"))?;
+    let statements = retention.get("statements").and_then(Value::as_str).ok_or_else(|| {
+        invalid("retention.statements", "the member is REQUIRED and MUST be a string (I-D §6.2)")
+    })?;
+    duration_shaped("retention.statements", statements)?;
+
+    // "Retention: for statements, and for artifacts IF REPRODUCIBLE RECONSTRUCTION IS
+    // CLAIMED" — the second retention duration is conditionally REQUIRED, exactly when
+    // `properties.reproducible_reconstruction` claims true, not merely optional throughout.
+    let reproducible = match manifest.get("properties") {
+        None => false,
+        Some(value) => {
+            let properties = value.as_object().ok_or_else(|| {
+                invalid("properties", "MUST be an object where present (I-D §6.2)")
+            })?;
+            match properties.get("reproducible_reconstruction") {
+                None => false,
+                Some(Value::Bool(claim)) => *claim,
+                Some(_) => {
+                    return Err(invalid(
+                        "properties.reproducible_reconstruction",
+                        "MUST be a boolean where present (I-D §6.2)",
+                    ))
+                }
+            }
+        }
+    };
+    match retention.get("artifacts") {
+        Some(value) => {
+            let duration = value.as_str().ok_or_else(|| {
+                invalid("retention.artifacts", "MUST be a string where present (I-D §6.2)")
+            })?;
+            duration_shaped("retention.artifacts", duration)?;
+        }
+        None if reproducible => {
+            return Err(invalid(
+                "retention.artifacts",
+                "the member is REQUIRED where `properties.reproducible_reconstruction` is \
+                 true (I-D §6.2)",
+            ))
+        }
+        None => {}
+    }
+
     Ok(())
 }
 
@@ -1350,18 +1743,9 @@ fn verify_rotation_proof(
     // same strict shape `anchoring.checkpoint` takes, not a looser one.
     let checkpoint = checkpoint_object(obj(element, "checkpoint")?)?;
     // "WHERE `raw` is present, the verifier MUST check that it parses to the same values" —
-    // an adaptor-profile-defined, binary-framing capability. Exactly the same gate
-    // `verify_checkpoint` applies to `anchoring.checkpoint.raw` applies here: a profile that
-    // defines no framing cannot perform that check, so a rotation-proof checkpoint carrying
-    // `raw` under such a profile is rejected as a limitation of the profile, named, not
-    // silently ignored or silently trusted.
-    if checkpoint.get("raw").is_some() && !profile.capabilities.checkpoint_raw {
-        return Err(ReceiptError::AdaptorCapabilityUnsupported {
-            id: profile_id.to_owned(),
-            capability: "a binary checkpoint framing for \
-                         `governance.rotation_proofs[].checkpoint.raw`",
-        });
-    }
+    // the same reconciliation `verify_checkpoint` applies to `anchoring.checkpoint.raw`
+    // applies here, identically (I-D §7.1).
+    reconcile_checkpoint_raw(checkpoint, profile, profile_id)?;
     let tree_size = number(checkpoint, "tree_size")?;
     if tree_size <= manifest_entry_index {
         return Err(invalid(format!(
@@ -1561,9 +1945,11 @@ fn read_chain<'a>(
             "the genesis manifest must carry no predecessor reference".to_owned(),
         ));
     }
+    common_payload_fields(genesis_payload)?;
     producer_key_objects(genesis_payload)?;
     log_object(genesis_payload)?;
     datasets_object(genesis_payload)?;
+    manifest_scope_fields(genesis_payload)?;
     if let Some(witnesses) = genesis_payload.get("witnesses").and_then(Value::as_array) {
         for witness in witnesses {
             key_objects(witness)?;
@@ -1608,7 +1994,10 @@ fn read_chain<'a>(
 
         // "A failure at phase 1 or phase 2 is invalid, and the induction does not continue past
         // it. No effect is ever applied to K by a statement that has not completed both
-        // earlier phases." Phase 2 (type-specific validation) and phase 3 (effect) follow.
+        // earlier phases." Phase 2 (type-specific validation) and phase 3 (effect) follow —
+        // starting with the common payload fields I-D §2.2 requires of EVERY statement, before
+        // either the manifest-specific or key-statement-specific content below is read.
+        common_payload_fields(payload)?;
         match statement_type(payload)? {
             "manifest" => {
                 // Phase 2, 4b(M): predecessor linkage, then the same §6.2/§6.3 schema every
@@ -1643,6 +2032,11 @@ fn read_chain<'a>(
                 producer_key_objects(payload)?;
                 log_object(payload)?;
                 datasets_object(payload)?;
+                // §6.2's remaining "contains at minimum" members — `pipelines`, `windows`,
+                // `retention`, `level` — validated BEFORE the rotation-anchoring rule below
+                // reads `level` to decide whether L3 applies (an absent or malformed `level`
+                // must fail HERE, in schema, never be silently read as "not L3").
+                manifest_scope_fields(payload)?;
                 if let Some(witnesses) = payload.get("witnesses").and_then(Value::as_array) {
                     for witness in witnesses {
                         key_objects(witness)?;
@@ -1725,16 +2119,16 @@ fn read_chain<'a>(
                     )));
                 }
                 let pubkey = text(key, "pubkey")?.to_owned();
-                // "`pubkey` decodes to exactly 32 octets" — `decode_pubkey` enforces exactly
-                // that (base64: prefix, valid base64, exactly 32 decoded octets).
-                let decoded = decode_pubkey(&pubkey).map_err(|_| {
+                // "`pubkey` decodes to exactly 32 octets" and "`key_id` RECOMPUTED from
+                // `pubkey` and equal to the carried one" — the SAME rule and SAME helper I-D
+                // §6.2 states for a manifest's own producer key objects
+                // ([`recompute_producer_key_id`]), shared rather than re-derived here.
+                let recomputed = recompute_producer_key_id(&pubkey).map_err(|_| {
                     ReceiptError::GovernanceChainInvalid(format!(
                         "key statement at entry index {index} carries `key.pubkey` that does \
                          not decode to exactly 32 octets (I-D §7.5.1 4b(K))"
                     ))
                 })?;
-                // "`key_id` RECOMPUTED from `pubkey` and equal to the carried one"
-                let recomputed = sha256_hex(decoded.as_bytes());
                 if recomputed != key_id {
                     return Err(ReceiptError::GovernanceChainInvalid(format!(
                         "key statement at entry index {index} carries `key.key_id` \
@@ -1926,14 +2320,12 @@ fn verify_checkpoint(
 ) -> Result<Anchoring> {
     let anchoring = obj(receipt, "anchoring")?;
     let checkpoint = checkpoint_object(obj(anchoring, "checkpoint")?)?;
-    // Whether these are usable is a property of the pinned profile document, not of this
-    // verifier: `ahl-test-log-v1` defines neither, so receipts under it may carry neither.
-    if checkpoint.get("raw").is_some() && !profile.capabilities.checkpoint_raw {
-        return Err(ReceiptError::AdaptorCapabilityUnsupported {
-            id: profile_id.to_owned(),
-            capability: "a binary checkpoint framing for `anchoring.checkpoint.raw`",
-        });
-    }
+    // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values as the
+    // JSON members." Whether `raw` is usable at all is a property of the pinned profile
+    // document, not of this verifier — `ahl-test-log-v1` defines no framing, so receipts under
+    // it may carry none — but WHERE it is usable, this actually parses and compares it rather
+    // than merely gating on the capability flag.
+    reconcile_checkpoint_raw(checkpoint, profile, profile_id)?;
     let tree_size = number(checkpoint, "tree_size")?;
     let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
     let (active_index, active_manifest) = governance.active_for(tree_size)?;
@@ -2024,8 +2416,9 @@ fn verify_checkpoint(
             capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
         });
     }
-    let continued_history =
-        verify_continued_history(receipt, governance, anchoring, tree_size, &root, budget)?;
+    let continued_history = verify_continued_history(
+        receipt, governance, anchoring, tree_size, &root, profile, profile_id, budget,
+    )?;
 
     Ok(Anchoring { tree_size, root, witnessed, continued_history })
 }
@@ -2052,12 +2445,18 @@ fn verify_checkpoint(
 /// The claim's boundary stops there. A consistency proof shows one tree is an append-only
 /// extension of another; it does not show that a checkpoint the cadence required was ever
 /// published (core spec §7.3), and no verdict rendered from it may say otherwise.
+// `profile`/`profile_id` thread the §7.1 raw-checkpoint reconciliation into
+// `authenticate_checkpoint`, identically to every other receipt-borne checkpoint this crate
+// reads; bundling them would only rename this list.
+#[allow(clippy::too_many_arguments)]
 fn verify_continued_history(
     receipt: &Value,
     governance: &Governance<'_>,
     anchoring: &Value,
     from_size: u64,
     from_root: &Hash,
+    profile: &AdaptorProfile,
+    profile_id: &str,
     budget: &mut Budget,
 ) -> Result<bool> {
     match (anchoring.get("later_checkpoint"), anchoring.get("consistency_path")) {
@@ -2086,7 +2485,7 @@ fn verify_continued_history(
         // continued history; it is the size regression a witness refuses to cosign over.
         return Err(ReceiptError::ConsistencyPathInvalid);
     }
-    authenticate_checkpoint(receipt, governance, later, budget)?;
+    authenticate_checkpoint(receipt, governance, later, profile, profile_id, budget)?;
 
     let to_root = parse_hash_hex(text(later, "root_hash")?)?;
     let path = path_strings(anchoring, "consistency_path")?;
@@ -2177,12 +2576,14 @@ fn verify_enumeration(
             });
         }
         let envelope = obj(entry, "envelope")?;
-        // I-D §2.2 / §7.1: every carried statement's `ahl_version` is checked before
-        // validating that statement — enumerated envelopes included. This is the one choke
-        // point every enumerated envelope (governance currency, competing-trigger, and
-        // propagation-prefix material alike) passes through before its payload is read
-        // anywhere downstream.
-        check_ahl_version(payload_of(envelope)?)?;
+        // I-D §2.2 / §7.1: every carried statement's `ahl_version`, then its common payload
+        // fields, are checked before validating that statement — enumerated envelopes
+        // included. This is the one choke point every enumerated envelope (governance
+        // currency, competing-trigger, and propagation-prefix material alike) passes through
+        // before its payload is read anywhere downstream.
+        let entry_payload = payload_of(envelope)?;
+        check_ahl_version(entry_payload)?;
+        common_payload_fields(entry_payload)?;
         envelopes.push(envelope.clone());
     }
 
@@ -2287,6 +2688,18 @@ fn verify_nested(
         .get(adaptor_id)
         .filter(|profile| profile.hash == text(adaptor, "hash").unwrap_or_default())
         .ok_or_else(|| ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() })?;
+    // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values" — a
+    // capability boolean is not itself reconciliation. A policy asserting `checkpoint_raw:
+    // true` for a profile this build has no parser for ([`ATL_ADAPTOR_PROFILE_ID`] is the
+    // only one it carries one for) can never make good on that claim, so it is refused here,
+    // once, as a POLICY defect — never silently downgraded to "accept `raw` unparsed" for
+    // every receipt this policy verifies.
+    if profile.capabilities.checkpoint_raw && adaptor_id != ATL_ADAPTOR_PROFILE_ID {
+        return Err(ReceiptError::AdaptorProfileMisconfigured {
+            id: adaptor_id.to_owned(),
+            capability: "a binary checkpoint framing for `checkpoint.raw`",
+        });
+    }
 
     // --- §5 step 4 (chain structure first: key binding depends on it) ---------------
     let governance = read_chain(receipt, policy, profile, adaptor_id, budget)?;
@@ -2341,6 +2754,10 @@ fn verify_nested(
     // index (I-D §7.5.1 4d "remaining carried envelopes") — a later, distinct step from the
     // induction above, not a repetition of it.
     verify_envelope_at(envelope, &governance, subject_index, budget)?;
+    // I-D §2.2's common payload fields, checked only now that the subject's own signature has
+    // verified — the same rule chain hops get, applied to the one carried envelope that is
+    // never itself a chain hop.
+    common_payload_fields(payload)?;
     // Every producer key the receipt lists must be in force at the subject's entry index under
     // the §7.2 snapshot rule, bound to the governance statement that put it there (§2.2).
     bind_producer_keys(receipt, &governance, subject_index)?;
@@ -2455,6 +2872,8 @@ fn verify_nested(
         policy,
         governance: &governance,
         anchoring_checkpoint: obj(obj(receipt, "anchoring")?, "checkpoint")?,
+        profile,
+        profile_id: adaptor_id,
         payload,
         subject_index,
         claim_type: &claim_type,
@@ -2596,6 +3015,8 @@ struct ClaimCtx<'a> {
     /// The checkpoint this receipt already verified in §5 step 3 — signature, witness
     /// cosignature and inclusion path. Claim checkpoints bind to it (§3).
     anchoring_checkpoint: &'a Value,
+    profile: &'a AdaptorProfile,
+    profile_id: &'a str,
     payload: &'a Value,
     subject_index: u64,
     claim_type: &'a str,
@@ -3326,8 +3747,15 @@ fn authenticate_checkpoint(
     receipt: &Value,
     governance: &Governance<'_>,
     declared: &Value,
+    profile: &AdaptorProfile,
+    profile_id: &str,
     budget: &mut Budget,
 ) -> Result<()> {
+    // I-D §7.1, §7.5 step 2: the same `raw` reconciliation every other receipt-borne
+    // checkpoint gets, applied identically here — `declared` is `anchoring.later_checkpoint`
+    // or `propagation-complete`'s own declared checkpoint D, both receipt-borne checkpoints in
+    // the same form.
+    reconcile_checkpoint_raw(declared, profile, profile_id)?;
     let key_id = text(declared, "key_id")?;
     let tree_size = number(declared, "tree_size")?;
     let (active_index, active_manifest) = governance.active_for(tree_size)?;
@@ -3419,7 +3847,14 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
             member: "tree_size".to_owned(),
         });
     }
-    authenticate_checkpoint(ctx.receipt, ctx.governance, carried_d, budget)?;
+    authenticate_checkpoint(
+        ctx.receipt,
+        ctx.governance,
+        carried_d,
+        ctx.profile,
+        ctx.profile_id,
+        budget,
+    )?;
 
     // The prefix is `[0, tree_size(D))`, and its range proof is checked against **A's** root:
     // A is the checkpoint this verifier signature-checked and saw witness-cosigned. Verifying
