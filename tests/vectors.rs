@@ -24,7 +24,7 @@ use ahl_core::tree::ValidatedLeafSet;
 use ahl_core::{
     checkpoint_signing_bytes, cosignature_bytes, decode_pubkey, entry_id, field_str, hash_hex, jcs,
     leaf_hash, parse_hash_hex, proof_from_hex, range_proof, sha256_hex, statement_id, tree_root,
-    verify_envelope, verify_inclusion_proof, verify_signature,
+    verify_envelope, verify_inclusion_proof, verify_signature, TestKey,
 };
 use serde_json::{json, Value};
 
@@ -1510,6 +1510,26 @@ fn corrupt(value: &mut Value) {
     *value = Value::String(String::from_utf8(bytes).expect("ascii substitution"));
 }
 
+/// The corpus producer key, reconstructed from its committed seed — the same "published
+/// constant... never use for anything real" material `gen_vectors` signs with.
+fn producer_key() -> TestKey {
+    let path = test_data().join("keys").join("producer-1.seed");
+    let seed =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    TestKey::from_seed_hex("producer-1", seed.trim()).expect("committed 32-byte hex seed")
+}
+
+/// Re-sign `envelope["payload"]` with `key`, replacing its single signature entry in place.
+///
+/// I-D §7.5.1 4b phase 1 now runs BEFORE phase 2 (`read_chain`): a mutated governance-hop
+/// payload fails its OWN signature before the type-specific rule a test targets is ever
+/// reached, unless the mutation is re-signed — exactly the ordering B1 fixed.
+fn resign(envelope: &mut Value, key: &TestKey) {
+    let sig = key.sign(&jcs(&envelope["payload"]));
+    envelope["signatures"][0]["sig"] = json!(sig);
+    envelope["signatures"][0]["key_id"] = json!(key.key_id());
+}
+
 #[test]
 fn version_and_identifier_rules_reject() {
     assert_rejects(
@@ -1894,6 +1914,10 @@ fn governance_chain_rules_reject() {
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — the genesis manifest has no predecessor",
     );
+    // These three mutate a governance hop's own PAYLOAD, so — since I-D §7.5.1 4b phase 1
+    // (signature, against K as established so far) now runs BEFORE phase 2 (the type-specific
+    // rule each of these targets) — they must re-sign afterward, or the mutation is caught by
+    // its OWN signature failing first, which is a real but different rejection.
     assert_rejects(
         "governance-state-valid.ahl",
         |r| {
@@ -1901,13 +1925,17 @@ fn governance_chain_rules_reject() {
                 .as_object_mut()
                 .expect("manifest payload")
                 .remove("predecessor");
+            resign(&mut r["governance"]["chain"][2]["envelope"], &producer_key());
         },
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — a non-genesis manifest references its predecessor",
     );
     assert_rejects(
         "governance-state-valid.ahl",
-        |r| corrupt(&mut r["governance"]["chain"][2]["envelope"]["payload"]["predecessor"]),
+        |r| {
+            corrupt(&mut r["governance"]["chain"][2]["envelope"]["payload"]["predecessor"]);
+            resign(&mut r["governance"]["chain"][2]["envelope"], &producer_key());
+        },
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — the predecessor reference is the predecessor's entry id",
     );
@@ -1919,7 +1947,10 @@ fn governance_chain_rules_reject() {
     );
     assert_rejects(
         "governance-state-valid.ahl",
-        |r| r["governance"]["chain"][1]["envelope"]["payload"]["action"] = json!("revoke"),
+        |r| {
+            r["governance"]["chain"][1]["envelope"]["payload"]["action"] = json!("revoke");
+            resign(&mut r["governance"]["chain"][1]["envelope"], &producer_key());
+        },
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.6 — key actions are add or retire",
     );
