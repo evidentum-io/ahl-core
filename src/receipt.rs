@@ -192,6 +192,16 @@ pub struct Assurance {
     pub continued_history: bool,
     /// `none`, `plain-verified` or `keyed-authorized`.
     pub content_binding: String,
+    /// `public` or `private-use` (I-D §7.3), present exactly where
+    /// [`Self::content_binding`] is not `none`.
+    ///
+    /// It names the NAMESPACE the dataset's canonicalization identifier is drawn from and
+    /// nothing else: `private-use` where that identifier begins `x-`, so the binding "holds
+    /// only for a verifier configured for this corpus and never across corpora", and `public`
+    /// otherwise. `public` "asserts nothing about registration, and nothing in a receipt
+    /// does" — a receipt cannot establish that an identifier was registered, only which
+    /// namespace it was taken from, which is computable from the receipt alone.
+    pub canonicalization_namespace: Option<String>,
 }
 
 /// An accepted receipt, with the boundary the verifier renders for it.
@@ -3700,6 +3710,7 @@ fn verify_nested(
         witnessed: flag(assurance_block, "witnessed")?,
         continued_history: flag(assurance_block, "continued_history")?,
         content_binding: text(assurance_block, "content_binding")?.to_owned(),
+        canonicalization_namespace: check_canonicalization_namespace(assurance_block)?,
     };
     let currency = obj(obj(receipt, "governance")?, "currency")?;
     let mode = text(currency, "mode")?;
@@ -3835,6 +3846,53 @@ fn verify_nested(
         assurance,
         embedded_receipts: budget.embedded,
     })
+}
+
+/// The two namespaces I-D §7.3 defines for a canonicalization identifier.
+const CANONICALIZATION_NAMESPACES: [&str; 2] = ["public", "private-use"];
+
+/// Read and validate `assurance.canonicalization_namespace` (I-D §7.3, §7.6).
+///
+/// §7.3: "REQUIRED where `content_binding` is not `none`, and absent otherwise… `private-use`,
+/// where the carried descriptor's `canonicalization` identifier begins `x-`… or `public`
+/// otherwise." §7.6 states the same as a cross-field rule: "present if and only if
+/// `assurance.content_binding` is not `none`, and is `private-use` if and only if the carried
+/// descriptor's `canonicalization` identifier begins `x-`".
+///
+/// The presence rule and the token set are decidable here, from the assurance block alone. The
+/// half that needs the descriptor is checked where the descriptor is parsed
+/// ([`check_namespace_matches_descriptor`]) — the receipt has one only where it carries content
+/// evidence, which is exactly where this member is required.
+fn check_canonicalization_namespace(assurance: &Value) -> Result<Option<String>> {
+    let bound = text(assurance, "content_binding")? != "none";
+    let mismatch = || ReceiptError::AssuranceMismatch { field: "canonicalization_namespace" };
+    match (bound, assurance.get("canonicalization_namespace")) {
+        (false, None) => Ok(None),
+        (true, Some(value)) => value
+            .as_str()
+            .filter(|token| CANONICALIZATION_NAMESPACES.contains(token))
+            .map(|token| Some(token.to_owned()))
+            .ok_or_else(mismatch),
+        // A content binding without the member, or the member without a content binding: the
+        // same if-and-only-if, read from either side.
+        (true, None) | (false, Some(_)) => Err(mismatch()),
+    }
+}
+
+/// The half of I-D §7.6's namespace rule that needs the carried descriptor: `private-use` if
+/// and only if that descriptor's `canonicalization` identifier begins `x-`.
+///
+/// Checked on the descriptor the receipt CARRIES, which the equality rule of §6.3 has just
+/// required to be the manifest's declared one, and before the capability outcome of §6.3 is
+/// reached: an `x-` identifier is by construction one this build does not implement, so
+/// deciding the namespace afterwards would let an `unverifiable` capability gap mask a
+/// disagreement decidable from the receipt's own bytes.
+fn check_namespace_matches_descriptor(assurance: &Assurance, canonicalization: &str) -> Result<()> {
+    let private_use = canonicalization.starts_with("x-");
+    if (assurance.canonicalization_namespace.as_deref() == Some("private-use")) == private_use {
+        return Ok(());
+    }
+    Err(ReceiptError::AssuranceMismatch { field: "canonicalization_namespace" })
 }
 
 /// Claim types §4 permits in `declared` mode.
@@ -4094,6 +4152,14 @@ fn verify_content_binding(
     };
     let claimed_descriptor =
         CanonicalizationDescriptor::new(claimed_canonicalization, claimed_media_type)?;
+
+    // I-D §7.6: `assurance.canonicalization_namespace` "is `private-use` if and only if the
+    // carried descriptor's `canonicalization` identifier begins `x-`", and §7.3 calls the
+    // member "computable from the receipt alone". So it is decided HERE — on the carried
+    // descriptor, the moment it is parsed, before the manifest is consulted for the equality
+    // rule below and well before §6.3's capability outcome, which an `x-` identifier would
+    // otherwise always reach first and report as unverifiable.
+    check_namespace_matches_descriptor(ctx.assurance, claimed_descriptor.canonicalization())?;
     if claimed_descriptor.canonicalization() != descriptor.canonicalization()
         || claimed_descriptor.media_type() != descriptor.media_type()
     {
