@@ -11,7 +11,7 @@ use std::path::Path;
 use ahl_core::receipt::{
     verify_receipt, AdaptorCapabilities, AdaptorProfile, ReceiptError, TrustPolicy,
 };
-use ahl_core::{checkpoint_signing_bytes, entry_id, field_str, statement_id, TestKey};
+use ahl_core::{checkpoint_signing_bytes, entry_id, envelope, field_str, statement_id, TestKey};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
@@ -1772,6 +1772,50 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         },
     });
 
+    // --- I-D §2.2 common payload fields on a `key` statement (I-D §7.5.1 4b(K): "the common
+    // payload fields of Section 2.2 are present and well formed"), each genuinely re-signed so
+    // the rejection is phase 2, never phase 1.
+    out.push(Vector {
+        file: "governance-key-statement-missing-issued-at-must-fail.ahl",
+        receipt: key_statement_common_field_case(
+            &governance_state_valid,
+            &m1,
+            |payload| {
+                payload.as_object_mut().expect("key statement payload").remove("issued_at");
+            },
+            keys,
+            "MUST FAIL. The `key` statement at entry index 9 carries no `issued_at` at all. \
+             I-D §2.2 lists `issued_at` among the common payload fields EVERY statement \
+             carries, `key` statements included; §7.5.1 4b(K) requires those fields present \
+             and well formed before the statement's effect is trusted.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §2.2 / §7.5.1 4b(K) — issued_at is a REQUIRED common payload field",
+            matches: |e| {
+                matches!(e, ReceiptError::Malformed(detail) if detail.contains("issued_at"))
+            },
+        },
+    });
+    out.push(Vector {
+        file: "governance-key-statement-malformed-valid-time-must-fail.ahl",
+        receipt: key_statement_common_field_case(
+            &governance_state_valid,
+            &m1,
+            |payload| payload["valid_time"] = json!("not a timestamp"),
+            keys,
+            "MUST FAIL. The `key` statement at entry index 9 carries `valid_time: \"not a \
+             timestamp\"` — neither an RFC 3339 instant nor a `{from, to}` interval. I-D \
+             §2.2 states both admissible shapes for every statement's `valid_time`, `key` \
+             statements included.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §2.2 / §7.5.1 4b(K) — valid_time must be RFC 3339 or a {from,to} object",
+            matches: |e| {
+                matches!(e, ReceiptError::Malformed(detail) if detail.contains("valid_time"))
+            },
+        },
+    });
+
     out.push(Vector {
         file: "governance-state-not-current-must-fail.ahl",
         receipt: Spec {
@@ -1916,6 +1960,40 @@ fn key_statement_case(
     let mut bad = base.clone();
     let fresh =
         signed("key", manifest_id, json!({ "action": "add", "key": key_extra }), &keys.producer_1);
+    bad["governance"]["chain"][1]["envelope"] = fresh;
+    bad["claim"]["note"] = json!(note);
+    bad
+}
+
+/// Like [`key_statement_case`], but for I-D §2.2's COMMON payload fields — `issued_at`,
+/// `valid_time` — which `signed`/`scenario::payload` normally fix to well-formed values
+/// before this function ever sees the payload. `mutate` runs on the raw payload BEFORE
+/// signing, so it can reach fields `key_statement_case` has no way to touch, while the
+/// genuine re-signing by `keys.producer_1` is identical: phase 1 still passes, so a §7.5.1
+/// 4b(K) common-field failure is what actually fires, not `EnvelopeSignatureInvalid`.
+fn key_statement_common_field_case(
+    base: &Value,
+    manifest_id: &str,
+    mutate: impl FnOnce(&mut Value),
+    keys: &Keys,
+    note: &str,
+) -> Value {
+    let mut bad = base.clone();
+    let mut raw_payload = crate::scenario::payload(
+        "key",
+        manifest_id,
+        json!(T0),
+        json!({
+            "action": "add",
+            "key": {
+                "key_id": keys.producer_2.key_id(),
+                "pubkey": keys.producer_2.pubkey(),
+                "valid_from": T0,
+            },
+        }),
+    );
+    mutate(&mut raw_payload);
+    let fresh = envelope(raw_payload, &keys.producer_1);
     bad["governance"]["chain"][1]["envelope"] = fresh;
     bad["claim"]["note"] = json!(note);
     bad
