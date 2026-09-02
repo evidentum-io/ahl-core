@@ -2607,12 +2607,13 @@ fn bind_log_or_witness_key(
                 .copied()
                 .ok_or_else(not_bound)?;
 
-            // AMBIGUITY (I-D §7.1, keys block): "the manifest object is `{key_id, pubkey,
-            // valid_from_index}` and every member must be equal" names a member the
-            // receipt-side key object does not carry — §7.1's own container shape gives a log
-            // or witness key object `{key_id, pubkey, source, binding}` (plus `witness_id`),
-            // with no `valid_from_index` to compare. Minimal reading: every member the two
-            // objects have in common must be equal, which is what this compares.
+            // I-D §7.1, keys block: the manifest object is `{key_id, pubkey,
+            // valid_from_index}`, "a witness object additionally carrying `witness_id`; the
+            // receipt-side entry carries `key_id`, `pubkey`, and for a witness `witness_id`,
+            // but not `valid_from_index`, which is a property of the manifest declaration and
+            // is read from the manifest object alone. The match is therefore equality of every
+            // member the two objects share" (§6.2 fixes the manifest side of that pair). Which
+            // is what this compares — the shared members, all of them.
             if group == "log" {
                 key_objects(log_object(manifest)?)?
                     .into_iter()
@@ -2829,10 +2830,18 @@ fn check_container_shapes(receipt: &Value) -> Result<()> {
     }
 
     // I-D §7.1: `anchors[]` is material this verifier does not otherwise read — it computes
-    // no verdict from an external timestamp — but its members are subject to the same §2.1
-    // rule as any other, and a member no verifier could interpret is a schema failure whether
-    // or not THIS one has a use for it. Only what §7.1 fixes is checked: the arity, and
-    // `target_hash` as a digest.
+    // no verdict from an external timestamp (§8.3 offers them as evidence a deployment can
+    // compose with checkpoints, not as an input to any rule here) — but "the member shapes
+    // shown above are normative", and a member no verifier could interpret is a schema failure
+    // whether or not THIS one has a use for it.
+    //
+    // Exactly what the container fixes is enforced, and nothing beyond it. The shape is
+    // `{ "type": "rfc3161 | bitcoin_ots", "target": "checkpoint_root", "target_hash":
+    // "sha256:<hex>", ... }`: three REQUIRED members, `target_hash` a digest under §2.1's
+    // strict rule, and a trailing ellipsis that leaves an anchor format's own type-specific
+    // members unconstrained. The example values of `type` and `target` are NOT read as a
+    // closed registry — this document registers no anchor types — so those two are held to
+    // being strings, which is what the shape states.
     if let Some(value) = receipt.get("anchors") {
         let elements = value.as_array().ok_or_else(|| {
             ReceiptError::Malformed(
@@ -2840,15 +2849,23 @@ fn check_container_shapes(receipt: &Value) -> Result<()> {
             )
         })?;
         for (position, element) in elements.iter().enumerate() {
-            match element.get("target_hash") {
-                None => {}
-                Some(Value::String(hash)) if is_family_hash(hash) => {}
-                Some(_) => {
-                    return Err(ReceiptError::Malformed(format!(
-                        "`anchors[{position}].target_hash` is not a `sha256:` family string in \
-                         lowercase hex (I-D §2.1, §7.1)"
-                    )))
+            let invalid =
+                |detail: &str| ReceiptError::Malformed(format!("`anchors[{position}]`: {detail}"));
+            if !element.is_object() {
+                return Err(invalid("MUST be an anchor object (I-D §7.1)"));
+            }
+            for member in ["type", "target"] {
+                if !element.get(member).is_some_and(Value::is_string) {
+                    return Err(invalid(&format!(
+                        "`{member}` is REQUIRED and MUST be a string (I-D §7.1)"
+                    )));
                 }
+            }
+            if !element.get("target_hash").and_then(Value::as_str).is_some_and(is_family_hash) {
+                return Err(invalid(
+                    "`target_hash` is REQUIRED, a `sha256:` family string in lowercase hex \
+                     (I-D §2.1, §7.1)",
+                ));
             }
         }
     }
@@ -2976,6 +2993,26 @@ fn check_keys_block(receipt: &Value) -> Result<()> {
             // identity of its own ([`check_witness_identity`]).
             if group == "witness" && !entry.get("witness_id").is_some_and(Value::is_string) {
                 return Err(invalid("`witness_id` is REQUIRED on a witness key object (I-D §7.1)"));
+            }
+            // I-D §7.1: "a receipt-side entry carrying any member beyond those and
+            // `source`/`binding` is a schema failure." The member set is CLOSED, and closing it
+            // is what keeps the match meaningful: the match compares the members the two
+            // objects share, so an entry free to carry others could assert alongside the
+            // compared ones — `valid_from_index` among them — members nothing compares and a
+            // reader might believe. Applied to every entry, selected or not, since a schema
+            // failure is a property of the receipt rather than of what verification reached
+            // for.
+            let allowed: &[&str] = if group == "witness" {
+                &["witness_id", "key_id", "pubkey", "source", "binding"]
+            } else {
+                &["key_id", "pubkey", "source", "binding"]
+            };
+            let members = entry.as_object().ok_or_else(|| invalid("MUST be a key object"))?;
+            if let Some(extra) = members.keys().find(|member| !allowed.contains(&member.as_str())) {
+                return Err(invalid(&format!(
+                    "carries `{extra}`, which is not a member of a key object: I-D §7.1 admits \
+                     exactly {allowed:?}"
+                )));
             }
         }
     }
