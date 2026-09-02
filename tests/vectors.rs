@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 /// a second, genuinely valid signature entry from a non-authority key alongside a non-verifying
 /// authority-named one. Entry 30 re-adds `producer-2` to the producer snapshot; entry 31 is a
 /// trigger genuinely CO-SIGNED by both the authority and `producer-2`.
-const STATEMENT_FILES: [&str; 32] = [
+const STATEMENT_FILES: [&str; 33] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -66,6 +66,7 @@ const STATEMENT_FILES: [&str; 32] = [
     "29-unverified-authority-signature-trigger-f.json",
     "30-key-readd-producer-2.json",
     "31-retraction-f-co-signed-authority-and-producer-2.json",
+    "32-ingestion-customers-e-stale-manifest.json",
 ];
 
 /// The four published closure scenarios.
@@ -200,6 +201,13 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
         if index == 0 || index == 25 {
             continue;
         }
+        // Entry 32 is the ONE deliberate exception: I-D §2.2 §7.6's negative vector
+        // (`record-ingested-stale-manifest-must-fail.ahl`) needs a statement that is
+        // genuinely signed and genuinely anchored, yet wrongly bound — see `corpus.rs`'s own
+        // entry 32 and the assertion right after this loop.
+        if index == 32 {
+            continue;
+        }
         // The manifest version id is the manifest statement's *statement id* (spec §2.3.5).
         let expected = if index < 25 { m1 } else { m2 };
         assert_eq!(
@@ -210,6 +218,24 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
             STATEMENT_FILES[index]
         );
     }
+
+    // The exception, made explicit: entry 32 wrongly names v1 (`m1`) even though v2 (`m2`) is
+    // active at its entry index — I-D §2.2's "greatest entry index smaller than the
+    // statement's own" resolves to v2 there, not v1. This is what
+    // `record-ingested-stale-manifest-must-fail.ahl` proves the verifier catches.
+    assert_eq!(
+        field_str(&vectors[32]["envelope"]["payload"], "manifest")
+            .expect("payload carries manifest"),
+        m1,
+        "entry 32 must wrongly name v1 — that is the defect the stale-manifest vector proves \
+         is caught"
+    );
+    assert_ne!(
+        field_str(&vectors[32]["envelope"]["payload"], "manifest")
+            .expect("payload carries manifest"),
+        m2,
+        "entry 32's wrong binding must not accidentally be correct"
+    );
 }
 
 #[test]
@@ -1165,6 +1191,9 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         | "governance-key-rotation-proof-incoming-key-must-fail.ahl"
         | "governance-key-rotation-proof-missing-witness-must-fail.ahl" => {
             matches!(error, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, .. })
+        }
+        "record-ingested-stale-manifest-must-fail.ahl" => {
+            matches!(error, ReceiptError::SubjectManifestBindingInvalid(_))
         }
         "statement-anchored-continued-history-wrong-pair-must-fail.ahl" => {
             matches!(error, ReceiptError::ConsistencyPathInvalid)
