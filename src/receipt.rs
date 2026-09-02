@@ -28,12 +28,13 @@ use serde_json::Value;
 
 use crate::bitemporal::Scope;
 use crate::closure::{affected_set, TreeMaterial};
+use crate::descriptor::CanonicalizationDescriptor;
 use crate::range_proof;
 use crate::tree::ValidatedLeafSet;
 use crate::{
     checkpoint_signing_bytes, commit_keyed, commit_plain, cosignature_bytes, decode_pubkey,
-    entry_id, hash_hex, jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id, tree_root,
-    verify_signature, AhlError, B64,
+    descriptor, entry_id, hash_hex, jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id,
+    tree_root, verify_signature, AhlError, B64,
 };
 
 /// Receipt container version this verifier implements.
@@ -921,6 +922,35 @@ fn key_objects(container: &Value) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
+/// Validate the manifest `datasets` object's dataset id syntax (I-D revision 0.4 §2.6, §6.3).
+///
+/// §6.3's conformance table makes a syntactically invalid dataset declaration — among other
+/// things, "a dataset id violating the dataset id syntax or containing a control octet" — reject
+/// the WHOLE manifest, not merely the affected dataset's claims: "A dataset's canonicalization
+/// descriptor is a required manifest member (§6.2), and statements derive their governance from
+/// that manifest (§2.2)". This checks exactly that member, key by key, the same way
+/// [`log_object`] and [`key_objects`] check the members they are responsible for.
+///
+/// The declared `canonicalization` identifier and `media_type` are not validated here: nothing
+/// in this crate needs their descriptor to commit-check a dataset that no claim in the receipt
+/// ever binds content against, and [`verify_content_binding`] already validates them — via
+/// [`CanonicalizationDescriptor::new`] — the moment a claim actually needs the descriptor to
+/// recompute a commitment.
+fn datasets_object(manifest: &Value) -> Result<()> {
+    let Some(datasets) = manifest.get("datasets").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for dataset_id in datasets.keys() {
+        descriptor::validate_dataset_id(dataset_id).map_err(|source| {
+            ReceiptError::ManifestSchemaInvalid {
+                object: "datasets".to_owned(),
+                detail: source.to_string(),
+            }
+        })?;
+    }
+    Ok(())
+}
+
 /// Build and structurally validate the governance chain (spec §2.3.5).
 fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance<'a>> {
     let chain = array(obj(receipt, "governance")?, "chain")?;
@@ -982,6 +1012,7 @@ fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance
                 // such, not reported as a key that happens not to resolve.
                 key_objects(payload)?;
                 log_object(payload)?;
+                datasets_object(payload)?;
                 if let Some(witnesses) = payload.get("witnesses").and_then(Value::as_array) {
                     for witness in witnesses {
                         key_objects(witness)?;
@@ -1841,15 +1872,24 @@ fn verify_content_binding(
     }
 
     let (_, manifest) = ctx.governance.active_for(ctx.subject_index + 1)?;
-    let declared_mode =
-        text(obj(obj(manifest, "datasets")?, dataset)?, "commitment_mode")?.to_owned();
+    let declared = obj(obj(manifest, "datasets")?, dataset)?;
+    let declared_mode = text(declared, "commitment_mode")?.to_owned();
+    // I-D §2.6: the descriptor is bound into every commitment through its digest `ddig`, so
+    // recomputation needs the dataset's declared descriptor, not merely its commitment mode.
+    // `CanonicalizationDescriptor::new` validates the identifier syntax and, where present, the
+    // media-type production — the moment this dataset's descriptor is actually needed to
+    // recompute a commitment, rather than eagerly for every dataset a manifest declares
+    // (`datasets_object` at manifest-schema time validates only the dataset id).
+    let canonicalization = text(declared, "canonicalization")?.to_owned();
+    let media_type = declared.get("media_type").and_then(Value::as_str).map(str::to_owned);
+    let ddig = CanonicalizationDescriptor::new(canonicalization, media_type)?.ddig();
     let encoded = material.get(field).and_then(Value::as_str).ok_or_else(|| ctx.missing(field))?;
     let bytes = B64
         .decode(crate::strip_prefix(encoded, "base64:")?)
         .map_err(|source| ReceiptError::Ahl(AhlError::Base64(source)))?;
 
     let recomputed = match ctx.assurance.content_binding.as_str() {
-        "plain-verified" if declared_mode == "plain" => commit_plain(dataset, &bytes),
+        "plain-verified" if declared_mode == "plain" => commit_plain(dataset, &ddig, &bytes)?,
         "keyed-authorized" if declared_mode == "keyed" => {
             let key = ctx.policy.dataset_keys.get(dataset).ok_or_else(|| {
                 ReceiptError::ContentBindingMismatch {
@@ -1858,7 +1898,7 @@ fn verify_content_binding(
                     claimed: record.to_owned(),
                 }
             })?;
-            commit_keyed(key, dataset, &bytes)?
+            commit_keyed(key, dataset, &ddig, &bytes)?
         }
         // A binding mode the dataset's declared commitment mode cannot satisfy (§2.1).
         mode => {
