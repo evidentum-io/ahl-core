@@ -776,51 +776,67 @@ struct BoundKey {
     bound_at: u64,
 }
 
+/// The governance statement whose producer-key snapshot is in force *at* `index`, given the
+/// manifests known SO FAR (I-D §7.5.1 4b: "K as established so far" needs only the manifests
+/// and events strictly before `index`, so this is safe to call mid-induction, before the hop
+/// AT `index` has itself been validated).
+///
+/// Spec §2.2 resolves "the manifest version active at entry index i" as the manifest with the
+/// greatest entry index **smaller** than i — which is also what §2.3.5 needs, since a manifest
+/// statement is signed under its *predecessor*'s state. The genesis manifest is the one
+/// statement validated by its own snapshot, so index 0 falls back to it.
+fn snapshot_manifest_in<'a>(
+    manifests: &[(u64, &'a Value)],
+    index: u64,
+) -> Option<(u64, &'a Value)> {
+    manifests.iter().rfind(|(mi, _)| *mi < index).or_else(|| manifests.first()).copied()
+}
+
+/// The producer key set in force at `index`, with each key's binding index, given the
+/// manifests and events known SO FAR. See [`snapshot_manifest_in`].
+///
+/// Spec §7.2: "A manifest's producer `keys` array is the complete producer-key snapshot
+/// effective from that manifest's entry index: it discards the prior snapshot; later `key`
+/// statements then modify it in entry order until the next manifest version." So this is *not*
+/// a union across manifest versions — a key a later manifest omits is gone, and a signature by
+/// it no longer validates.
+fn producer_keys_at_in(
+    manifests: &[(u64, &Value)],
+    events: &[KeyEvent],
+    index: u64,
+) -> BTreeMap<String, BoundKey> {
+    let mut keys = BTreeMap::new();
+    let Some((snapshot_index, manifest)) = snapshot_manifest_in(manifests, index) else {
+        return keys;
+    };
+    for (key_id, pubkey) in key_objects(manifest).unwrap_or_default() {
+        keys.insert(key_id, BoundKey { pubkey, bound_at: snapshot_index });
+    }
+    // Only transitions anchored after that snapshot and at or before `index` apply; an
+    // earlier `key` statement was already folded into (or discarded by) the snapshot.
+    for event in events.iter().filter(|e| e.entry_index > snapshot_index && e.entry_index <= index)
+    {
+        if event.added {
+            keys.insert(
+                event.key_id.clone(),
+                BoundKey { pubkey: event.pubkey.clone(), bound_at: event.entry_index },
+            );
+        } else {
+            keys.remove(&event.key_id);
+        }
+    }
+    keys
+}
+
 impl<'a> Governance<'a> {
     /// The governance statement whose producer-key snapshot is in force *at* `index`.
-    ///
-    /// Spec §2.2 resolves "the manifest version active at entry index i" as the manifest with
-    /// the greatest entry index **smaller** than i — which is also what §2.3.5 needs, since a
-    /// manifest statement is signed under its *predecessor*'s state. The genesis manifest is
-    /// the one statement validated by its own snapshot, so index 0 falls back to it.
     fn snapshot_manifest(&self, index: u64) -> Option<(u64, &'a Value)> {
-        self.manifests
-            .iter()
-            .rfind(|(mi, _)| *mi < index)
-            .or_else(|| self.manifests.first())
-            .copied()
+        snapshot_manifest_in(&self.manifests, index)
     }
 
     /// The producer key set in force at `index`, with each key's binding index.
-    ///
-    /// Spec §7.2: "A manifest's producer `keys` array is the complete producer-key snapshot
-    /// effective from that manifest's entry index: it discards the prior snapshot; later `key`
-    /// statements then modify it in entry order until the next manifest version." So this is
-    /// *not* a union across manifest versions — a key a later manifest omits is gone, and a
-    /// signature by it no longer validates.
     fn producer_keys_at(&self, index: u64) -> BTreeMap<String, BoundKey> {
-        let mut keys = BTreeMap::new();
-        let Some((snapshot_index, manifest)) = self.snapshot_manifest(index) else {
-            return keys;
-        };
-        for (key_id, pubkey) in key_objects(manifest).unwrap_or_default() {
-            keys.insert(key_id, BoundKey { pubkey, bound_at: snapshot_index });
-        }
-        // Only transitions anchored after that snapshot and at or before `index` apply; an
-        // earlier `key` statement was already folded into (or discarded by) the snapshot.
-        for event in
-            self.events.iter().filter(|e| e.entry_index > snapshot_index && e.entry_index <= index)
-        {
-            if event.added {
-                keys.insert(
-                    event.key_id.clone(),
-                    BoundKey { pubkey: event.pubkey.clone(), bound_at: event.entry_index },
-                );
-            } else {
-                keys.remove(&event.key_id);
-            }
-        }
-        keys
+        producer_keys_at_in(&self.manifests, &self.events, index)
     }
 
     /// `key_id -> pubkey` at `index`, for signature resolution.
@@ -1296,7 +1312,9 @@ fn verify_rotation_proof(
     Ok(())
 }
 
-/// Build and structurally validate the governance chain (spec §2.3.5).
+/// Build and structurally validate the governance chain (I-D §7.5.1 4a-4c): the base case,
+/// then the induction, each carried statement's SIGNATURE verified against K as established by
+/// its predecessors before anything about its own content is trusted.
 // The governance-key-rotation check (I-D §7.1, §7.5.1) folds naturally into this same
 // per-manifest walk rather than a second pass over the same material.
 #[allow(clippy::too_many_lines)]
@@ -1310,50 +1328,120 @@ fn read_chain<'a>(
         return Err(ReceiptError::GovernanceChainInvalid("chain is empty".to_owned()));
     }
 
-    let mut manifests = Vec::new();
-    let mut events = Vec::new();
-    let mut previous_index: Option<u64> = None;
-    let mut previous_manifest_entry_id: Option<String> = None;
-    let mut previous_manifest_payload: Option<&Value> = None;
-    let mut manifest_by_version_id: BTreeMap<String, (u64, &Value)> = BTreeMap::new();
+    // --- I-D §7.5.1 4a. Base case: the genesis manifest is authenticated WITHOUT any key. ---
+    //
+    // "An offline verifier cannot authenticate a genesis anchor supplied by the receipt itself;
+    // it MUST compare `governance.genesis_entry_id` against independently configured policy...
+    // Recompute the entry id of the first element of `governance.chain[]` and require it to
+    // equal the configured anchor. That equality alone authenticates the genesis envelope IN
+    // FULL, payload and signatures together, because an entry id is SHA-256(JCS(envelope))...
+    // no key is needed to establish it, which is what makes the base case genuinely basal
+    // rather than one more thing needing a key."
+    if number(&chain[0], "entry_index")? != 0 {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "the chain must start at entry index 0".to_owned(),
+        ));
+    }
+    let genesis_envelope = obj(&chain[0], "envelope")?;
+    let genesis_payload = payload_of(genesis_envelope)?;
+    check_ahl_version(genesis_payload)?;
+    if statement_type(genesis_payload)? != "manifest" {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "the chain must start at the genesis manifest".to_owned(),
+        ));
+    }
+    let carried_anchor = text(obj(receipt, "governance")?, "genesis_entry_id")?;
+    if carried_anchor != entry_id(genesis_envelope) {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "`genesis_entry_id` does not digest the carried genesis envelope".to_owned(),
+        ));
+    }
+    if carried_anchor != policy.genesis_entry_id {
+        return Err(ReceiptError::GenesisAnchorMismatch);
+    }
+    let genesis_key_ids: BTreeSet<String> =
+        key_objects(genesis_payload)?.into_iter().map(|(id, _)| id).collect();
+    if genesis_key_ids != policy.genesis_key_ids {
+        return Err(ReceiptError::GenesisAnchorMismatch);
+    }
 
-    for hop in chain {
+    // "The genesis manifest is INSIDE the typed checks, not outside them... It earns exactly
+    // two exemptions: it is exempt from the `predecessor` linkage rule... and it is exempt from
+    // signature derivation under a prior key state, because there is no prior state to derive
+    // from and entry-id equality has already bound its complete bytes, signatures included."
+    if genesis_payload.get("predecessor").is_some() {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "the genesis manifest must carry no predecessor reference".to_owned(),
+        ));
+    }
+    key_objects(genesis_payload)?;
+    log_object(genesis_payload)?;
+    datasets_object(genesis_payload)?;
+    if let Some(witnesses) = genesis_payload.get("witnesses").and_then(Value::as_array) {
+        for witness in witnesses {
+            key_objects(witness)?;
+        }
+    }
+
+    // "Only after ALL of those pass... let K be the key state the genesis manifest declares."
+    let mut manifests: Vec<(u64, &Value)> = vec![(0, genesis_payload)];
+    let mut events: Vec<KeyEvent> = Vec::new();
+    let mut manifest_by_version_id: BTreeMap<String, (u64, &Value)> = BTreeMap::new();
+    manifest_by_version_id.insert(statement_id(genesis_envelope)?, (0, genesis_payload));
+    let mut previous_index = 0u64;
+    let mut previous_manifest_entry_id = entry_id(genesis_envelope);
+    let mut previous_manifest_payload = genesis_payload;
+
+    // --- I-D §7.5.1 4b. Inductive step: three phases, in this order, for every later hop. ---
+    for hop in &chain[1..] {
         let index = number(hop, "entry_index")?;
-        if previous_index.is_some_and(|prev| prev >= index) {
+        if previous_index >= index {
             return Err(ReceiptError::GovernanceChainInvalid(
                 "chain hops must ascend by entry index".to_owned(),
             ));
         }
-        previous_index = Some(index);
+        previous_index = index;
 
         let envelope = obj(hop, "envelope")?;
         let payload = payload_of(envelope)?;
         check_ahl_version(payload)?;
+
+        // Phase 1: "Verify the envelope under the envelope signature rule of Section 2.1
+        // against K AS ESTABLISHED SO FAR — the governance state in force immediately before
+        // this statement's own entry index." `manifests`/`events` so far contain only hops
+        // strictly before `index`, so this is exactly that state, computed BEFORE anything
+        // about this hop's own content — schema, predecessor linkage, rotation proof — is read.
+        let k_so_far = producer_keys_at_in(&manifests, &events, index);
+        budget.spend(1)?;
+        if !crate::verify_envelope(envelope, |key_id| {
+            k_so_far.get(key_id).map(|bound| bound.pubkey.clone())
+        })? {
+            return Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index });
+        }
+
+        // "A failure at phase 1 or phase 2 is invalid, and the induction does not continue past
+        // it. No effect is ever applied to K by a statement that has not completed both
+        // earlier phases." Phase 2 (type-specific validation) and phase 3 (effect) follow.
         match statement_type(payload)? {
             "manifest" => {
-                let predecessor = payload.get("predecessor").and_then(Value::as_str);
-                match (&previous_manifest_entry_id, predecessor) {
-                    (None, Some(_)) => {
-                        return Err(ReceiptError::GovernanceChainInvalid(
-                            "the genesis manifest must carry no predecessor reference".to_owned(),
-                        ))
-                    }
-                    (Some(_), None) => {
+                // Phase 2, 4b(M): predecessor linkage, then the same §6.2/§6.3 schema every
+                // manifest version takes, then the rotation-anchoring rule.
+                match payload.get("predecessor").and_then(Value::as_str) {
+                    None => {
                         return Err(ReceiptError::GovernanceChainInvalid(
                             "a non-genesis manifest must reference its predecessor".to_owned(),
                         ))
                     }
                     // A non-genesis manifest references its predecessor by *entry* id:
                     // signature identity matters for chain links (spec §2.3.5).
-                    (Some(want), Some(got)) if want != got => {
+                    Some(got) if got != previous_manifest_entry_id => {
                         return Err(ReceiptError::GovernanceChainInvalid(format!(
-                            "manifest at entry index {index} references `{got}`, \
-                             its predecessor in the chain is `{want}`"
+                            "manifest at entry index {index} references `{got}`, its \
+                             predecessor in the chain is `{previous_manifest_entry_id}`"
                         )))
                     }
-                    _ => {}
+                    Some(_) => {}
                 }
-                previous_manifest_entry_id = Some(entry_id(envelope));
                 // The manifest's `keys` array is a *snapshot*, not a set of add events
                 // (spec §7.2). It is read at resolution time by `producer_keys_at`, which
                 // discards whatever the prior manifest declared.
@@ -1379,33 +1467,41 @@ fn read_chain<'a>(
                 // set in full" — a set, not a sequence, so a harmless reordering is never a
                 // rotation) and requires its `governance.rotation_proofs[]` element to verify
                 // under the outgoing key state (`verify_rotation_proof`).
-                if let Some(previous) = previous_manifest_payload {
-                    let rotated = log_key_set(payload) != log_key_set(previous)
-                        || witness_key_set(payload) != witness_key_set(previous);
-                    if rotated {
-                        verify_rotation_proof(receipt, envelope, index, payload, previous, budget)?;
-                    }
+                let rotated = log_key_set(payload) != log_key_set(previous_manifest_payload)
+                    || witness_key_set(payload) != witness_key_set(previous_manifest_payload);
+                if rotated {
+                    verify_rotation_proof(
+                        receipt,
+                        envelope,
+                        index,
+                        payload,
+                        previous_manifest_payload,
+                        budget,
+                    )?;
                 }
-                previous_manifest_payload = Some(payload);
+                // Phase 3: effect — replaces the log, witness, and producer key state in full.
+                previous_manifest_entry_id = entry_id(envelope);
+                previous_manifest_payload = payload;
                 manifest_by_version_id.insert(statement_id(envelope)?, (index, payload));
                 manifests.push((index, payload));
             }
             "key" => {
+                // Phase 2, 4b(K): action and shape.
                 let key = obj(payload, "key")?;
-                events.push(KeyEvent {
-                    entry_index: index,
-                    key_id: text(key, "key_id")?.to_owned(),
-                    pubkey: text(key, "pubkey")?.to_owned(),
-                    added: match text(payload, "action")? {
-                        "add" => true,
-                        "retire" => false,
-                        other => {
-                            return Err(ReceiptError::GovernanceChainInvalid(format!(
-                                "unknown key action `{other}`"
-                            )))
-                        }
-                    },
-                });
+                let added = match text(payload, "action")? {
+                    "add" => true,
+                    "retire" => false,
+                    other => {
+                        return Err(ReceiptError::GovernanceChainInvalid(format!(
+                            "unknown key action `{other}`"
+                        )))
+                    }
+                };
+                let key_id = text(key, "key_id")?.to_owned();
+                let pubkey = text(key, "pubkey")?.to_owned();
+                // Phase 3: effect — modifies the producer key set only (I-D §6.2: log and
+                // witness keys rotate only by anchoring a new manifest version).
+                events.push(KeyEvent { entry_index: index, key_id, pubkey, added });
             }
             other => {
                 return Err(ReceiptError::GovernanceChainInvalid(format!(
@@ -1413,30 +1509,6 @@ fn read_chain<'a>(
                 )))
             }
         }
-    }
-
-    let genesis = &chain[0];
-    let genesis_envelope = obj(genesis, "envelope")?;
-    if number(genesis, "entry_index")? != 0
-        || statement_type(payload_of(genesis_envelope)?)? != "manifest"
-    {
-        return Err(ReceiptError::GovernanceChainInvalid(
-            "the chain must start at the genesis manifest at entry index 0".to_owned(),
-        ));
-    }
-    let carried_anchor = text(obj(receipt, "governance")?, "genesis_entry_id")?;
-    if carried_anchor != entry_id(genesis_envelope) {
-        return Err(ReceiptError::GovernanceChainInvalid(
-            "`genesis_entry_id` does not digest the carried genesis envelope".to_owned(),
-        ));
-    }
-    if carried_anchor != policy.genesis_entry_id {
-        return Err(ReceiptError::GenesisAnchorMismatch);
-    }
-    let genesis_key_ids: BTreeSet<String> =
-        key_objects(payload_of(genesis_envelope)?)?.into_iter().map(|(id, _)| id).collect();
-    if genesis_key_ids != policy.genesis_key_ids {
-        return Err(ReceiptError::GenesisAnchorMismatch);
     }
 
     Ok(Governance { manifests, events, manifest_by_version_id })
@@ -1936,7 +2008,9 @@ fn verify_nested(
         budget,
     )?;
 
-    // --- §5 step 4: chain anchoring and signatures ----------------------------------
+    // --- §5 step 4: chain anchoring (path only — each hop's SIGNATURE was already verified
+    // by `read_chain`'s induction, in phase order, before that hop's own schema was even read;
+    // re-verifying it here would be both redundant and too late to matter) -----------
     for hop in array(obj(receipt, "governance")?, "chain")? {
         let index = number(hop, "entry_index")?;
         // A hop the checkpoint does not commit cannot be proven against its root, and an
@@ -1961,8 +2035,10 @@ fn verify_nested(
             "governance chain hop",
             budget,
         )?;
-        verify_envelope_at(hop_envelope, &governance, index, budget)?;
     }
+    // The subject's own envelope is verified separately, against K FINAL at ITS OWN entry
+    // index (I-D §7.5.1 4d "remaining carried envelopes") — a later, distinct step from the
+    // induction above, not a repetition of it.
     verify_envelope_at(envelope, &governance, subject_index, budget)?;
     // Every producer key the receipt lists must be in force at the subject's entry index under
     // the §7.2 snapshot rule, bound to the governance statement that put it there (§2.2).
