@@ -1119,6 +1119,9 @@ fn every_positive_receipt_verifies_and_renders_its_boundary() {
 }
 
 /// Assert that a rejection is the *specific* rule the index entry names.
+// A flat match, one arm per negative vector on disk: splitting it into helpers would obscure
+// which vector each arm belongs to.
+#[allow(clippy::too_many_lines)]
 fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
     let fired = match name {
         "overclaim-must-fail.ahl" => {
@@ -1186,11 +1189,31 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "governance-state-key-subject-must-fail.ahl" => {
             matches!(error, ReceiptError::GovernanceSubjectNotManifest { .. })
         }
-        "governance-key-rotation-proof-missing-must-fail.ahl"
-        | "governance-key-rotation-proof-wrong-index-must-fail.ahl"
-        | "governance-key-rotation-proof-incoming-key-must-fail.ahl"
+        "governance-key-rotation-proof-incoming-key-must-fail.ahl"
         | "governance-key-rotation-proof-missing-witness-must-fail.ahl" => {
             matches!(error, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, .. })
+        }
+        "governance-key-rotation-proof-missing-must-fail.ahl"
+        | "governance-key-rotation-proof-wrong-index-must-fail.ahl"
+        | "governance-key-rotation-proof-duplicate-must-fail.ahl"
+        | "governance-key-rotation-proof-extra-must-fail.ahl" => {
+            matches!(
+                error,
+                ReceiptError::GovernanceChainInvalid(detail)
+                    if detail.contains("does not equal EXACTLY")
+            )
+        }
+        "governance-key-rotation-proof-empty-on-non-rotating-must-fail.ahl" => {
+            matches!(
+                error,
+                ReceiptError::GovernanceChainInvalid(detail) if detail.contains("rotates neither")
+            )
+        }
+        "governance-key-rotation-proof-checkpoint-missing-log-id-must-fail.ahl" => {
+            matches!(error, ReceiptError::Malformed(detail) if detail.contains("log_id"))
+        }
+        "governance-key-rotation-proof-malformed-witness-entry-must-fail.ahl" => {
+            matches!(error, ReceiptError::Malformed(detail) if detail.contains("cosigned_at"))
         }
         "record-ingested-stale-manifest-must-fail.ahl" => {
             matches!(error, ReceiptError::SubjectManifestBindingInvalid(_))
