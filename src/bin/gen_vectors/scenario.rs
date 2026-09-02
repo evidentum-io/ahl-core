@@ -186,7 +186,9 @@ pub fn manifest(
     // `key` statements modify it until the next manifest version. Version 2 therefore drops
     // the key the `key` statement at entry 9 added: from entry 23 onward, `producer-2` signs
     // nothing, even though an earlier manifest version once knew it.
-    let producer_keys = vec![keys.producer_1.key_object(entry_index)];
+    // I-D §6.2: a manifest producer key object is `{key_id, pubkey}` ONLY — the array IS the
+    // producer key state at the manifest's entry index, with no per-key `valid_from_index`.
+    let producer_keys = vec![keys.producer_1.producer_key_object()];
 
     let mut payload = json!({
         "ahl_version": AHL_VERSION,
