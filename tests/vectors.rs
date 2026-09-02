@@ -651,9 +651,20 @@ fn checkpoints_and_witness_cosignatures_verify_under_the_active_manifest() {
         );
 
         // Format §2.2: the active manifest is the one with the greatest entry index smaller
-        // than the checkpoint's tree size.
+        // than the checkpoint's tree size — EXCEPT cp26, whose `active_manifest_entry_index`
+        // is deliberately the OUTGOING manifest (0), not the checkpoint's own true active one
+        // (25): it exists solely as the I-D §7.1 rotation-anchoring EXCEPTION's checkpoint,
+        // which binds to the manifest version active IMMEDIATELY BEFORE the rotating entry
+        // index, never to the version the rotation installs.
         let tree_size = cp["tree_size"].as_u64().expect("tree_size");
-        let expected = if tree_size > 25 { 25 } else { 0 };
+        let name = field_str(entry, "name").expect("named checkpoint");
+        let expected = if name == "cp26" {
+            0
+        } else if tree_size > 25 {
+            25
+        } else {
+            0
+        };
         assert_eq!(
             entry["active_manifest_entry_index"].as_u64(),
             Some(expected),
@@ -680,9 +691,18 @@ fn checkpoints_and_witness_cosignatures_verify_under_the_active_manifest() {
             .expect("well-formed signature"),
             "{name}/{witness_id}: cosignature did not verify"
         );
-        // The witness must be the one the active manifest version declares.
+        // The witness must be the one the active manifest version declares — except cp26,
+        // deliberately cosigned by the OUTGOING witness (witness-1) even though its tree_size
+        // exceeds 25; see the `active_manifest_entry_index` loop above for why.
         let tree_size = cp["tree_size"].as_u64().expect("tree_size");
-        assert_eq!(witness_id, if tree_size > 25 { "witness-2" } else { "witness-1" });
+        let expected_witness = if name == "cp26" {
+            "witness-1"
+        } else if tree_size > 25 {
+            "witness-2"
+        } else {
+            "witness-1"
+        };
+        assert_eq!(witness_id, expected_witness);
     }
 }
 
@@ -1119,33 +1139,32 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             error,
             ReceiptError::GovernanceStateNotCurrent { target_index: 10, entry_index: 9, .. }
         ),
-        // I-D §7.1/§7.5.1: this build does not implement `governance.rotation_proofs[]`
-        // verification, so ANY receipt whose carried chain rotates manifest v2's witness key
-        // set (entry 25) is refused at manifest-processing time before whatever rule the
-        // vector was originally built to demonstrate is ever reached. These four vectors — one
-        // renamed from a formerly-POSITIVE vector each — exist to prove that refusal fires; see
-        // `test_data/README.md`'s "Not yet implemented" section for the coverage this costs.
-        "statement-anchored-dropped-producer-key-must-fail.ahl"
-        | "trigger-effective-unverified-authority-signature-must-fail.ahl"
-        | "propagation-complete-past-declared-checkpoint-must-fail.ahl"
-        | "propagation-complete-rotation-unsupported-must-fail.ahl"
-        | "trigger-effective-co-signed-rotation-unsupported-must-fail.ahl"
-        | "trigger-effective-non-verifying-signature-rotation-unsupported-must-fail.ahl" => {
-            matches!(
-                error,
-                ReceiptError::GovernanceKeyRotationUnsupported { manifest_entry_index: 25 }
-            )
+        "statement-anchored-dropped-producer-key-must-fail.ahl" => {
+            matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
         }
         "trigger-effective-non-authority-issuer-must-fail.ahl"
         | "propagation-complete-challenge-trigger-must-fail.ahl" => {
             matches!(error, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. })
         }
+        "trigger-effective-unverified-authority-signature-must-fail.ahl" => {
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 29 })
+        }
+        "propagation-complete-past-declared-checkpoint-must-fail.ahl" => matches!(
+            error,
+            ReceiptError::CheckpointNotBound { field: "claim_material.corpus_checkpoint", .. }
+        ),
         "governance-state-short-range-must-fail.ahl" => matches!(
             error,
-            ReceiptError::GovernanceRangeNotComplete { got_from: 0, got_to: 6, tree_size: 20 }
+            ReceiptError::GovernanceRangeNotComplete { got_from: 0, got_to: 6, tree_size: 28 }
         ),
         "governance-state-key-subject-must-fail.ahl" => {
             matches!(error, ReceiptError::GovernanceSubjectNotManifest { .. })
+        }
+        "governance-key-rotation-proof-missing-must-fail.ahl"
+        | "governance-key-rotation-proof-wrong-index-must-fail.ahl"
+        | "governance-key-rotation-proof-incoming-key-must-fail.ahl"
+        | "governance-key-rotation-proof-missing-witness-must-fail.ahl" => {
+            matches!(error, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, .. })
         }
         "statement-anchored-continued-history-wrong-pair-must-fail.ahl" => {
             matches!(error, ReceiptError::ConsistencyPathInvalid)
@@ -1843,13 +1862,12 @@ fn a_governance_hop_the_checkpoint_cannot_commit_is_refused() {
     assert_rejects(
         "statement-anchored-valid.ahl",
         |r| {
-            // The donor's own chain[2] (manifest v2) would trip
-            // `GovernanceKeyRotationUnsupported` (I-D §7.1) here too, since appending it makes
-            // this receipt's chain show a rotation relative to genesis — pre-empting the
-            // "does not commit" check this test is actually about. chain[1], the entry-9 `key`
-            // statement, carries no such baggage: `read_chain` never applies the
-            // governance-key-rotation check to a `key` hop, only to `manifest` ones.
-            let (_, source) = read_receipt("statement-anchored-dropped-producer-key-must-fail.ahl");
+            // chain[2] (manifest v2) would ALSO trip the I-D §7.1 rotation-proof check here,
+            // since appending it makes this receipt's chain show a rotation relative to
+            // genesis — pre-empting the "does not commit" check this test is actually about.
+            // chain[1], the entry-9 `key` statement, carries no such baggage: `read_chain`
+            // never applies the rotation check to a `key` hop, only to `manifest` ones.
+            let (_, source) = read_receipt("governance-state-valid.ahl");
             let mut hop = source["governance"]["chain"][1].clone();
             hop["entry_index"] = json!(9_999);
             r["governance"]["chain"].as_array_mut().expect("chain").push(hop);
@@ -1876,15 +1894,8 @@ fn governance_chain_rules_reject() {
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — the genesis manifest has no predecessor",
     );
-    // These four sub-tests need a chain with a `key` statement hop AND a second, non-genesis
-    // `manifest` hop — `governance-state-valid.ahl` no longer carries either (it stays inside
-    // the genesis manifest's era to avoid tripping `GovernanceKeyRotationUnsupported`, I-D
-    // §7.1). `statement-anchored-dropped-producer-key-must-fail.ahl` still has the needed
-    // chain [0, 9, 25] shape; each mutation below fires its own, earlier
-    // `GovernanceChainInvalid` before the chain-walk ever reaches the rotation check at
-    // entry 25, so the donor's own unrelated rejection never masks these.
     assert_rejects(
-        "statement-anchored-dropped-producer-key-must-fail.ahl",
+        "governance-state-valid.ahl",
         |r| {
             r["governance"]["chain"][2]["envelope"]["payload"]
                 .as_object_mut()
@@ -1895,19 +1906,19 @@ fn governance_chain_rules_reject() {
         "§2.3.5 — a non-genesis manifest references its predecessor",
     );
     assert_rejects(
-        "statement-anchored-dropped-producer-key-must-fail.ahl",
+        "governance-state-valid.ahl",
         |r| corrupt(&mut r["governance"]["chain"][2]["envelope"]["payload"]["predecessor"]),
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — the predecessor reference is the predecessor's entry id",
     );
     assert_rejects(
-        "statement-anchored-dropped-producer-key-must-fail.ahl",
+        "governance-state-valid.ahl",
         |r| r["governance"]["chain"].as_array_mut().expect("chain").swap(0, 1),
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — chain hops ascend by entry index",
     );
     assert_rejects(
-        "statement-anchored-dropped-producer-key-must-fail.ahl",
+        "governance-state-valid.ahl",
         |r| r["governance"]["chain"][1]["envelope"]["payload"]["action"] = json!("revoke"),
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.6 — key actions are add or retire",
@@ -2086,14 +2097,12 @@ fn claim_material_rules_reject() {
         |e| matches!(e, ReceiptError::InclusionPathInvalid { what: "input-set member" }),
         "§3 — input_members open the leaf's input_set_root",
     );
-    // `subject.entry_index <= target_index` (I-D §3) is untestable end to end against
-    // `governance-state-valid.ahl` as rewritten: its subject is entry 0, the only manifest
-    // statement in this corpus a governance-state claim can name without the chain also
-    // carrying manifest v2's rotation (which `GovernanceKeyRotationUnsupported`, I-D §7.1,
-    // refuses before claim-material processing is reached at all) — and no `target_index`
-    // value is less than entry index 0, since indices are unsigned. This is the same coverage
-    // cost the "Not yet implemented" section of `test_data/README.md` documents for the
-    // rotation-affected receipt vectors.
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| r["claim_material"]["target_index"] = json!(1),
+        |e| matches!(e, ReceiptError::EmbeddedOrderingViolation { what: "governance subject", .. }),
+        "§3 — subject.entry_index <= target_index",
+    );
     assert_rejects(
         "governance-state-valid.ahl",
         |r| r["claim_material"]["target_index"] = json!(99),
@@ -2292,11 +2301,8 @@ fn a_later_challenge_cannot_unseat_an_authorized_trigger() {
     assert!(!authority.contains(&signer(23)), "entry 23 must be the challenge");
 
     // Bounded to [0, 25): entries 22 (authorized) and 23 (challenge) are what this test
-    // illustrates. Entry 28 also names F — it is the non-verifying-signature fixture, once
-    // covered end to end by a positive vector and now covered instead by
-    // `trigger-effective-non-verifying-signature-rotation-unsupported-must-fail.ahl` (this
-    // build can no longer accept material anchored under manifest v2's rotation at all — see
-    // that vector's generator comment) — and is
+    // illustrates. Entry 28 also names F — it is the non-verifying-signature fixture, covered
+    // end to end by `trigger-effective-non-verifying-signature-ignored.ahl` — and is
     // deliberately out of scope here: a `key_id`-only "authority" filter, as used below, cannot
     // tell it apart from a genuine signature, which is exactly why `is_authorized_trigger` in
     // the verifier checks the signature cryptographically rather than reusing this shortcut.
@@ -2404,10 +2410,7 @@ fn claim_material_descriptor_must_equal_the_governing_manifest() {
 // content-binding logic is ever reached, and recomputing a genuine inclusion path for a
 // mutated envelope is a generator-level operation (rebuilding the log tree), not something an
 // ad-hoc receipt mutation can do. The rule itself — `descriptor::media_type_required` — is
-// therefore covered directly, at the unit level, immediately below and in `descriptor.rs`;
-// see `test_data/README.md`'s "Not yet implemented" section, which documents the analogous
-// governance-key-rotation coverage gap this same structural constraint (inclusion paths are not
-// recomputed by test-level mutation) also causes.
+// therefore covered directly, at the unit level, immediately below and in `descriptor.rs`.
 #[test]
 fn media_type_presence_rule_matches_the_registered_identifiers() {
     use ahl_core::descriptor::media_type_required;
