@@ -3703,15 +3703,8 @@ fn verify_nested(
 
     // --- §2.1 / §4: governance currency ---------------------------------------------
     let claim = obj(receipt, "claim")?;
-    let assurance_block = obj(claim, "assurance")?;
-    let assurance = Assurance {
-        governance: text(assurance_block, "governance")?.to_owned(),
-        competing_triggers: text(assurance_block, "competing_triggers")?.to_owned(),
-        witnessed: flag(assurance_block, "witnessed")?,
-        continued_history: flag(assurance_block, "continued_history")?,
-        content_binding: text(assurance_block, "content_binding")?.to_owned(),
-        canonicalization_namespace: check_canonicalization_namespace(assurance_block)?,
-    };
+    let claim_type = text(claim, "type")?.to_owned();
+    let assurance = read_assurance(obj(claim, "assurance")?, &claim_type)?;
     let currency = obj(obj(receipt, "governance")?, "currency")?;
     let mode = text(currency, "mode")?;
     if assurance.governance != mode {
@@ -3750,7 +3743,6 @@ fn verify_nested(
         });
     }
 
-    let claim_type = text(claim, "type")?.to_owned();
     let enumeration = match mode {
         "declared" => {
             if !DECLARED_MODE_TYPES.contains(&claim_type.as_str()) {
@@ -3761,6 +3753,10 @@ fn verify_nested(
         "enumerated" => {
             Some(verify_governance_enumeration(currency, &governance, &anchoring, budget)?)
         }
+        // Unreachable by construction — `mode` was just required to equal
+        // `assurance.governance`, whose domain [`read_assurance`] closed at §7.3's two tokens
+        // — and kept as a guard so the match cannot silently gain a third behaviour if either
+        // check is ever moved.
         other => return Err(ReceiptError::Malformed(format!("unknown governance mode `{other}`"))),
     };
 
@@ -3845,6 +3841,91 @@ fn verify_nested(
         subject_statement_id: text(subject, "statement_id")?.to_owned(),
         assurance,
         embedded_receipts: budget.embedded,
+    })
+}
+
+/// Claim types whose §7.2 material carries the competing-trigger range.
+///
+/// `trigger-effective` carries it directly — its row is "`trigger-declared` material plus
+/// `{ \"checkpoint_C\", \"competing\": { \"corpus_range\" } }`", and it "REQUIRES
+/// `governance: \"enumerated\"` and `competing_triggers: \"enumerated\"`". The other two carry
+/// it through the embedded `trigger-effective` receipt §7.2 REQUIRES of them, which is verified
+/// in full, range included; §7.2 does not itself require the token of them, so for those two
+/// the value is PERMITTED rather than mandatory. Every other type carries no such range in any
+/// of its material, so §7.6's "only where the range required by Section 7.2 is present" makes
+/// `enumerated` an assertion nothing in the receipt could support.
+const COMPETING_RANGE_TYPES: [&str; 3] =
+    ["trigger-effective", "disposition-effective", "propagation-complete"];
+
+/// The claim types whose §7.2 material carries record bytes at all — the only two a content
+/// binding can be about.
+///
+/// Both rows carry `record_bytes`/`output_bytes` "if and only if `content_binding` is not
+/// `none`". No other row carries content evidence in any form, so a non-`none` binding on one
+/// of them is, in §7.6's words, "a combination the type cannot satisfy", and is `invalid`
+/// rather than downgraded. A `trigger-*` receipt's content evidence lives in its EMBEDDED
+/// `record-*` receipt, which carries its own assurance block and is verified as its own claim.
+const CONTENT_EVIDENCE_TYPES: [&str; 2] = ["record-ingested", "record-derived"];
+
+/// The two governance modes of I-D §7.4.
+const GOVERNANCE_MODES: [&str; 2] = ["declared", "enumerated"];
+
+/// The two competing-trigger values of I-D §7.3.
+const COMPETING_TRIGGER_VALUES: [&str; 2] = ["not-checked", "enumerated"];
+
+/// The three content-binding values of I-D §7.3.
+const CONTENT_BINDINGS: [&str; 3] = ["none", "plain-verified", "keyed-authorized"];
+
+/// Read `claim.assurance`, holding every member to the domain I-D §7.3 gives it and to the
+/// claim types §7.2's material can satisfy (§7.6).
+///
+/// Centralised deliberately. Each member used to be validated wherever some path first read
+/// it, which left the members that path never reaches unchecked: a `statement-anchored` receipt
+/// could assert `competing_triggers: \"enumerated\"` or `content_binding: \"plain-verified\"`
+/// and be accepted, because nothing in that claim type's verification looks at either. §7.3
+/// gives every member a closed domain and §7.6 ties two of them to the claim type, and both are
+/// decidable from the receipt's own bytes the moment the block is read.
+///
+/// `witnessed` and `continued_history` are booleans, so [`flag`] IS their domain check; each is
+/// then compared against what verification actually established, which no token check could do.
+fn read_assurance(assurance: &Value, claim_type: &str) -> Result<Assurance> {
+    let mismatch = |field: &'static str| ReceiptError::AssuranceMismatch { field };
+
+    let governance = text(assurance, "governance")?.to_owned();
+    if !GOVERNANCE_MODES.contains(&governance.as_str()) {
+        return Err(mismatch("governance"));
+    }
+
+    let competing_triggers = text(assurance, "competing_triggers")?.to_owned();
+    if !COMPETING_TRIGGER_VALUES.contains(&competing_triggers.as_str()) {
+        return Err(mismatch("competing_triggers"));
+    }
+    match (competing_triggers.as_str(), claim_type) {
+        // §7.2: `trigger-effective` "REQUIRES ... `competing_triggers: \"enumerated\"`".
+        (value, "trigger-effective") if value != "enumerated" => {
+            return Err(mismatch("competing_triggers"))
+        }
+        ("enumerated", other) if !COMPETING_RANGE_TYPES.contains(&other) => {
+            return Err(mismatch("competing_triggers"))
+        }
+        _ => {}
+    }
+
+    let content_binding = text(assurance, "content_binding")?.to_owned();
+    if !CONTENT_BINDINGS.contains(&content_binding.as_str()) {
+        return Err(mismatch("content_binding"));
+    }
+    if content_binding != "none" && !CONTENT_EVIDENCE_TYPES.contains(&claim_type) {
+        return Err(mismatch("content_binding"));
+    }
+
+    Ok(Assurance {
+        governance,
+        competing_triggers,
+        witnessed: flag(assurance, "witnessed")?,
+        continued_history: flag(assurance, "continued_history")?,
+        canonicalization_namespace: check_canonicalization_namespace(assurance)?,
+        content_binding,
     })
 }
 
@@ -4156,9 +4237,10 @@ fn verify_content_binding(
     // I-D §7.6: `assurance.canonicalization_namespace` "is `private-use` if and only if the
     // carried descriptor's `canonicalization` identifier begins `x-`", and §7.3 calls the
     // member "computable from the receipt alone". So it is decided HERE — on the carried
-    // descriptor, the moment it is parsed, before the manifest is consulted for the equality
-    // rule below and well before §6.3's capability outcome, which an `x-` identifier would
-    // otherwise always reach first and report as unverifiable.
+    // descriptor, the moment it is parsed — before the descriptor-equality rule below compares
+    // it against the manifest's declared one (already read above), and well before §6.3's
+    // unsupported-procedure outcome, which an `x-` identifier would otherwise always reach
+    // first and report as unverifiable.
     check_namespace_matches_descriptor(ctx.assurance, claimed_descriptor.canonicalization())?;
     if claimed_descriptor.canonicalization() != descriptor.canonicalization()
         || claimed_descriptor.media_type() != descriptor.media_type()
