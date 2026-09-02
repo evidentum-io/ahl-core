@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use ahl_core::bitemporal::{Scope, ValidTime};
 use ahl_core::closure::{affected_set, RecordRef, TreeMaterial};
+use ahl_core::descriptor;
 use ahl_core::receipt::{
     verify_receipt, AdaptorCapabilities, AdaptorProfile, Limits, ReceiptError, TrustPolicy,
 };
@@ -415,6 +416,57 @@ fn malformed_vectors_are_rejectable_and_say_why() {
         !verify_envelope(&unsigned["envelope"], |_| None).expect("well-formed envelope"),
         "an envelope with no signatures is not an AHL statement"
     );
+
+    // I-D revision 0.4 §2.6: a dataset id containing a control octet — 0x1F or 0x7F — is
+    // syntactically invalid. Each vector's manifest carries exactly one such dataset id, and
+    // `descriptor::validate_dataset_id` (the primitive `datasets_object` calls at manifest
+    // validation time) must reject it as a `DatasetIdControlOctet`, never as a plain syntax
+    // violation, since these bytes are the specific case §2.6 calls load-bearing.
+    for (file, octet_name) in [
+        ("dataset-id-control-octet-0x1f.json", "0x1F"),
+        ("dataset-id-control-octet-0x7f.json", "0x7F"),
+    ] {
+        let vector = read_json(&dir.join(file));
+        assert!(
+            field_str(&vector, "expect").expect("vector carries expect").contains("§2.6"),
+            "{file}: the expectation must name the violated rule"
+        );
+        let datasets = vector["envelope"]["payload"]["datasets"]
+            .as_object()
+            .expect("manifest datasets object");
+        let offending = datasets
+            .keys()
+            .find(|id| descriptor::validate_dataset_id_syntax(id).is_err())
+            .unwrap_or_else(|| panic!("{file}: no dataset id violates the syntax rule"));
+        assert!(
+            matches!(
+                descriptor::validate_dataset_id(offending),
+                Err(ahl_core::AhlError::DatasetIdControlOctet { .. })
+            ),
+            "{file}: dataset id `{offending}` (naming {octet_name}) must be rejected by the \
+             control-octet check specifically"
+        );
+    }
+}
+
+/// I-D revision 0.4 §2.6 / §6.3: a dataset id carrying a control octet makes the WHOLE manifest
+/// rejected, not merely that dataset's claims. Unlike the vectors above — which exercise the
+/// primitive directly — this drives the same fault through the full receipt pipeline, the same
+/// way `the_manifest_log_object_schema_is_enforced_and_log_id_has_no_alias` proves the `log`
+/// object's schema is enforced by `verify_receipt`, not merely checkable in isolation.
+#[test]
+fn dataset_id_control_octets_are_rejected_by_manifest_schema() {
+    for octet in ['\u{1f}', '\u{7f}'] {
+        reject_by_manifest_schema(
+            |payload| {
+                let datasets =
+                    payload["datasets"].as_object_mut().expect("manifest datasets object");
+                let scores = datasets.remove("scores").expect("scores dataset declared");
+                datasets.insert(format!("scores{octet}bad"), scores);
+            },
+            &format!("dataset id containing {:#04x}", u32::from(octet)),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
