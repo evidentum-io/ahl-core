@@ -1,9 +1,9 @@
 {
   "affected_count": 4,
-  "affected_root": "sha256:e06631de149ebd96bd897150c3c430179b17d813ca953903f4f242a4d9b3abec",
+  "affected_root": "sha256:645aaed9fb3f1f4abce3558acaa8b233002d0801714affe6f88bda98e98058d5",
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:be6f1056fe68c22d8e4c2b61b4dd079a493420b97f239104539fedf252ebb36c",
+    "root_hash": "sha256:9e0b2eccb79e75ee5c2560c280aafaf935e1bf547889f6e058decefed9c81870",
     "tree_size": 8
   },
   "description": "Revocation closure `toy-corpus` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
@@ -35,7 +35,7 @@
       "dataset": "scores",
       "disposition": "recomputed",
       "record": "sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3",
-      "successor_statement": "sha256:f1e47212755351f7e9b4b747d2a58573c15b6a001a19322daa723262109fa596"
+      "successor_statement": "sha256:3eb41212109891b464877d8041103362ac36e8ad87a459cdae19f7ec552816e6"
     },
     {
       "assessment": "sha256:81af6cfe105fb10380549c7290b09c7910c90cd3e860777ab7bbccc5b91be396",
@@ -65,7 +65,7 @@
       "effective_from": "2026-08-16T12:00:00Z",
       "retroactive": true
     },
-    "statement_id": "sha256:2f62560f534eb3d703304cc220aefea2f67143f680661caabbf9e1a702d93ed8",
+    "statement_id": "sha256:3362c6938b6a1953791b1266b9d7b36907dc29f375a31fb33c9a6ae69af8ec79",
     "type": "correction"
   }
 }

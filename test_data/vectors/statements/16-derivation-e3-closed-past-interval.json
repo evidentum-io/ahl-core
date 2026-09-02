@@ -1,5 +1,5 @@
 {
-  "entry_id": "sha256:8041230173015de8535f7c0cf73f082b9467674dbdbc24d7964ea76c3a3642df",
+  "entry_id": "sha256:c38c8339a39b2f0363c5b92aee775aa6ef833788f64c9e9c4fec55af817b0311",
   "entry_index": 16,
   "envelope": {
     "payload": {
@@ -9,11 +9,11 @@
           "dataset": "customers",
           "record": "hmac-sha256:9d203cbd1f61135e646895c72d1408d052488be29015bead9ee1d9fe8f1f5d80",
           "role": "feature",
-          "statement": "sha256:57a5ad203ace06bca8f3101ae06a4147b50faac3d0bac83a9dcc978cd31f9d5d"
+          "statement": "sha256:a29b43db4df15b1c722a0439e36d3243b513ad3a9b0bdefe3de8de0e88440b66"
         }
       ],
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:19227e22afd16e6a588810c475010b7d5da123f1baee229f11cbc9319a72b21d",
+      "manifest": "sha256:437053c55efe84c0b4c774140206689576bea846e08ec1381b3df0dfc12ba588",
       "outputs": [
         {
           "dataset": "scores",
@@ -44,9 +44,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:u4rN5FjW9y9yNYk79NdiOuzdCrC3n0ccD9J4z5OqjdgUoJ1bRMb9R04l+NlR0oPnF4kigl09D+n2Kpr2DOlGCA=="
+        "sig": "base64:a0EtTuo0dSArN/Vdz/h3nEVBsOG4vW53QfSLFaUrndchVDv5DZbuDidV81ZKULRtO2k3xC/0llwUFTlqoXOLBg=="
       }
     ]
   },
-  "statement_id": "sha256:a6b615f602747eef87a69e7f9b40da70e31fbbc6f2c47bbca641b59639b08665"
+  "statement_id": "sha256:1b93bc18917f0f64dcd9fad006db4ab2868df645bbae3691e7feb1ad9f48acc0"
 }

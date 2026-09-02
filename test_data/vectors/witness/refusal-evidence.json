@@ -29,11 +29,11 @@
       "checkpoint_time": "2026-08-16T12:00:00Z",
       "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
       "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-      "root_hash": "sha256:dbecb6d62584fdb1efeded218038f72480ab27b3a38147219ccdd1da9a435a24",
-      "signature": "base64:ilCMaQ37QtWETQ9hi82UAhgw5WpascnZX4KuyGxUEtbM0r7GBK4WynuhMNsS+t8kbhff1x0bJK3Fpua7x/6xAg==",
+      "root_hash": "sha256:0e01ac1b2462968d079311e992b270729be925f9db3d36034589d5c1b3e93240",
+      "signature": "base64:nHnomrOJzQ9ML/nt2Ut5SA3tpH2/2pDgLMiqfeqd9rRe6LQ60Q8vY+KAXCUKc/WjcjKoDkyrcOMjKQqVYZ7CDQ==",
       "tree_size": 13
     },
-    "signature": "base64:drKXtVmHAlQ/tNBrH6XPbp65376YusonPiXJPJqbUIs3Li/JwSkhxKi5NzypVKPeD0zNQoLj2dnJdRM2MmODCQ==",
+    "signature": "base64:t5paBrt8gll6sDV8KjWrE81XV9TVqfIAL+rIHxsC3HKwAysQA7P/viN88RbTVAM3uMT9nYxjXaJDgD1h+IXfDA==",
     "type": "witness-refusal",
     "witness_id": "witness-1"
   },

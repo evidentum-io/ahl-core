@@ -24,8 +24,7 @@
       "keys": [
         {
           "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-          "pubkey": "base64:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=",
-          "valid_from_index": 0
+          "pubkey": "base64:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
         }
       ],
       "level": "L3",
@@ -82,7 +81,7 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:bWgA4gEWMDujA1fKA2/A/5lyuXZ3tqKGk7uzEYii6dcM1q8FGn5CWpHBsqXPjjv6DHhNamy0glUT7nWFj0ZQAg=="
+        "sig": "base64:z0vL93UFYIUgYeN6Lllw18QzMz2NZ9c02Q1FVDyp7hVorV9Yhf29qa5eHcLo0mgUEFT1oi/321LF4qoQsYQoBA=="
       }
     ]
   },

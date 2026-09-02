@@ -9,15 +9,15 @@
       "dataset": "scores",
       "inputs": {
         "input_set_count": 3,
-        "input_set_root": "sha256:0c66a158121c72fd67509cb1f1745be64c0ed66f154842e49e2e86405d9c252c"
+        "input_set_root": "sha256:617e00fdd320f027066b55fc2a792c24033405d22d995eb313c7c1a2cbc35d21"
       },
       "record": "sha256:1350e3dc89dd6823ed3ff1a9c169e7687d1cea3f63076f5b2e055c1097506df2"
     },
     "leaf_index": 0,
     "path": [
-      "sha256:253bae1b50ba8416c2f4bff1a8d303c81d1ba4c28e2a95a5f95a21a23ddaef74"
+      "sha256:b1d78a56db17a9db5967c9c2f4aa4bb29a27f72c06bc51eeab95d9020e10074a"
     ],
-    "root": "sha256:98765ef84983eb0cf65f60a81cb5046d867674a75938289581877e887eb96a8f",
+    "root": "sha256:0e04a3eb89510e71c5000f1d333b571aa894542f47726737682b35f79eb59f28",
     "tree_size": 2
   },
   "leaf_format": "ahl-leaf-v2",
@@ -27,7 +27,7 @@
       "dataset": "scores",
       "inputs": {
         "input_set_count": 3,
-        "input_set_root": "sha256:0c66a158121c72fd67509cb1f1745be64c0ed66f154842e49e2e86405d9c252c"
+        "input_set_root": "sha256:617e00fdd320f027066b55fc2a792c24033405d22d995eb313c7c1a2cbc35d21"
       },
       "record": "sha256:1350e3dc89dd6823ed3ff1a9c169e7687d1cea3f63076f5b2e055c1097506df2"
     },
@@ -35,13 +35,13 @@
       "dataset": "scores",
       "inputs": {
         "input_set_count": 3,
-        "input_set_root": "sha256:0c66a158121c72fd67509cb1f1745be64c0ed66f154842e49e2e86405d9c252c"
+        "input_set_root": "sha256:617e00fdd320f027066b55fc2a792c24033405d22d995eb313c7c1a2cbc35d21"
       },
       "record": "sha256:c6270655a635b5132fe72ea5c7903c3f990da09cdc51997e4fb59b804840d9da"
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",
   "outputs_count": 2,
-  "outputs_root": "sha256:98765ef84983eb0cf65f60a81cb5046d867674a75938289581877e887eb96a8f",
+  "outputs_root": "sha256:0e04a3eb89510e71c5000f1d333b571aa894542f47726737682b35f79eb59f28",
   "sort_rule": "leaves sorted ascending by the UTF-8 bytes of the canonical `record` commitment string; non-canonical strings and duplicates are rejected (core spec §2.5)"
 }

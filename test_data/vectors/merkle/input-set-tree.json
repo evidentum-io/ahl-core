@@ -9,37 +9,37 @@
       "dataset": "customers",
       "record": "hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad",
       "role": "reference",
-      "statement": "sha256:25ee160b2fc30483007b4de60121ed182d2cbac4a8abbb513afc2c15138ea6f1"
+      "statement": "sha256:50d643a9aa570237956c31a5b8fad1e7aed5cb86f98e8dea69bd57cea776245c"
     },
     "leaf_index": 0,
     "path": [
-      "sha256:ffa25f6ad65eb0c7801cc232721b8f61202a7b57f84be0289a6b6586b1c70800",
-      "sha256:9f38a930a691830d9d12e76b55e5d14ad466a08d0ea961aa234da8021128e70a"
+      "sha256:b36eccf567c25e1f4af82709b7c7febee1a404bbe4f7fc8ecac5b14f700b16f8",
+      "sha256:970d1e2752417afc9dcc91058401b24ec2eefdb21b82f549271b6132a2d03a03"
     ],
-    "root": "sha256:0c66a158121c72fd67509cb1f1745be64c0ed66f154842e49e2e86405d9c252c",
+    "root": "sha256:617e00fdd320f027066b55fc2a792c24033405d22d995eb313c7c1a2cbc35d21",
     "tree_size": 3
   },
   "input_set_count": 3,
-  "input_set_root": "sha256:0c66a158121c72fd67509cb1f1745be64c0ed66f154842e49e2e86405d9c252c",
+  "input_set_root": "sha256:617e00fdd320f027066b55fc2a792c24033405d22d995eb313c7c1a2cbc35d21",
   "leaf_rule": "sha256(0x00 || JCS(leaf))",
   "leaves": [
     {
       "dataset": "customers",
       "record": "hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad",
       "role": "reference",
-      "statement": "sha256:25ee160b2fc30483007b4de60121ed182d2cbac4a8abbb513afc2c15138ea6f1"
+      "statement": "sha256:50d643a9aa570237956c31a5b8fad1e7aed5cb86f98e8dea69bd57cea776245c"
     },
     {
       "dataset": "customers",
       "record": "hmac-sha256:b3b4a463cabcc1fa963aa793097fb67ef3de110c1920539df7ba52ca68c597c7",
       "role": "feature",
-      "statement": "sha256:a41413cbcb6e0396333686246d9abcc5df991be3828eff7d6c137202d29816b8"
+      "statement": "sha256:efa1a26e88c08d46bf87d422e63a9dd6163ee76a63d1e2695aec615bb4767b64"
     },
     {
       "dataset": "scores",
       "record": "sha256:e4fccbcb05345bc70f1327bb001a1bb09f85df01de4e35b3778089aed70f24c4",
       "role": "feature",
-      "statement": "sha256:f1e47212755351f7e9b4b747d2a58573c15b6a001a19322daa723262109fa596"
+      "statement": "sha256:3eb41212109891b464877d8041103362ac36e8ad87a459cdae19f7ec552816e6"
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",

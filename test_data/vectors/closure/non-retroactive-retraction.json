@@ -1,7 +1,7 @@
 {
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:e02a7cd3e419b28a98d8095788df9681fde515cd65c5d6486d167d364e40f9d0",
+    "root_hash": "sha256:280737a5760068de22d3ed0b52d3d0933b8e5618721db2e46f1445dace880fde",
     "tree_size": 20
   },
   "description": "Revocation closure `non-retroactive-retraction` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
@@ -26,7 +26,7 @@
       "effective_from": "2026-08-01T00:00:00Z",
       "retroactive": false
     },
-    "statement_id": "sha256:193c3fbbe9496023fb5d34ec65ac36d3efd88d1de9b59b21e7943884e41ea8e8",
+    "statement_id": "sha256:bc8c7852ff56df20d20aa05fd75127c444996533443e03dc515983fb947a01a2",
     "type": "retraction"
   }
 }

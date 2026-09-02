@@ -12,17 +12,17 @@
           "dataset": "customers",
           "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
           "role": "feature",
-          "statement": "sha256:1e5ad504180468a6aa60e6d85ee2f8fa654926b6d10027f4d8f1d94f6b6fecef"
+          "statement": "sha256:514a00bd2a6d4709c8aca18c872043507bf67513506610fa4ce1a8c54cc0ea40"
         }
       ],
       "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
     },
     "leaf_index": 0,
     "path": [
-      "sha256:b88ba64d506eeb65e26d06a2a7efe78f0e8e3257db6c4932dd186673b33e8b62",
-      "sha256:7980c6b7d36b1aa8a3480dc0e4c38c2b9fde03ea81472c698a4cf0a276d27565"
+      "sha256:e9c9af3f19dbe7c05179e6b64a77fc8df69285f38f75f45f17a5cce7be00fbbd",
+      "sha256:f59f705c6731005e35002f849f716d05563309f9cc2ecd124863c94afa1940f0"
     ],
-    "root": "sha256:2ba93b6ddd7a52389cbf89e95c1c9373ca0cec119196df66fcd26f28aba5370e",
+    "root": "sha256:5e6104bf68d3f6f90132b9578bffb5bdd3707422dffa7db2472dfb0f6f9d2ae7",
     "tree_size": 3
   },
   "leaf_format": "ahl-leaf-v2",
@@ -35,7 +35,7 @@
           "dataset": "customers",
           "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
           "role": "feature",
-          "statement": "sha256:1e5ad504180468a6aa60e6d85ee2f8fa654926b6d10027f4d8f1d94f6b6fecef"
+          "statement": "sha256:514a00bd2a6d4709c8aca18c872043507bf67513506610fa4ce1a8c54cc0ea40"
         }
       ],
       "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
@@ -47,7 +47,7 @@
           "dataset": "customers",
           "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
           "role": "feature",
-          "statement": "sha256:1e5ad504180468a6aa60e6d85ee2f8fa654926b6d10027f4d8f1d94f6b6fecef"
+          "statement": "sha256:514a00bd2a6d4709c8aca18c872043507bf67513506610fa4ce1a8c54cc0ea40"
         }
       ],
       "record": "sha256:a4d63cf8838a3ca209af1ae4bab6ba7f286b5c684c94b3890a7178996607ace6"
@@ -59,7 +59,7 @@
           "dataset": "customers",
           "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
           "role": "feature",
-          "statement": "sha256:1e5ad504180468a6aa60e6d85ee2f8fa654926b6d10027f4d8f1d94f6b6fecef"
+          "statement": "sha256:514a00bd2a6d4709c8aca18c872043507bf67513506610fa4ce1a8c54cc0ea40"
         }
       ],
       "record": "sha256:d88442604d94989f8498f673e44a64198d1f19b64892539337cfc0b33be6717f"
@@ -67,6 +67,6 @@
   ],
   "node_rule": "sha256(0x01 || left || right)",
   "outputs_count": 3,
-  "outputs_root": "sha256:2ba93b6ddd7a52389cbf89e95c1c9373ca0cec119196df66fcd26f28aba5370e",
+  "outputs_root": "sha256:5e6104bf68d3f6f90132b9578bffb5bdd3707422dffa7db2472dfb0f6f9d2ae7",
   "sort_rule": "leaves sorted ascending by the UTF-8 bytes of the canonical `record` commitment string; non-canonical strings and duplicates are rejected (core spec §2.5)"
 }

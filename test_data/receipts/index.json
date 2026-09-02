@@ -13,7 +13,7 @@
     "dataset_keys": {
       "customers": "test_data/keys/dataset_customers.key — held only by an authorized verifier; never packaged in a receipt"
     },
-    "genesis_entry_id": "sha256:14bd61d3d73a9311fa28402cb7d0ecd19a91f3a2d53b05fc90afd2247016affd",
+    "genesis_entry_id": "sha256:d102ca149c3d23bb7efdcf9df4a5dc41e4026bf200fe68f15ce1d99455e6bfd2",
     "genesis_key_ids": [
       "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
     ],
@@ -78,7 +78,7 @@
       "claim_type": "record-ingested",
       "expect": "reject",
       "file": "record-ingested-stale-manifest-must-fail.ahl",
-      "reason": "`subject.manifest` binding is invalid: `subject.manifest` (`sha256:19227e22afd16e6a588810c475010b7d5da123f1baee229f11cbc9319a72b21d`) is not the manifest version ACTIVE at subject.entry_index 32 (`sha256:35f7435f758f91941631bb90bebde9e879836bec43d4f3fbfa6a2b234a61a453`) (I-D §2.2, §7.6)",
+      "reason": "`subject.manifest` binding is invalid: `subject.manifest` (`sha256:437053c55efe84c0b4c774140206689576bea846e08ec1381b3df0dfc12ba588`) is not the manifest version ACTIVE at subject.entry_index 32 (`sha256:6dedcc481094b4f3cb3eb1e13bf4bad4c4c91fc0f7f3f5c17ec5945e3d4e4740`) (I-D §2.2, §7.6)",
       "rule": "I-D §2.2 / §7.6 — subject.manifest must be the manifest ACTIVE at subject.entry_index, not merely an earlier one"
     },
     {
@@ -218,7 +218,7 @@
       "claim_type": "propagation-complete",
       "expect": "reject",
       "file": "propagation-complete-missing-leaf-must-fail.ahl",
-      "reason": "tree material for `sha256:2ba93b6ddd7a52389cbf89e95c1c9373ca0cec119196df66fcd26f28aba5370e` is invalid: commits 3 leaves, 2 carried",
+      "reason": "tree material for `sha256:5e6104bf68d3f6f90132b9578bffb5bdd3707422dffa7db2472dfb0f6f9d2ae7` is invalid: commits 3 leaves, 2 carried",
       "rule": "spec §2.5/§3.5 — committed tree material must open its anchored root and count"
     },
     {
@@ -246,15 +246,15 @@
       "claim_type": "governance-state",
       "expect": "reject",
       "file": "governance-key-rotation-proof-missing-must-fail.ahl",
-      "reason": "governance chain invalid: `governance.rotation_proofs[]`'s manifest_entry_index sequence [] does not equal EXACTLY the ascending sequence of rotating manifests' entry indexes [25] (I-D §7.1: one element per rotation, ascending order, no duplicates, no extras, no missing)",
-      "rule": "I-D §7.1 — rotation_proofs[]'s manifest_entry_index sequence must equal exactly the rotating manifests' entry indexes"
+      "reason": "rotation proof for manifest entry index 25 is invalid: the chain rotates the log or witness key set here, but `governance.rotation_proofs[]` carries no (further) element for it (I-D §7.1)",
+      "rule": "I-D §7.1 — a detected rotation requires the next unconsumed rotation_proofs[] element"
     },
     {
       "claim_type": "governance-state",
       "expect": "reject",
       "file": "governance-key-rotation-proof-wrong-index-must-fail.ahl",
-      "reason": "governance chain invalid: `governance.rotation_proofs[]`'s manifest_entry_index sequence [24] does not equal EXACTLY the ascending sequence of rotating manifests' entry indexes [25] (I-D §7.1: one element per rotation, ascending order, no duplicates, no extras, no missing)",
-      "rule": "I-D §7.1 — rotation_proofs[]'s manifest_entry_index sequence must equal exactly the rotating manifests' entry indexes"
+      "reason": "rotation proof for manifest entry index 25 is invalid: the next unconsumed `governance.rotation_proofs[]` element carries `manifest_entry_index` 24, not 25 — one element per rotation, in ascending `manifest_entry_index` order (I-D §7.1)",
+      "rule": "I-D §7.1 — the next unconsumed rotation_proofs[] element must carry this hop's own manifest_entry_index"
     },
     {
       "claim_type": "governance-state",
@@ -267,14 +267,14 @@
       "claim_type": "governance-state",
       "expect": "reject",
       "file": "governance-key-rotation-proof-duplicate-must-fail.ahl",
-      "reason": "governance chain invalid: `governance.rotation_proofs[]`'s manifest_entry_index sequence [25, 25] does not equal EXACTLY the ascending sequence of rotating manifests' entry indexes [25] (I-D §7.1: one element per rotation, ascending order, no duplicates, no extras, no missing)",
-      "rule": "I-D §7.1 — one element per rotation, no duplicates"
+      "reason": "governance chain invalid: `governance.rotation_proofs[]` carries 2 element(s) beyond the 1 the chain walk actually consumed — I-D §7.1: one element per rotation, no extras",
+      "rule": "I-D §7.1 — one element per rotation, no duplicates left unconsumed"
     },
     {
       "claim_type": "governance-state",
       "expect": "reject",
       "file": "governance-key-rotation-proof-extra-must-fail.ahl",
-      "reason": "governance chain invalid: `governance.rotation_proofs[]`'s manifest_entry_index sequence [25, 0] does not equal EXACTLY the ascending sequence of rotating manifests' entry indexes [25] (I-D §7.1: one element per rotation, ascending order, no duplicates, no extras, no missing)",
+      "reason": "governance chain invalid: `governance.rotation_proofs[]` carries 2 element(s) beyond the 1 the chain walk actually consumed — I-D §7.1: one element per rotation, no extras",
       "rule": "I-D §7.1 — no extra elements for manifests that do not rotate"
     },
     {
@@ -304,6 +304,27 @@
       "file": "governance-key-rotation-proof-malformed-witness-entry-must-fail.ahl",
       "reason": "malformed receipt: witness cosignature cosigned_at: REQUIRED",
       "rule": "I-D §7.1 — every rotation-proof witnesses[] entry takes the anchoring.witnesses[] shape, cosigned_at included"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-key-statement-wrong-key-id-must-fail.ahl",
+      "reason": "governance chain invalid: key statement at entry index 9 carries `key.key_id` (`sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e`) that does not equal `sha256:`-of-`key.pubkey` (`sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827`) (I-D §7.5.1 4b(K))",
+      "rule": "I-D §7.5.1 4b(K) — key.key_id must be sha256:-of-key.pubkey"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-key-statement-missing-valid-from-must-fail.ahl",
+      "reason": "governance chain invalid: key statement at entry index 9 carries no `key.valid_from` — the member is REQUIRED (I-D §7.5.1 4b(K))",
+      "rule": "I-D §7.5.1 4b(K) — key.valid_from is REQUIRED"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-key-statement-short-pubkey-must-fail.ahl",
+      "reason": "governance chain invalid: key statement at entry index 9 carries `key.pubkey` that does not decode to exactly 32 octets (I-D §7.5.1 4b(K))",
+      "rule": "I-D §7.5.1 4b(K) — key.pubkey must decode to exactly 32 octets"
     },
     {
       "claim_type": "governance-state",
