@@ -1136,6 +1136,42 @@ fn is_family_hash(value: &str) -> bool {
     })
 }
 
+/// Accept a `base64:` family string under I-D §2.1's strict rule: the prefix, the standard
+/// alphabet, canonical padding, and no non-zero trailing bits.
+///
+/// The decoder this crate uses everywhere ([`crate::B64`]) already enforces all three of the
+/// encoding conditions — it rejects a wrong-length pad and refuses trailing bits rather than
+/// discarding them — so validating a family string is deciding the prefix and then asking it
+/// to decode. What this adds over decoding AT THE POINT OF USE is that it can be applied to
+/// every carried byte field, including the ones verification never selects (I-D §7.1: "Each is
+/// a `base64:` family string… A family string failing those checks is a schema failure and the
+/// result is `invalid`").
+fn is_family_base64(value: &str) -> bool {
+    value.strip_prefix("base64:").is_some_and(|body| B64.decode(body).is_ok())
+}
+
+/// Every element of a `sha256:` family-string array member, validated where the member is
+/// present (I-D §7.1: inclusion and consistency paths are `sha256:` family-string arrays).
+///
+/// Absent members are left to the readers that require them; what this rules out is a path
+/// carrying an element no verifier could interpret, on any element of any carried path,
+/// including one an earlier failure would have short-circuited past.
+fn check_family_hash_path(container: &Value, member: &str, what: &str) -> Result<()> {
+    let Some(value) = container.get(member) else { return Ok(()) };
+    let elements = value.as_array().ok_or_else(|| {
+        ReceiptError::Malformed(format!("`{what}` MUST be an array of `sha256:` family strings"))
+    })?;
+    for (position, element) in elements.iter().enumerate() {
+        if !element.as_str().is_some_and(is_family_hash) {
+            return Err(ReceiptError::Malformed(format!(
+                "`{what}[{position}]` is not a `sha256:` family string in lowercase hex \
+                 (I-D §2.1, §7.1)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Recompute a producer `key_id` from its `pubkey`: I-D §6.2 — "`pubkey` decodes to exactly
 /// the 32 octets of an Ed25519 public key; and `key_id` equals `sha256:` followed by the
 /// lowercase hex SHA-256 of those octets, so it is recomputable rather than merely declared."
@@ -1180,8 +1216,11 @@ fn checkpoint_object(value: &Value) -> Result<&Value> {
     if !value.get("key_id").and_then(Value::as_str).is_some_and(is_family_hash) {
         return Err(invalid("key_id", "REQUIRED, a `sha256:` family string in lowercase hex"));
     }
-    if value.get("signature").and_then(Value::as_str).is_none() {
-        return Err(invalid("signature", "REQUIRED"));
+    if !value.get("signature").and_then(Value::as_str).is_some_and(is_family_base64) {
+        return Err(invalid(
+            "signature",
+            "REQUIRED, a `base64:` family string under the strict acceptance rule (I-D §2.1)",
+        ));
     }
     Ok(value)
 }
@@ -1292,8 +1331,11 @@ fn witness_cosignature_object(value: &Value) -> Result<&Value> {
     if !value.get("key_id").and_then(Value::as_str).is_some_and(is_family_hash) {
         return Err(invalid("key_id", "REQUIRED, a `sha256:` family string in lowercase hex"));
     }
-    if value.get("cosignature").and_then(Value::as_str).is_none() {
-        return Err(invalid("cosignature", "REQUIRED"));
+    if !value.get("cosignature").and_then(Value::as_str).is_some_and(is_family_base64) {
+        return Err(invalid(
+            "cosignature",
+            "REQUIRED, a `base64:` family string under the strict acceptance rule (I-D §2.1)",
+        ));
     }
     let cosigned_at = value
         .get("cosigned_at")
@@ -1532,6 +1574,15 @@ fn key_objects(container: &Value) -> Result<Vec<(String, String)>> {
                 .get("pubkey")
                 .and_then(Value::as_str)
                 .ok_or_else(|| invalid("pubkey", "the member is REQUIRED (spec §7.2)"))?;
+            // I-D §2.1's strict acceptance rule, on the manifest side of the same comparison
+            // the receipt's `keys` entries are held to: a declared key object no verifier could
+            // decode is a schema failure of the manifest, not a key that happens not to match.
+            if !is_family_base64(pubkey) {
+                return Err(invalid(
+                    "pubkey",
+                    "not a `base64:` family string under the strict acceptance rule (I-D §2.1)",
+                ));
+            }
             if object.get("valid_from_index").and_then(Value::as_u64).is_none() {
                 return Err(invalid("valid_from_index", "not an entry index (spec §7.2, §7.3)"));
             }
@@ -1874,6 +1925,53 @@ fn witnesses_object(manifest: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Require the receipt to LIST a rotation proof's cosigning witness key exactly as I-D §7.1's
+/// transition exception describes it: a `manifest-chain` entry whose `binding` names the
+/// PREDECESSOR manifest version, and whose `(witness_id, key_id, pubkey)` is that manifest's
+/// own witness key object.
+///
+/// Deliberately not the generic binder. `local-policy` is admissible for the witness keys a
+/// verifier already trusts, and such an entry carries no binding at all — so routing rotation
+/// material through the generic path would let a trusted local-policy key presented under the
+/// outgoing witness's identity and key id satisfy the rotation cosignature requirement, while
+/// the outgoing manifest's own public key was never compared. The exception says which entries
+/// attest a handover, and they are the retiring manifest's, from the chain, and no others.
+///
+/// The error names the binding index the entry actually carried where one exists, so a key
+/// listed but bound to the INCOMING version is reported as the mis-binding it is rather than
+/// as an absence.
+fn require_listed_rotation_witness(
+    receipt: &Value,
+    outgoing_index: u64,
+    witness_id: &str,
+    key_id: &str,
+    pubkey: &str,
+) -> Result<()> {
+    let mut attempted: Option<u64> = None;
+    for entry in array(obj(receipt, "keys")?, "witness")? {
+        if entry.get("witness_id").and_then(Value::as_str) != Some(witness_id)
+            || entry.get("key_id").and_then(Value::as_str) != Some(key_id)
+        {
+            continue;
+        }
+        let binding = entry
+            .get("binding")
+            .and_then(|binding| binding.get("entry_index"))
+            .and_then(Value::as_u64);
+        if entry.get("source").and_then(Value::as_str) == Some("manifest-chain")
+            && binding == Some(outgoing_index)
+            && entry.get("pubkey").and_then(Value::as_str) == Some(pubkey)
+        {
+            return Ok(());
+        }
+        attempted = attempted.or(binding);
+    }
+    Err(ReceiptError::KeyNotBound {
+        key_id: key_id.to_owned(),
+        entry_index: attempted.unwrap_or(outgoing_index),
+    })
+}
+
 /// The already-established context one `governance.rotation_proofs[]` element is validated
 /// against, gathered so the element's own material can be told apart from it at a glance.
 ///
@@ -2020,12 +2118,6 @@ fn verify_rotation_proof(
     // already shape-checked above where present, but no cosignature is required from it.
     if rotating_manifest.get("level").and_then(Value::as_str) == Some("L3") {
         let outgoing_witnesses = witness_key_set(outgoing_manifest)?;
-        // The cosigning keys go through the receipt's own `keys.witness[]`, bound at the
-        // outgoing manifest's entry index, for the same reason the log key does: I-D §7.1
-        // requires every key used in verification to appear in `keys`, and the transition
-        // exception says which version this proof's entries name.
-        let (outgoing_witness_keys, outgoing_witness_attempted) =
-            bind_keys_by_group(receipt, policy, manifests, outgoing_index, "witness")?;
         let mut cosigned = false;
         for witness in &witness_candidates {
             let witness_id = text(witness, "witness_id")?.to_owned();
@@ -2033,26 +2125,23 @@ fn verify_rotation_proof(
             // A cosignature by a witness the OUTGOING manifest does not declare under that
             // identity attests nothing about the handover, and is passed over rather than
             // refused: §7.1 asks only that at least one element verify under an outgoing
-            // witness key, so an element that is not such a key is simply not that one.
-            if !outgoing_witnesses
+            // witness key, so an element that is not such a key is simply not that one. The
+            // pubkey comes from that manifest object, never from the receipt.
+            let Some(pubkey) = outgoing_witnesses
                 .iter()
-                .any(|entry| entry.0 == witness_id && entry.1.as_str() == key_id)
-            {
+                .find(|entry| entry.0 == witness_id && entry.1.as_str() == key_id)
+                .map(|entry| entry.2.clone())
+            else {
                 continue;
-            }
-            // Having selected it, the key it verifies under must be one the receipt declared.
-            // This is the point of difference: the identity is the manifest's, the key comes
-            // from the `keys` block, and an outgoing witness the receipt never listed — or
-            // listed under the INCOMING version's binding index — cannot cosign the proof.
-            let resolved = outgoing_witness_keys.get(key_id).ok_or_else(|| {
-                let entry_index =
-                    outgoing_witness_attempted.get(key_id).copied().unwrap_or(outgoing_index);
-                ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
-            })?;
-            check_witness_identity(resolved, key_id, &witness_id)?;
+            };
+            // Having selected it, the receipt must LIST that key as the transition exception
+            // requires — `manifest-chain`, bound to the predecessor version, and carrying that
+            // same public key. A `local-policy` entry is not such a listing however trusted it
+            // is: it attests what this verifier accepts, not what the retiring authority did.
+            require_listed_rotation_witness(receipt, outgoing_index, &witness_id, key_id, &pubkey)?;
             budget.spend(1)?;
             if verify_signature(
-                &decode_pubkey(&resolved.pubkey)?,
+                &decode_pubkey(&pubkey)?,
                 &cosignature_bytes(checkpoint, &witness_id),
                 text(witness, "cosignature")?,
             )? {
@@ -2732,6 +2821,37 @@ fn check_container_shapes(receipt: &Value) -> Result<()> {
             witness_cosignature_object(element)?;
         }
     }
+    check_family_hash_path(anchoring, "inclusion_path", "anchoring.inclusion_path")?;
+    check_family_hash_path(anchoring, "consistency_path", "anchoring.consistency_path")?;
+    for (position, hop) in array(obj(receipt, "governance")?, "chain")?.iter().enumerate() {
+        let what = format!("governance.chain[{position}].inclusion_path");
+        check_family_hash_path(hop, "inclusion_path", &what)?;
+    }
+
+    // I-D §7.1: `anchors[]` is material this verifier does not otherwise read — it computes
+    // no verdict from an external timestamp — but its members are subject to the same §2.1
+    // rule as any other, and a member no verifier could interpret is a schema failure whether
+    // or not THIS one has a use for it. Only what §7.1 fixes is checked: the arity, and
+    // `target_hash` as a digest.
+    if let Some(value) = receipt.get("anchors") {
+        let elements = value.as_array().ok_or_else(|| {
+            ReceiptError::Malformed(
+                "`anchors`, where present, MUST be an array (I-D §7.1)".to_owned(),
+            )
+        })?;
+        for (position, element) in elements.iter().enumerate() {
+            match element.get("target_hash") {
+                None => {}
+                Some(Value::String(hash)) if is_family_hash(hash) => {}
+                Some(_) => {
+                    return Err(ReceiptError::Malformed(format!(
+                        "`anchors[{position}].target_hash` is not a `sha256:` family string in \
+                         lowercase hex (I-D §2.1, §7.1)"
+                    )))
+                }
+            }
+        }
+    }
 
     // I-D §7.1: `governance.rotation_proofs[]`'s own `witnesses` is "an array in the shape of
     // `anchoring.witnesses[]`", so it takes the identical treatment — for EVERY element the
@@ -2749,6 +2869,8 @@ fn check_container_shapes(receipt: &Value) -> Result<()> {
             for cosignature in cosignature_array(element, "witnesses", &what)? {
                 witness_cosignature_object(cosignature)?;
             }
+            let what = format!("governance.rotation_proofs[{position}].inclusion_path");
+            check_family_hash_path(element, "inclusion_path", &what)?;
         }
     }
     Ok(())
@@ -2798,9 +2920,10 @@ fn check_keys_block(receipt: &Value) -> Result<()> {
                     "`key_id` is REQUIRED, a `sha256:` family string in lowercase hex (I-D §7.1)",
                 ));
             }
-            if !entry.get("pubkey").is_some_and(Value::is_string) {
+            if !entry.get("pubkey").and_then(Value::as_str).is_some_and(is_family_base64) {
                 return Err(invalid(
-                    "`pubkey` is REQUIRED and MUST be a `base64:` family string (I-D §7.1)",
+                    "`pubkey` is REQUIRED, a `base64:` family string under the strict \
+                     acceptance rule of I-D §2.1",
                 ));
             }
             // I-D §7.1: "`source` is exactly one of `\"manifest-chain\"` or
@@ -3472,11 +3595,11 @@ fn verify_nested(
     // later `as_str` would skip the binding check that authenticates the copy entirely.
     let carried_manifest = match subject.get("manifest") {
         None => None,
-        Some(Value::String(value)) => Some(value.as_str()),
+        Some(Value::String(value)) if is_family_hash(value) => Some(value.as_str()),
         Some(_) => {
             return Err(ReceiptError::Malformed(
-                "`subject.manifest`, where present, MUST be a manifest version id string \
-                 (I-D §7.1)"
+                "`subject.manifest`, where present, is a `sha256:` manifest version id under \
+                 the strict acceptance rule (I-D §2.1, §7.1)"
                     .to_owned(),
             ))
         }
@@ -4881,29 +5004,29 @@ mod tests {
         let dd = format!("sha256:{}", "dd".repeat(32));
         let forward = json!({
             "log": { "keys": [
-                { "key_id": aa, "pubkey": "base64:AA==", "valid_from_index": 0 },
-                { "key_id": bb, "pubkey": "base64:BB==", "valid_from_index": 0 },
+                { "key_id": aa, "pubkey": "base64:AAAA", "valid_from_index": 0 },
+                { "key_id": bb, "pubkey": "base64:AAAB", "valid_from_index": 0 },
             ] },
             "witnesses": [
                 { "witness_id": "witness-1", "keys": [
-                    { "key_id": cc, "pubkey": "base64:CC==", "valid_from_index": 0 },
+                    { "key_id": cc, "pubkey": "base64:AAAC", "valid_from_index": 0 },
                 ] },
                 { "witness_id": "witness-2", "keys": [
-                    { "key_id": dd, "pubkey": "base64:DD==", "valid_from_index": 0 },
+                    { "key_id": dd, "pubkey": "base64:AAAD", "valid_from_index": 0 },
                 ] },
             ],
         });
         let reordered = json!({
             "log": { "keys": [
-                { "key_id": bb, "pubkey": "base64:BB==", "valid_from_index": 0 },
-                { "key_id": aa, "pubkey": "base64:AA==", "valid_from_index": 0 },
+                { "key_id": bb, "pubkey": "base64:AAAB", "valid_from_index": 0 },
+                { "key_id": aa, "pubkey": "base64:AAAA", "valid_from_index": 0 },
             ] },
             "witnesses": [
                 { "witness_id": "witness-2", "keys": [
-                    { "key_id": dd, "pubkey": "base64:DD==", "valid_from_index": 0 },
+                    { "key_id": dd, "pubkey": "base64:AAAD", "valid_from_index": 0 },
                 ] },
                 { "witness_id": "witness-1", "keys": [
-                    { "key_id": cc, "pubkey": "base64:CC==", "valid_from_index": 0 },
+                    { "key_id": cc, "pubkey": "base64:AAAC", "valid_from_index": 0 },
                 ] },
             ],
         });
@@ -4922,7 +5045,7 @@ mod tests {
 
         let genuinely_different = json!({
             "log": { "keys": [
-                { "key_id": aa, "pubkey": "base64:AA==", "valid_from_index": 0 },
+                { "key_id": aa, "pubkey": "base64:AAAA", "valid_from_index": 0 },
             ] },
             "witnesses": [],
         });
@@ -4942,7 +5065,7 @@ mod tests {
         let payload = json!({
             "witnesses": [
                 { "keys": [
-                    { "key_id": cc, "pubkey": "base64:CC==", "valid_from_index": 0 },
+                    { "key_id": cc, "pubkey": "base64:AAAC", "valid_from_index": 0 },
                 ] },
             ],
         });
