@@ -2089,9 +2089,7 @@ fn read_chain<'a>(
     for hop in &chain[1..] {
         let index = number(hop, "entry_index")?;
         if previous_index >= index {
-            return Err(ReceiptError::GovernanceChainInvalid(
-                "chain hops must ascend by entry index".to_owned(),
-            ));
+            return Err(ReceiptError::GovernanceChainInvalid(CHAIN_ASCENDING.to_owned()));
         }
         previous_index = index;
 
@@ -2517,6 +2515,85 @@ fn cosignature_array<'a>(container: &'a Value, member: &str, what: &str) -> Resu
     }
 }
 
+/// I-D §7.1: "Elements appear in ascending `entry_index` order."
+const CHAIN_ASCENDING: &str = "chain hops must ascend by entry index";
+
+/// I-D §7.5 step 3: "Key-independent structural and path checks. **No signature and no
+/// cosignature is verified in this step.**"
+///
+/// Every check here is an integer comparison or a hash recomputation, and each is therefore
+/// decidable before any key state exists. That is why the whole of the carried material's path
+/// evidence is proven here and not inside the induction: §7.5.1 walks the governance chain in
+/// ascending entry-index order and every activity test in the I-D is "at index i", so an
+/// unproven `entry_index` would let a producer present a governance chain in an order the log
+/// never had, and a manifest that was never anchored would still derive the key state. "An
+/// inclusion path recomputed from an element's entry id at its asserted index is what proves
+/// that index, and the two cannot be separated: the path proof IS the index proof."
+///
+/// `root` is used here as an UNAUTHENTICATED STRUCTURAL COMMITMENT — the medium the presented
+/// material is bound to, not yet a value shown to be the log's. Nothing in this function
+/// establishes that the log issued that root, and no result may be reported from it alone;
+/// 4f ([`verify_checkpoint`]) is what upgrades every path result here from a statement about
+/// carried bytes to a statement about the log's state.
+fn check_key_independent_paths(
+    receipt: &Value,
+    envelope: &Value,
+    subject_index: u64,
+    tree_size: u64,
+    root: &Hash,
+    budget: &mut Budget,
+) -> Result<()> {
+    if subject_index >= tree_size {
+        return Err(ReceiptError::EntryIndexBeyondCheckpoint {
+            entry_index: subject_index,
+            tree_size,
+        });
+    }
+    check_inclusion(
+        &jcs(envelope),
+        subject_index,
+        tree_size,
+        &path_strings(obj(receipt, "anchoring")?, "inclusion_path")?,
+        root,
+        "subject",
+        budget,
+    )?;
+
+    let mut previous: Option<u64> = None;
+    for hop in array(obj(receipt, "governance")?, "chain")? {
+        let index = number(hop, "entry_index")?;
+        if previous.is_some_and(|earlier| earlier >= index) {
+            return Err(ReceiptError::GovernanceChainInvalid(CHAIN_ASCENDING.to_owned()));
+        }
+        previous = Some(index);
+        let hop_envelope = obj(hop, "envelope")?;
+        // I-D §7.5 step 1: each carried statement's `ahl_version` is checked BEFORE that
+        // statement is validated — recomputing a hash over its bytes included.
+        check_ahl_version(payload_of(hop_envelope)?)?;
+        // A hop the checkpoint does not commit cannot be proven against its root, and an
+        // unprovable governance statement is a refusal rather than a pass. This is the wall a
+        // receipt hits when a manifest version was anchored after its own anchoring checkpoint
+        // — the case §2.1 needs for a later checkpoint under a rotated key set. Reporting it as
+        // a named refusal keeps it from degrading into "the older key still worked, so accept".
+        if index >= tree_size {
+            return Err(ReceiptError::GovernanceChainInvalid(format!(
+                "the chain carries a hop at entry index {index}, which a checkpoint of size \
+                 {tree_size} does not commit: its inclusion cannot be proven against that root"
+            )));
+        }
+        check_inclusion(
+            &jcs(hop_envelope),
+            index,
+            tree_size,
+            &path_strings(hop, "inclusion_path")?,
+            root,
+            "governance chain hop",
+            budget,
+        )?;
+    }
+    Ok(())
+}
+
 /// The receipt's container shapes (I-D §7.1: "The member shapes shown above are normative"),
 /// checked over the whole carried document before any of it is resolved or verified.
 ///
@@ -2702,6 +2779,7 @@ fn verify_checkpoint(
     governance: &Governance<'_>,
     profile: &AdaptorProfile,
     profile_id: &str,
+    continued_history: bool,
     budget: &mut Budget,
 ) -> Result<Anchoring> {
     let anchoring = obj(receipt, "anchoring")?;
@@ -2777,59 +2855,47 @@ fn verify_checkpoint(
         return Err(ReceiptError::CheckpointUnwitnessed { tree_size });
     }
 
-    // `continued_history` requires a later checkpoint plus a verifying consistency proof.
-    // A profile that defines no consistency-proof serialization cannot supply one, so the
-    // claim is unverifiable *under that profile* — reject rather than accept it unchecked.
-    if (anchoring.get("later_checkpoint").is_some() || anchoring.get("consistency_path").is_some())
-        && !profile.capabilities.consistency_proofs
-    {
-        return Err(ReceiptError::AdaptorCapabilityUnsupported {
-            id: profile_id.to_owned(),
-            capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
-        });
+    // 4f applies to `later_checkpoint` on the same terms, against the manifest version active
+    // for ITS tree size. Its consistency path was recomputed in step 3, unauthenticated; this
+    // is what makes both roots the log's.
+    if continued_history {
+        authenticate_continued_history(
+            receipt, policy, governance, anchoring, profile, profile_id, budget,
+        )?;
     }
-    let continued_history = verify_continued_history(
-        receipt, policy, governance, anchoring, tree_size, &root, profile, profile_id, budget,
-    )?;
 
     Ok(Anchoring { tree_size, root, witnessed, continued_history })
 }
 
-/// Verify `anchoring.later_checkpoint` plus `anchoring.consistency_path` (format §2.1, §2.3;
-/// adaptor profile `ahl-adaptor-atl-v1` §8.3).
+/// The key-independent half of `continued_history` (I-D §7.5 step 3: "`consistency_path`
+/// recomputes between `anchoring.checkpoint.root_hash` and `later_checkpoint.root_hash` where
+/// `continued_history` is asserted"), returning whether a later checkpoint is carried at all.
 ///
-/// The claim `continued_history` makes is that the log's history continued to be append-only
-/// past the checkpoint the subject is included under. Three things have to hold, and each is
-/// checked here:
+/// Three things have to hold before the claim can be about anything, and each is decidable
+/// with no key in hand:
 ///
 /// 1. **Both members are present.** §2.3 states the equivalence — `continued_history` is true
 ///    *iff* `later_checkpoint` and `consistency_path` verify — so a later checkpoint with no
-///    proof, or a proof with no checkpoint, is malformed rather than a weaker claim.
-/// 2. **The later checkpoint is authentic on its own terms.** Its log signature is verified
-///    against a key declared by the manifest version active for **its** `tree_size`, not the
-///    subject checkpoint's (§2.1, §2.2). A key a later manifest replaced must not validate a
-///    checkpoint issued under the later state, and the reverse is equally true.
+///    proof, or a proof with no checkpoint, is malformed rather than a weaker claim. §7.1 adds
+///    `later_witnesses`, present if and only if `later_checkpoint` is.
+/// 2. **The later checkpoint takes the receipt-borne shape**, and is not SMALLER than the one
+///    the subject is included under: a "later" checkpoint at a smaller tree size proves no
+///    continued history at all; it is the size regression a witness refuses to cosign over.
 /// 3. **The proof verifies**, as an RFC 9162 §2.1.4 consistency proof from the subject
 ///    checkpoint's `(tree_size, root_hash)` to the later checkpoint's. A proof that is
 ///    structurally impossible for that pair of sizes is a failed proof, not a different error:
 ///    a proof generated for some other pair must never validate a claim about this one.
 ///
-/// The claim's boundary stops there. A consistency proof shows one tree is an append-only
-/// extension of another; it does not show that a checkpoint the cadence required was ever
-/// published (core spec §7.3), and no verdict rendered from it may say otherwise.
-// `profile`/`profile_id` thread the §7.1 raw-checkpoint reconciliation into
-// `authenticate_checkpoint`, identically to every other receipt-borne checkpoint this crate
-// reads; bundling them would only rename this list.
-#[allow(clippy::too_many_arguments)]
-fn verify_continued_history(
-    receipt: &Value,
-    policy: &TrustPolicy,
-    governance: &Governance<'_>,
+/// What this establishes is a statement about CARRIED BYTES, exactly as every other step-3
+/// path result is: both roots are still unauthenticated structural commitments here.
+/// [`authenticate_continued_history`] is what makes them the log's, and only then does the
+/// claim's boundary begin. Even then it stops there: a consistency proof shows one tree is an
+/// append-only extension of another; it does not show that a checkpoint the cadence required
+/// was ever published (core spec §7.3), and no verdict rendered from it may say otherwise.
+fn check_continued_history_paths(
     anchoring: &Value,
     from_size: u64,
     from_root: &Hash,
-    profile: &AdaptorProfile,
-    profile_id: &str,
     budget: &mut Budget,
 ) -> Result<bool> {
     match (anchoring.get("later_checkpoint"), anchoring.get("consistency_path")) {
@@ -2874,13 +2940,8 @@ fn verify_continued_history(
     let later = checkpoint_object(obj(anchoring, "later_checkpoint")?)?;
     let to_size = number(later, "tree_size")?;
     if to_size < from_size {
-        // A "later" checkpoint smaller than the one the subject is included under proves no
-        // continued history; it is the size regression a witness refuses to cosign over.
         return Err(ReceiptError::ConsistencyPathInvalid);
     }
-    authenticate_checkpoint(receipt, policy, governance, later, profile, profile_id, budget)?;
-    verify_later_witnesses(receipt, policy, governance, anchoring, later, budget)?;
-
     let to_root = parse_hash_hex(text(later, "root_hash")?)?;
     let path = path_strings(anchoring, "consistency_path")?;
     let proof = crate::consistency_from_hex(from_size, to_size, &path)?;
@@ -2892,6 +2953,35 @@ fn verify_continued_history(
         // them apart would only invite treating the second as a transport problem.
         Ok(false) | Err(_) => Err(ReceiptError::ConsistencyPathInvalid),
     }
+}
+
+/// The authenticated half of `continued_history` (I-D §7.5.1 4f: "`later_checkpoint` and its
+/// cosignatures in `anchoring.later_witnesses[]` are validated the same way against the
+/// manifest version active for ITS tree size").
+///
+/// Its log signature is verified against a key declared by the manifest version active for
+/// **its own** `tree_size`, not the subject checkpoint's (§7.1): a key a later manifest
+/// replaced must not validate a checkpoint issued under the later state, and the reverse is
+/// equally true. Its cosignatures are validated against that same version's witness set.
+///
+/// Called only where [`check_continued_history_paths`] has already established that both
+/// members are carried and that the consistency path opens the pair.
+// `profile`/`profile_id` thread the §7.1 raw-checkpoint reconciliation into
+// `authenticate_checkpoint`, identically to every other receipt-borne checkpoint this crate
+// reads; bundling them would only rename this list.
+#[allow(clippy::too_many_arguments)]
+fn authenticate_continued_history(
+    receipt: &Value,
+    policy: &TrustPolicy,
+    governance: &Governance<'_>,
+    anchoring: &Value,
+    profile: &AdaptorProfile,
+    profile_id: &str,
+    budget: &mut Budget,
+) -> Result<()> {
+    let later = checkpoint_object(obj(anchoring, "later_checkpoint")?)?;
+    authenticate_checkpoint(receipt, policy, governance, later, profile, profile_id, budget)?;
+    verify_later_witnesses(receipt, policy, governance, anchoring, later, budget)
 }
 
 /// Verify an inclusion path carried bare (adaptor profile §2.3) against a root.
@@ -3109,59 +3199,51 @@ fn verify_nested(
         });
     }
 
-    // I-D §7.5 step 3: the container shapes of §7.1, over the whole carried document, before
-    // anything is resolved and before the induction runs — key-independent, so decidable here.
-    check_container_shapes(receipt)?;
-
-    // --- §5 step 4 (chain structure first: key binding depends on it) ---------------
-    let governance = read_chain(receipt, policy, profile, adaptor_id, budget)?;
-
-    // --- §5 step 3: checkpoint, keys, cosignatures, inclusion -----------------------
-    let anchoring = verify_checkpoint(receipt, policy, &governance, profile, adaptor_id, budget)?;
-    if subject_index >= anchoring.tree_size {
-        return Err(ReceiptError::EntryIndexBeyondCheckpoint {
-            entry_index: subject_index,
-            tree_size: anchoring.tree_size,
+    // I-D §7.1, §7.5 step 2: `continued_history` needs a consistency proof, and a profile
+    // that defines no serialization for one cannot supply it. That is a fact about the pinned
+    // profile and the receipt's own members, so it belongs to profile resolution — decided
+    // before step 3 reads the path it would have to recompute, and reported as unverifiable
+    // under that profile rather than as a defect in the proof.
+    let anchoring_block = obj(receipt, "anchoring")?;
+    if (anchoring_block.get("later_checkpoint").is_some()
+        || anchoring_block.get("consistency_path").is_some())
+        && !profile.capabilities.consistency_proofs
+    {
+        return Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: adaptor_id.to_owned(),
+            capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
         });
     }
-    check_inclusion(
-        &jcs(envelope),
-        subject_index,
-        anchoring.tree_size,
-        &path_strings(obj(receipt, "anchoring")?, "inclusion_path")?,
-        &anchoring.root,
-        "subject",
+
+    // --- §7.5 step 3: key-independent structural and path checks --------------------
+    // "No signature and no cosignature is verified in this step." The checkpoint's own members
+    // are read here only as the structural commitment the carried material is bound to; that
+    // the log issued this root is established at 4f and nowhere earlier.
+    check_container_shapes(receipt)?;
+    let checkpoint = checkpoint_object(obj(anchoring_block, "checkpoint")?)?;
+    let tree_size = number(checkpoint, "tree_size")?;
+    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
+    check_key_independent_paths(receipt, envelope, subject_index, tree_size, &root, budget)?;
+    let continued_history =
+        check_continued_history_paths(anchoring_block, tree_size, &root, budget)?;
+
+    // --- §7.5 step 4: the governance bootstrap, as an induction (4a-4c) -------------
+    let governance = read_chain(receipt, policy, profile, adaptor_id, budget)?;
+
+    // --- §7.5.1 4f: authenticated checkpoint validation -----------------------------
+    // Only on passing this do step 3's path results become claims about the log's state
+    // rather than about carried bytes.
+    let anchoring = verify_checkpoint(
+        receipt,
+        policy,
+        &governance,
+        profile,
+        adaptor_id,
+        continued_history,
         budget,
     )?;
 
-    // --- §5 step 4: chain anchoring (path only — each hop's SIGNATURE was already verified
-    // by `read_chain`'s induction, in phase order, before that hop's own schema was even read;
-    // re-verifying it here would be both redundant and too late to matter) -----------
-    for hop in array(obj(receipt, "governance")?, "chain")? {
-        let index = number(hop, "entry_index")?;
-        // A hop the checkpoint does not commit cannot be proven against its root, and an
-        // unprovable governance statement is a refusal rather than a pass. This is the wall a
-        // receipt hits when a manifest version was anchored after its own anchoring checkpoint
-        // — the case §2.1 needs for a later checkpoint under a rotated key set. Reporting it as
-        // a named refusal keeps it from degrading into "the older key still worked, so accept".
-        if index >= anchoring.tree_size {
-            return Err(ReceiptError::GovernanceChainInvalid(format!(
-                "the chain carries a hop at entry index {index}, which a checkpoint of size {} \
-                 does not commit: its inclusion cannot be proven against that root",
-                anchoring.tree_size
-            )));
-        }
-        let hop_envelope = obj(hop, "envelope")?;
-        check_inclusion(
-            &jcs(hop_envelope),
-            index,
-            anchoring.tree_size,
-            &path_strings(hop, "inclusion_path")?,
-            &anchoring.root,
-            "governance chain hop",
-            budget,
-        )?;
-    }
+    // --- §7.5.1 4d: the remaining carried envelopes ---------------------------------
     // The subject's own envelope is verified separately, against K FINAL at ITS OWN entry
     // index (I-D §7.5.1 4d "remaining carried envelopes") — a later, distinct step from the
     // induction above, not a repetition of it.
