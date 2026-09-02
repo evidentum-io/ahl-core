@@ -188,6 +188,15 @@ impl Spec<'_> {
             },
             "note": self.note,
         });
+        // I-D §7.3: `canonicalization_namespace` is "REQUIRED where `content_binding` is not
+        // `none`, and absent otherwise", and is `private-use` exactly where the carried
+        // descriptor's identifier begins `x-`. Every dataset in this corpus declares the
+        // registered identifier `jcs` (§2.6), so every content-binding receipt here is
+        // `public` — and a receipt asserting no content binding carries the member not at all.
+        if self.content_binding != "none" {
+            claim["assurance"]["canonicalization_namespace"] =
+                json!(if CANONICALIZATION.starts_with("x-") { "private-use" } else { "public" });
+        }
         if let Some((dataset, record)) = &self.record_subject {
             claim["record_subject"] = json!({ "dataset": dataset, "record": record });
         }
