@@ -1713,6 +1713,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     out.push(Vector {
         file: "governance-key-statement-wrong-key-id-must-fail.ahl",
         receipt: key_statement_case(
+            corpus,
             &governance_state_valid,
             &m1,
             &json!({
@@ -1737,6 +1738,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     out.push(Vector {
         file: "governance-key-statement-missing-valid-from-must-fail.ahl",
         receipt: key_statement_case(
+            corpus,
             &governance_state_valid,
             &m1,
             &json!({ "key_id": keys.producer_2.key_id(), "pubkey": keys.producer_2.pubkey() }),
@@ -1755,6 +1757,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     out.push(Vector {
         file: "governance-key-statement-short-pubkey-must-fail.ahl",
         receipt: key_statement_case(
+            corpus,
             &governance_state_valid,
             &m1,
             &json!({
@@ -1781,6 +1784,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     out.push(Vector {
         file: "governance-key-statement-missing-issued-at-must-fail.ahl",
         receipt: key_statement_common_field_case(
+            corpus,
             &governance_state_valid,
             &m1,
             |payload| {
@@ -1802,6 +1806,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     out.push(Vector {
         file: "governance-key-statement-malformed-valid-time-must-fail.ahl",
         receipt: key_statement_common_field_case(
+            corpus,
             &governance_state_valid,
             &m1,
             |payload| payload["valid_time"] = json!("not a timestamp"),
@@ -1948,12 +1953,12 @@ fn rotation_proof_case(base: &Value, mutate: impl FnOnce(&mut Value), note: &str
 /// would fail phase 1 (`EnvelopeSignatureInvalid`) before phase 2's 4b(K) checks are ever
 /// reached, which is the wrong rule for these vectors to exercise.
 ///
-/// The replaced hop's `inclusion_path` is left untouched, and is never checked: `read_chain`
-/// rejects a malformed `key` statement inside its own per-hop walk, strictly before
-/// `verify_checkpoint` or the `governance.chain[]` inclusion-proof loop (receipt §5 step 4)
-/// ever runs — the same short-circuit the manifest-schema tests below rely on for the genesis
-/// hop (`reject_by_manifest_schema` in `tests/vectors.rs`), generalized to a later hop.
+/// The replaced hop is then RE-ANCHORED ([`Corpus::reanchor`]): I-D §7.5 step 3 proves every
+/// carried governance element's inclusion path before step 4's induction reads any of them, so
+/// a substituted hop left at the corpus's own path would fail as an unanchored statement rather
+/// than by the 4b(K) rule the vector names.
 fn key_statement_case(
+    corpus: &Corpus,
     base: &Value,
     manifest_id: &str,
     key_extra: &Value,
@@ -1965,6 +1970,7 @@ fn key_statement_case(
         signed("key", manifest_id, json!({ "action": "add", "key": key_extra }), &keys.producer_1);
     bad["governance"]["chain"][1]["envelope"] = fresh;
     bad["claim"]["note"] = json!(note);
+    corpus.reanchor(&mut bad, keys);
     bad
 }
 
@@ -1975,6 +1981,7 @@ fn key_statement_case(
 /// genuine re-signing by `keys.producer_1` is identical: phase 1 still passes, so a §7.5.1
 /// 4b(K) common-field failure is what actually fires, not `EnvelopeSignatureInvalid`.
 fn key_statement_common_field_case(
+    corpus: &Corpus,
     base: &Value,
     manifest_id: &str,
     mutate: impl FnOnce(&mut Value),
@@ -1999,6 +2006,7 @@ fn key_statement_common_field_case(
     let fresh = envelope(raw_payload, &keys.producer_1);
     bad["governance"]["chain"][1]["envelope"] = fresh;
     bad["claim"]["note"] = json!(note);
+    corpus.reanchor(&mut bad, keys);
     bad
 }
 

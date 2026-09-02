@@ -851,6 +851,62 @@ impl Corpus {
         proof_path_hex(&proof)
     }
 
+    /// Re-anchor a receipt whose carried governance material was deliberately substituted.
+    ///
+    /// I-D §7.5 step 3 recomputes EVERY `governance.chain[]` element's inclusion path — and the
+    /// subject's — before step 4's induction reads a single member of any of them, because
+    /// "the path proof IS the index proof": a governance statement whose asserted entry index
+    /// is unproven could be presented in an order the log never had. A negative vector that
+    /// substitutes a governance statement therefore has to put it genuinely IN the log, or it
+    /// fails as an unanchored hop rather than by the rule it names.
+    ///
+    /// So the log tree is rebuilt over the substituted envelopes, the checkpoint re-signed by
+    /// the same log key over the new root, and its cosignature reissued by the same witness.
+    /// Everything the receipt asserts about anchoring is then true; the one thing wrong with it
+    /// is the rule the vector exists to trip.
+    pub fn reanchor(&self, receipt: &mut Value, keys: &Keys) {
+        let mut envelopes = self.envelopes.clone();
+        let chain = receipt["governance"]["chain"].as_array().expect("chain").clone();
+        for hop in &chain {
+            let index = usize::try_from(hop["entry_index"].as_u64().expect("entry_index"))
+                .expect("entry index fits");
+            envelopes[index] = hop["envelope"].clone();
+        }
+        let leaves = leaf_bytes(&envelopes);
+        let checkpoint_object = receipt["anchoring"]["checkpoint"].clone();
+        let tree_size = checkpoint_object["tree_size"].as_u64().expect("tree_size");
+        let prefix = &leaves[..at(tree_size)];
+        let root = hash_hex(&tree_root(prefix));
+
+        let path = |index: u64| {
+            let index = usize::try_from(index).expect("entry index fits");
+            json!(proof_path_hex(
+                &inclusion_proof(prefix, index).expect("the entry is within the checkpoint")
+            ))
+        };
+        receipt["anchoring"]["inclusion_path"] =
+            path(receipt["subject"]["entry_index"].as_u64().expect("entry_index"));
+        for hop in receipt["governance"]["chain"].as_array_mut().expect("chain") {
+            hop["inclusion_path"] = path(hop["entry_index"].as_u64().expect("entry_index"));
+        }
+
+        let log_key = keys.by_key_id(field_str(&checkpoint_object, "key_id").expect("key_id"));
+        let reissued = checkpoint(
+            field_str(&checkpoint_object, "log_id").expect("log_id"),
+            tree_size,
+            &root,
+            field_str(&checkpoint_object, "checkpoint_time").expect("checkpoint_time"),
+            log_key,
+        );
+        for cosignature in receipt["anchoring"]["witnesses"].as_array_mut().expect("witnesses") {
+            let witness_id = field_str(cosignature, "witness_id").expect("witness_id").to_owned();
+            let witness = keys.by_key_id(field_str(cosignature, "key_id").expect("key_id"));
+            cosignature["cosignature"] =
+                json!(witness.sign(&cosignature_bytes(&reissued, &witness_id)));
+        }
+        receipt["anchoring"]["checkpoint"] = reissued;
+    }
+
     /// The `governance.rotation_proofs[]` element for manifest v2's rotation at entry 25 (I-D
     /// §7.1): `cp26` — signed by the log key (unchanged across the rotation in this corpus) and
     /// cosigned by the OUTGOING witness, witness-1 — proves the rotating manifest's own

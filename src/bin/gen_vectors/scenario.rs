@@ -94,6 +94,11 @@ impl Keys {
         vec![&self.producer_1, &self.producer_2, &self.log_1, &self.witness_1, &self.witness_2]
     }
 
+    /// The corpus key with this `key_id`, whatever its role.
+    pub fn by_key_id(&self, key_id: &str) -> &TestKey {
+        self.all().into_iter().find(|key| key.key_id() == key_id).expect("a corpus key")
+    }
+
     /// The witness key active under a given manifest version entry index.
     pub const fn witness_for(&self, manifest_index: u64) -> (&TestKey, &'static str) {
         if manifest_index == 0 {
