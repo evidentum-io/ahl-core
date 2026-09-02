@@ -1150,6 +1150,32 @@ fn is_family_base64(value: &str) -> bool {
     value.strip_prefix("base64:").is_some_and(|body| B64.decode(body).is_ok())
 }
 
+/// Reject any member outside the set I-D §7.1's container fixes for an object.
+///
+/// "The member shapes shown above are normative", and the container marks its own extension
+/// points: an elided body (`{ ... }`) or a trailing `...` says the members are defined
+/// elsewhere or by an outside format, and every other object is drawn complete. This closes
+/// the complete ones. What it buys is not tidiness: a member no rule compares can be read by
+/// a human, or by a second implementation, as though something had checked it — and the one
+/// that matters most is the member an object's own MATCH rule deliberately leaves out, such as
+/// a receipt-side key entry asserting `valid_from_index` where §7.1 says the match compares
+/// only shared members.
+///
+/// `allowed` lists every member the shape names, REQUIRED or optional alike; presence rules
+/// are the callers' own and are checked where they belong.
+fn check_closed_members(value: &Value, what: &str, allowed: &[&str]) -> Result<()> {
+    let members = value
+        .as_object()
+        .ok_or_else(|| ReceiptError::Malformed(format!("`{what}` MUST be an object (I-D §7.1)")))?;
+    if let Some(extra) = members.keys().find(|member| !allowed.contains(&member.as_str())) {
+        return Err(ReceiptError::Malformed(format!(
+            "`{what}` carries `{extra}`, which is not a member of that object: I-D §7.1 fixes \
+             its shape as {allowed:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// Every element of a `sha256:` family-string array member, validated where the member is
 /// present (I-D §7.1: inclusion and consistency paths are `sha256:` family-string arrays).
 ///
@@ -1222,6 +1248,16 @@ fn checkpoint_object(value: &Value) -> Result<&Value> {
             "REQUIRED, a `base64:` family string under the strict acceptance rule (I-D §2.1)",
         ));
     }
+    // I-D §7.1 draws the receipt-borne checkpoint complete: the committed state of §1.5 plus
+    // `key_id` and `signature`, and `raw` which it "MAY additionally carry". Being a SUPERSET
+    // of §1.5's four members is what that sentence says; it is not licence for members beyond
+    // the seven. The signing bytes are `JCS(cp)` minus `signature`, so an extra member would
+    // also silently enter the preimage two implementations must agree on.
+    check_closed_members(
+        value,
+        "checkpoint",
+        &["log_id", "tree_size", "root_hash", "checkpoint_time", "key_id", "signature", "raw"],
+    )?;
     Ok(value)
 }
 
@@ -1343,6 +1379,11 @@ fn witness_cosignature_object(value: &Value) -> Result<&Value> {
         .ok_or_else(|| invalid("cosigned_at", "REQUIRED"))?;
     crate::bitemporal::parse_rfc3339("cosigned_at", cosigned_at)
         .map_err(|source| invalid("cosigned_at", &source.to_string()))?;
+    check_closed_members(
+        value,
+        "witness cosignature",
+        &["witness_id", "key_id", "cosignature", "cosigned_at"],
+    )?;
     Ok(value)
 }
 
@@ -2814,9 +2855,63 @@ fn check_key_independent_paths(
 /// for: an ill-shaped member on a path some earlier failure short-circuits is `invalid` all the
 /// same.
 fn check_container_shapes(receipt: &Value) -> Result<()> {
-    check_keys_block(receipt)?;
+    // I-D §7.1 marks its own extension points, and closing what it draws complete is the whole
+    // of the rule: an elided body (`{ ... }`) or a trailing `...` says the members are defined
+    // elsewhere — `claim.assurance` in §7.3, `governance.currency.material` in §7.4,
+    // `claim_material` in §7.2, an envelope's `payload`/`signatures` in §2.1, and an
+    // `anchors[]` entry's type-specific members in whatever format it names — and every other
+    // object in the container is drawn with its members complete.
+    check_closed_members(
+        receipt,
+        "receipt",
+        &[
+            "ahl_receipt_version",
+            "spec_version",
+            "claim",
+            "subject",
+            "envelope",
+            "keys",
+            "anchoring",
+            "governance",
+            "claim_material",
+            "anchors",
+        ],
+    )?;
+    let claim = obj(receipt, "claim")?;
+    check_closed_members(claim, "claim", &["type", "record_subject", "assurance", "note"])?;
+    if let Some(record_subject) = claim.get("record_subject") {
+        check_closed_members(record_subject, "claim.record_subject", &["dataset", "record"])?;
+    }
+    check_closed_members(
+        obj(receipt, "subject")?,
+        "subject",
+        &["statement_id", "entry_id", "entry_index", "manifest"],
+    )?;
+    check_closed_members(obj(receipt, "envelope")?, "envelope", &["payload", "signatures"])?;
 
+    check_keys_block(receipt)?;
+    check_anchoring_shapes(receipt)?;
+    check_governance_shapes(receipt)
+}
+
+/// The `anchoring` block's own shapes (I-D §7.1), split out of [`check_container_shapes`]
+/// only so each block's shape rules read as one piece.
+fn check_anchoring_shapes(receipt: &Value) -> Result<()> {
     let anchoring = obj(receipt, "anchoring")?;
+    check_closed_members(
+        anchoring,
+        "anchoring",
+        &[
+            "adaptor",
+            "checkpoint",
+            "inclusion_path",
+            "witnesses",
+            "later_checkpoint",
+            "consistency_path",
+            "later_witnesses",
+        ],
+    )?;
+    check_closed_members(obj(anchoring, "adaptor")?, "anchoring.adaptor", &["id", "hash"])?;
     for member in ["witnesses", "later_witnesses"] {
         for element in cosignature_array(anchoring, member, &format!("anchoring.{member}"))? {
             witness_cosignature_object(element)?;
@@ -2824,11 +2919,36 @@ fn check_container_shapes(receipt: &Value) -> Result<()> {
     }
     check_family_hash_path(anchoring, "inclusion_path", "anchoring.inclusion_path")?;
     check_family_hash_path(anchoring, "consistency_path", "anchoring.consistency_path")?;
-    for (position, hop) in array(obj(receipt, "governance")?, "chain")?.iter().enumerate() {
+    Ok(())
+}
+
+/// The `governance` block's shapes, plus `anchors[]` (I-D §7.1).
+fn check_governance_shapes(receipt: &Value) -> Result<()> {
+    let governance = obj(receipt, "governance")?;
+    check_closed_members(
+        governance,
+        "governance",
+        &["genesis_entry_id", "chain", "rotation_proofs", "currency"],
+    )?;
+    check_closed_members(
+        obj(governance, "currency")?,
+        "governance.currency",
+        &["mode", "material"],
+    )?;
+    for (position, hop) in array(governance, "chain")?.iter().enumerate() {
+        check_closed_members(
+            hop,
+            &format!("governance.chain[{position}]"),
+            &["envelope", "entry_index", "inclusion_path"],
+        )?;
+        check_closed_members(
+            obj(hop, "envelope")?,
+            &format!("governance.chain[{position}].envelope"),
+            &["payload", "signatures"],
+        )?;
         let what = format!("governance.chain[{position}].inclusion_path");
         check_family_hash_path(hop, "inclusion_path", &what)?;
     }
-
     // I-D §7.1: `anchors[]` is material this verifier does not otherwise read — it computes
     // no verdict from an external timestamp (§8.3 offers them as evidence a deployment can
     // compose with checkpoints, not as an input to any rule here) — but "the member shapes
@@ -2873,7 +2993,6 @@ fn check_container_shapes(receipt: &Value) -> Result<()> {
     // I-D §7.1: `governance.rotation_proofs[]`'s own `witnesses` is "an array in the shape of
     // `anchoring.witnesses[]`", so it takes the identical treatment — for EVERY element the
     // member carries, including one the chain walk never has occasion to consume.
-    let governance = obj(receipt, "governance")?;
     if let Some(value) = governance.get("rotation_proofs") {
         let elements = value.as_array().ok_or_else(|| {
             ReceiptError::GovernanceChainInvalid(
@@ -2882,6 +3001,11 @@ fn check_container_shapes(receipt: &Value) -> Result<()> {
             )
         })?;
         for (position, element) in elements.iter().enumerate() {
+            check_closed_members(
+                element,
+                &format!("governance.rotation_proofs[{position}]"),
+                &["manifest_entry_index", "checkpoint", "inclusion_path", "witnesses"],
+            )?;
             let what = format!("governance.rotation_proofs[{position}].witnesses");
             for cosignature in cosignature_array(element, "witnesses", &what)? {
                 witness_cosignature_object(cosignature)?;
@@ -2924,6 +3048,7 @@ const KEY_SOURCES: [&str; 2] = ["manifest-chain", "local-policy"];
 /// not tolerant: an ill-formed key object is `invalid` whether or not verification needs it.
 fn check_keys_block(receipt: &Value) -> Result<()> {
     let keys = obj(receipt, "keys")?;
+    check_closed_members(keys, "keys", &["log", "witness", "producer"])?;
     for group in ["log", "witness", "producer"] {
         for (position, entry) in array(keys, group)?.iter().enumerate() {
             let invalid = |detail: &str| {
@@ -2978,12 +3103,20 @@ fn check_keys_block(receipt: &Value) -> Result<()> {
                     ))
                 }
                 None => {}
-                Some(binding) if binding.get("entry_index").is_some_and(Value::is_u64) => {}
-                Some(_) => {
-                    return Err(invalid(
-                        "`binding`, where present, is the object `{\"entry_index\": \
-                         <integer>}` (I-D §7.1)",
-                    ))
+                Some(binding) => {
+                    // The object has exactly one member, and it is an entry index: a
+                    // non-negative integer, so a float, a negative, or a string is not one.
+                    if !binding.get("entry_index").is_some_and(Value::is_u64) {
+                        return Err(invalid(
+                            "`binding.entry_index` is REQUIRED and MUST be a non-negative \
+                             integer (I-D §7.1)",
+                        ));
+                    }
+                    check_closed_members(
+                        binding,
+                        &format!("keys.{group}[{position}].binding"),
+                        &["entry_index"],
+                    )?;
                 }
             }
             // "A witness key object additionally carries `witness_id`, the identity under
@@ -3007,13 +3140,7 @@ fn check_keys_block(receipt: &Value) -> Result<()> {
             } else {
                 &["key_id", "pubkey", "source", "binding"]
             };
-            let members = entry.as_object().ok_or_else(|| invalid("MUST be a key object"))?;
-            if let Some(extra) = members.keys().find(|member| !allowed.contains(&member.as_str())) {
-                return Err(invalid(&format!(
-                    "carries `{extra}`, which is not a member of a key object: I-D §7.1 admits \
-                     exactly {allowed:?}"
-                )));
-            }
+            check_closed_members(entry, &format!("keys.{group}[{position}]"), allowed)?;
         }
     }
     Ok(())
