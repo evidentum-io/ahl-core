@@ -1988,6 +1988,47 @@ fn witness_identity_is_bound_to_the_manifests_own_declaration() {
     );
 }
 
+/// I-D §7.1: "The member shapes shown above are normative."
+///
+/// A present member of the wrong JSON type is `invalid`, never read as absent. Read as absent,
+/// `\"witnesses\": {}` would turn a checkpoint that carries no verifying cosignature into one
+/// that was never asked for any — and at L3 that is the whole of the witness requirement.
+#[test]
+fn a_present_cosignature_member_of_the_wrong_type_is_invalid() {
+    for wrong in [json!({}), json!("witness-1"), json!(0)] {
+        let value = wrong.clone();
+        assert_rejects(
+            "statement-anchored-valid.ahl",
+            move |r| r["anchoring"]["witnesses"] = value,
+            |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("MUST be an array")),
+            "I-D §7.1 — anchoring.witnesses is an array where present",
+        );
+        let value = wrong.clone();
+        assert_rejects(
+            "statement-anchored-continued-history.ahl",
+            move |r| r["anchoring"]["later_witnesses"] = value,
+            |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("MUST be an array")),
+            "I-D §7.1 — anchoring.later_witnesses is an array where present",
+        );
+        let value = wrong.clone();
+        assert_rejects(
+            "propagation-complete-valid-across-manifest-rotation.ahl",
+            move |r| r["governance"]["rotation_proofs"][0]["witnesses"] = value,
+            |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("MUST be an array")),
+            "I-D §7.1 — a rotation proof's witnesses is an array where present",
+        );
+    }
+
+    // Every ELEMENT of each of those arrays is validated too, whether or not verification would
+    // have reached it: the shape is normative, not a precondition of use.
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["anchoring"]["witnesses"] = json!([{ "witness_id": "witness-1" }]),
+        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("witness cosignature")),
+        "I-D §7.1 — every anchoring.witnesses[] element takes the shape",
+    );
+}
+
 /// I-D §7.1: "`source` is exactly one of `\"manifest-chain\"` or `\"local-policy\"`."
 ///
 /// There is no third token and no default. An unrecognized one is a schema failure over the

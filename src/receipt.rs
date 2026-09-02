@@ -1033,6 +1033,9 @@ fn producer_keys_at_in(
     let Some((snapshot_index, manifest)) = snapshot_manifest_in(manifests, index) else {
         return keys;
     };
+    // Every manifest in `manifests` passed [`producer_key_objects`] during `read_chain`'s
+    // induction before it was ever pushed there, so this cannot fail; were it ever to, the
+    // effect is a key absent from the derived set, which fails closed as `KeyNotBound`.
     for (key_id, pubkey) in producer_key_objects(manifest).unwrap_or_default() {
         keys.insert(key_id, BoundKey { pubkey, bound_at: snapshot_index });
     }
@@ -2479,6 +2482,63 @@ fn check_witness_identity(resolved: &ResolvedKey, key_id: &str, carried: &str) -
     }
 }
 
+/// The elements of an `anchoring.witnesses[]`-shaped member, or the empty slice where the
+/// member is absent.
+///
+/// A member present under any other JSON type is `invalid` (I-D §7.1: "The member shapes shown
+/// above are normative") and is never read as absent: treating `"witnesses": {}` as an empty
+/// array would silently turn an L3 receipt's missing cosignature requirement into a receipt
+/// that carries none, and treating a string `later_witnesses` the same way would drop the
+/// cosignatures that are the only thing establishing a witness saw `later_checkpoint`.
+fn cosignature_array<'a>(container: &'a Value, member: &str, what: &str) -> Result<&'a [Value]> {
+    match container.get(member) {
+        None => Ok(&[]),
+        Some(Value::Array(elements)) => Ok(elements),
+        Some(_) => Err(ReceiptError::Malformed(format!(
+            "`{what}`, where present, MUST be an array in the shape of `anchoring.witnesses[]` \
+             (I-D §7.1)"
+        ))),
+    }
+}
+
+/// The receipt's container shapes (I-D §7.1: "The member shapes shown above are normative"),
+/// checked over the whole carried document before any of it is resolved or verified.
+///
+/// This is §7.5 step 3's "family-string, arity, and ordering checks the container shapes of
+/// Section 7.1 require", and it is deliberately independent of what verification later reaches
+/// for: an ill-shaped member on a path some earlier failure short-circuits is `invalid` all the
+/// same.
+fn check_container_shapes(receipt: &Value) -> Result<()> {
+    check_keys_block(receipt)?;
+
+    let anchoring = obj(receipt, "anchoring")?;
+    for member in ["witnesses", "later_witnesses"] {
+        for element in cosignature_array(anchoring, member, &format!("anchoring.{member}"))? {
+            witness_cosignature_object(element)?;
+        }
+    }
+
+    // I-D §7.1: `governance.rotation_proofs[]`'s own `witnesses` is "an array in the shape of
+    // `anchoring.witnesses[]`", so it takes the identical treatment — for EVERY element the
+    // member carries, including one the chain walk never has occasion to consume.
+    let governance = obj(receipt, "governance")?;
+    if let Some(value) = governance.get("rotation_proofs") {
+        let elements = value.as_array().ok_or_else(|| {
+            ReceiptError::GovernanceChainInvalid(
+                "`governance.rotation_proofs`, where present, MUST be an array (I-D §7.1)"
+                    .to_owned(),
+            )
+        })?;
+        for (position, element) in elements.iter().enumerate() {
+            let what = format!("governance.rotation_proofs[{position}].witnesses");
+            for cosignature in cosignature_array(element, "witnesses", &what)? {
+                witness_cosignature_object(cosignature)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The two `source` tokens I-D §7.1 admits for a key object, in the order it states them.
 const KEY_SOURCES: [&str; 2] = ["manifest-chain", "local-policy"];
 
@@ -2674,7 +2734,7 @@ fn verify_checkpoint(
     }
 
     let mut witnessed = false;
-    for cosignature in anchoring.get("witnesses").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+    for cosignature in cosignature_array(anchoring, "witnesses", "anchoring.witnesses")? {
         let cosignature = witness_cosignature_object(cosignature)?;
         let witness_id = text(cosignature, "witness_id")?.to_owned();
         let key_id = text(cosignature, "key_id")?;
@@ -2787,13 +2847,13 @@ fn verify_continued_history(
         }
         (Some(_), Some(_)) => {}
     }
-    let later_witnesses = anchoring.get("later_witnesses").ok_or_else(|| {
-        ReceiptError::Malformed(
+    if anchoring.get("later_witnesses").is_none() {
+        return Err(ReceiptError::Malformed(
             "`anchoring.later_witnesses` is REQUIRED whenever `later_checkpoint` is carried \
              (I-D §7.1)"
                 .to_owned(),
-        )
-    })?;
+        ));
+    }
 
     let later = checkpoint_object(obj(anchoring, "later_checkpoint")?)?;
     let to_size = number(later, "tree_size")?;
@@ -2803,7 +2863,7 @@ fn verify_continued_history(
         return Err(ReceiptError::ConsistencyPathInvalid);
     }
     authenticate_checkpoint(receipt, policy, governance, later, profile, profile_id, budget)?;
-    verify_later_witnesses(receipt, policy, governance, later, later_witnesses, budget)?;
+    verify_later_witnesses(receipt, policy, governance, anchoring, later, budget)?;
 
     let to_root = parse_hash_hex(text(later, "root_hash")?)?;
     let path = path_strings(anchoring, "consistency_path")?;
@@ -3029,9 +3089,9 @@ fn verify_nested(
         });
     }
 
-    // I-D §7.5 step 3: the container shapes of §7.1, over the whole `keys` block, before any
-    // key is resolved and before the induction runs — key-independent, so decidable here.
-    check_keys_block(receipt)?;
+    // I-D §7.5 step 3: the container shapes of §7.1, over the whole carried document, before
+    // anything is resolved and before the induction runs — key-independent, so decidable here.
+    check_container_shapes(receipt)?;
 
     // --- §5 step 4 (chain structure first: key binding depends on it) ---------------
     let governance = read_chain(receipt, policy, profile, adaptor_id, budget)?;
@@ -3157,7 +3217,21 @@ fn verify_nested(
     };
 
     // --- §2.3 / I-D §7.6: subject-level cross-field consistency ----------------------
-    let manifest_declared = subject.get("manifest").is_some();
+    // I-D §7.1: `subject.manifest` is `"sha256:<manifest version id>"`. Read once, strictly:
+    // an ill-typed member read as PRESENT for the presence rule below and then as ABSENT by a
+    // later `as_str` would skip the binding check that authenticates the copy entirely.
+    let carried_manifest = match subject.get("manifest") {
+        None => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(ReceiptError::Malformed(
+                "`subject.manifest`, where present, MUST be a manifest version id string \
+                 (I-D §7.1)"
+                    .to_owned(),
+            ))
+        }
+    };
+    let manifest_declared = carried_manifest.is_some();
     if manifest_declared == (subject_type == "manifest") {
         return Err(ReceiptError::SubjectManifestPresence { statement_type: subject_type });
     }
@@ -3170,7 +3244,7 @@ fn verify_nested(
     // that element's `entry_index` is strictly smaller than `subject.entry_index`. A named
     // version absent from the chain, or anchored at or after the subject, cannot have governed
     // the subject."
-    if let Some(claimed) = subject.get("manifest").and_then(Value::as_str) {
+    if let Some(claimed) = carried_manifest {
         let payload_manifest = text(payload, "manifest")?;
         if claimed != payload_manifest {
             return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
@@ -3469,7 +3543,18 @@ fn verify_content_binding(
         .and_then(Value::as_str)
         .ok_or_else(|| ctx.missing("canonicalization"))?
         .to_owned();
-    let claimed_media_type = material.get("media_type").and_then(Value::as_str).map(str::to_owned);
+    // A wrong-typed `media_type` is `invalid`, never read as absent: read as absent it would
+    // compare equal to a declared descriptor that carries none (I-D §2.6 descriptor equality).
+    let claimed_media_type = match material.get("media_type") {
+        None => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => {
+            return Err(ReceiptError::Malformed(
+                "`claim_material.media_type`, where present, MUST be a string (I-D §2.6)"
+                    .to_owned(),
+            ))
+        }
+    };
     let claimed_descriptor =
         CanonicalizationDescriptor::new(claimed_canonicalization, claimed_media_type)?;
     if claimed_descriptor.canonicalization() != descriptor.canonicalization()
@@ -3589,7 +3674,19 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
         });
     }
 
-    if let Some(root) = ctx.payload.get("outputs_root").and_then(Value::as_str) {
+    // Which branch a derivation takes turns on this member's presence (I-D §2.4.2), so a
+    // wrong-typed one is `invalid` rather than a receipt quietly checked under the other
+    // branch's rules.
+    let outputs_root = match ctx.payload.get("outputs_root") {
+        None => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(ReceiptError::Malformed(
+                "`outputs_root`, where present, MUST be a string (I-D §2.4.2)".to_owned(),
+            ))
+        }
+    };
+    if let Some(root) = outputs_root {
         let leaf = material.get("batch_leaf").ok_or_else(|| ctx.missing("batch_leaf"))?;
         if (text(leaf, "dataset")?.to_owned(), text(leaf, "record")?.to_owned()) != claimed {
             return Err(ReceiptError::ClaimMaterialPathInvalid { what: "batch_leaf" });
@@ -3622,8 +3719,17 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
 /// Optional `input_members` (§3): each proves one input's membership in the leaf's input set.
 fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -> Result<()> {
     let material = ctx.material()?;
-    let Some(members) = material.get("input_members").and_then(Value::as_array) else {
-        return Ok(());
+    // Where present, the member is an array; a wrong type is `invalid` and is never read as
+    // absent, which would silently skip every input-membership proof the receipt carries.
+    let members = match material.get("input_members") {
+        None => return Ok(()),
+        Some(Value::Array(members)) => members,
+        Some(_) => {
+            return Err(ReceiptError::Malformed(
+                "`claim_material.input_members`, where present, MUST be an array (I-D §7.2)"
+                    .to_owned(),
+            ))
+        }
     };
     let inputs = leaf.get("inputs").ok_or_else(|| ctx.missing("batch_leaf.inputs"))?;
     let root = text(inputs, "input_set_root")?;
@@ -3684,12 +3790,12 @@ fn verify_embedded(
             got: verdict.claim_type,
         });
     }
-    let record = obj(embedded, "claim")?.get("record_subject").map(|subject| {
-        (
-            subject.get("dataset").and_then(Value::as_str).unwrap_or_default().to_owned(),
-            subject.get("record").and_then(Value::as_str).unwrap_or_default().to_owned(),
-        )
-    });
+    let record = match obj(embedded, "claim")?.get("record_subject") {
+        None => None,
+        Some(subject) => {
+            Some((text(subject, "dataset")?.to_owned(), text(subject, "record")?.to_owned()))
+        }
+    };
     Ok(Embedded { verdict, entry_index: number(obj(embedded, "subject")?, "entry_index")?, record })
 }
 
@@ -4161,17 +4267,13 @@ fn verify_later_witnesses(
     receipt: &Value,
     policy: &TrustPolicy,
     governance: &Governance<'_>,
+    anchoring: &Value,
     later_checkpoint: &Value,
-    later_witnesses: &Value,
     budget: &mut Budget,
 ) -> Result<()> {
     let tree_size = number(later_checkpoint, "tree_size")?;
     let (active_index, active_manifest) = governance.active_for(tree_size)?;
-    let candidates = later_witnesses.as_array().ok_or_else(|| {
-        ReceiptError::Malformed(
-            "`anchoring.later_witnesses` MUST be an array (I-D §7.1)".to_owned(),
-        )
-    })?;
+    let candidates = cosignature_array(anchoring, "later_witnesses", "anchoring.later_witnesses")?;
 
     let (witness_keys, witness_attempted) =
         bind_keys_by_group(receipt, policy, governance, active_index, "witness")?;
