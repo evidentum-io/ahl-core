@@ -84,9 +84,10 @@ Also not yet in the corpus: no vector carries a witness key sourced `local-polic
 The corpus trust policy holds no trusted witness key at all, so every witness key in every
 vector is `manifest-chain`, bound by `(witness_id, key_id, pubkey)` to the manifest version
 active for the checkpoint being cosigned. The `local-policy` branch — admissible only for
-witness keys the verifier ALREADY TRUSTS, matched on both `key_id` and `pubkey` against local
-configuration — is covered by `tests/vectors.rs` instead, since what decides it is the
-verifier's own configuration rather than anything a portable vector can carry.
+witness keys the verifier ALREADY TRUSTS, matched on `key_id`, `pubkey` AND the `witness_id`
+policy holds the key for, and admissible only under an identity the active manifest itself
+declares — is covered by `tests/vectors.rs` instead, since what decides it is the verifier's
+own configuration rather than anything a portable vector can carry.
 
 Also not yet in the corpus: this corpus's ONE governance-key rotation (manifest v2, entry 25)
 rotates the WITNESS set only — the log checkpoint-signing key never itself rotates anywhere in
