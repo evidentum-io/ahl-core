@@ -329,6 +329,20 @@
     {
       "claim_type": "governance-state",
       "expect": "reject",
+      "file": "governance-key-statement-missing-issued-at-must-fail.ahl",
+      "reason": "malformed receipt: payload issued_at: the member is REQUIRED and MUST be a string (I-D §2.2)",
+      "rule": "I-D §2.2 / §7.5.1 4b(K) — issued_at is a REQUIRED common payload field"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-key-statement-malformed-valid-time-must-fail.ahl",
+      "reason": "malformed receipt: payload valid_time: `not a timestamp` is not a valid RFC 3339 timestamp in field `valid_time`: the 'year' component could not be parsed",
+      "rule": "I-D §2.2 / §7.5.1 4b(K) — valid_time must be RFC 3339 or a {from,to} object"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
       "file": "governance-state-not-current-must-fail.ahl",
       "reason": "governance state is not current at index 10: a `key` statement is anchored at entry index 9",
       "rule": "receipt §3 — governance-state must prove absence of governance statements in (subject.entry_index, target_index]"
