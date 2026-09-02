@@ -27,7 +27,15 @@ rather than silently mis-verifying wherever the gap could otherwise be mistaken 
     each says so on its own doc comment, but a caller that needs to DISTINGUISH `invalid` from
     `unverifiable` must match on the specific variant, and a capability gap on one assertion
     still aborts the whole run rather than being isolated to its own finding while independent
-    assertions continue to be checked.
+    assertions continue to be checked. One conflation worth naming precisely: I-D §7.5 step 2
+    distinguishes a profile local policy simply does not HOLD (`unverifiable`) from one it
+    holds AT A DIFFERENT HASH than the receipt pins (`invalid` — the receipt names a document
+    policy can prove is not the one it trusts, a stronger and different claim than "unknown to
+    me"). `ReceiptError::AdaptorUnknown` currently maps both cases to the SAME variant, losing
+    that distinction; a caller cannot yet tell "I have never heard of this profile" apart from
+    "I hold this profile id at a hash that disagrees with what was carried" without inspecting
+    policy state itself. This is part of the same three-valued-result gap above, not a separate
+    one — call sites can approximate the difference from local policy alone for now.
 *   **Canonicalization procedures beyond `jcs` and `exact-bytes` (I-D §2.6).** These are the
     only two the I-D itself defines, and the only two this crate implements. A dataset declaring
     any other `canonicalization` identifier — a registered one this crate has not implemented,
