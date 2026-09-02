@@ -89,16 +89,17 @@ impl Anchor {
         })
     }
 
-    /// This anchor's cosignature, as the one-element `witnesses` ARRAY a receipt carries
-    /// alongside — never inside — a checkpoint object that stands as
-    /// `anchoring.later_checkpoint` or `claim_material.corpus_checkpoint` (I-D §3.3, §7.5: "At
-    /// L3 a verifier accepts a checkpoint C only with a valid witness cosignature" — a rule
-    /// about ANY checkpoint C, not merely the primary one). The sibling member is
-    /// `anchoring.later_checkpoint_witnesses` / `claim_material.corpus_checkpoint_witnesses`:
-    /// nesting it INSIDE the checkpoint object would change the very bytes the log's own
-    /// signature (`checkpoint_signing_bytes`, "`JCS(cp)` with `signature` removed") and each
+    /// This anchor's cosignature, as the one-element `anchoring.later_witnesses` array a
+    /// receipt carries alongside — never inside — `anchoring.later_checkpoint` (I-D §7.1:
+    /// "Present if and only if `later_checkpoint` is carried. An array in the shape of
+    /// `anchoring.witnesses[]`, each element a cosignature over `later_checkpoint`"). Nesting
+    /// it INSIDE the checkpoint object would change the very bytes the log's own signature
+    /// (`checkpoint_signing_bytes`, "`JCS(cp)` with `signature` removed") and each
     /// cosignature's own preimage (`cosignature_bytes`, "the signed checkpoint object") are
     /// computed over.
+    ///
+    /// `propagation-complete`'s declared checkpoint D has no counterpart at all: format §7.2
+    /// authenticates D by consistency-proof-or-prefix-recomputation, no cosignature.
     pub fn witnesses_array(&self, keys: &Keys) -> Value {
         json!([self.witness_entry(keys)])
     }
@@ -161,6 +162,10 @@ pub struct Corpus {
     pub log_id: String,
     pub anchors: Vec<Anchor>,
     pub adaptor_hash: String,
+    /// The exact bytes of the published adaptor document — what a `TrustPolicy` actually
+    /// HOLDS (I-D §3.2, §7.5 step 2: the digest is recomputed from this, never trusted as a
+    /// value carried alongside it).
+    pub adaptor_document: Vec<u8>,
     pub closures: Vec<ClosureCase>,
     /// Witness refusal evidence (spec §3.3 step 3, adaptor profile §6.1).
     pub refusal: Value,
@@ -171,7 +176,12 @@ impl Corpus {
     // index, which is the corpus's only ordering primitive, and renaming them would hide it.
     #[allow(clippy::similar_names)]
     #[allow(clippy::too_many_lines)] // One linear scenario; splitting it would obscure the order.
-    pub fn build(keys: &Keys, dataset_key: &[u8], adaptor_hash: &str) -> Self {
+    pub fn build(
+        keys: &Keys,
+        dataset_key: &[u8],
+        adaptor_hash: &str,
+        adaptor_document: Vec<u8>,
+    ) -> Self {
         let log_id = sha256_hex(LOG_SEED);
         let records = Records::build(dataset_key);
         let r = &records;
@@ -803,6 +813,7 @@ impl Corpus {
             log_id,
             anchors,
             adaptor_hash: adaptor_hash.to_owned(),
+            adaptor_document,
             closures,
             refusal,
         }

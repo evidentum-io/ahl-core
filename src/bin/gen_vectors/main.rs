@@ -20,7 +20,6 @@
 
 #![forbid(unsafe_code)]
 
-mod atl;
 mod corpus;
 mod receipts;
 mod scenario;
@@ -37,13 +36,12 @@ fn main() {
     scenario::write_corpus_readme(&root);
     let keys = scenario::write_and_load_keys(&root);
     let dataset_key = scenario::load_dataset_key(&root);
-    let adaptor_hash = scenario::write_and_hash_adaptor(&root);
+    let (adaptor_hash, adaptor_document) = scenario::write_and_hash_adaptor(&root);
 
-    let corpus = Corpus::build(&keys, &dataset_key, &adaptor_hash);
+    let corpus = Corpus::build(&keys, &dataset_key, &adaptor_hash, adaptor_document);
     corpus.self_check(&keys);
     corpus.write(&root, &keys);
     receipts::write_all(&corpus, &keys, &root, &dataset_key);
-    atl::write_all(&keys, &root);
 
     println!("test_data written to {}", root.display());
 }

@@ -50,7 +50,7 @@ pub fn trust_policy(corpus: &Corpus, keys: &Keys, dataset_key: &[u8]) -> TrustPo
         adaptor_profiles: BTreeMap::from([(
             ADAPTOR_ID.to_owned(),
             AdaptorProfile {
-                hash: corpus.adaptor_hash.clone(),
+                document: corpus.adaptor_document.clone(),
                 capabilities: AdaptorCapabilities {
                     checkpoint_raw: false,
                     consistency_proofs: true,
@@ -379,7 +379,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         .build(corpus, keys);
         receipt["claim"]["assurance"]["continued_history"] = json!(true);
         receipt["anchoring"]["later_checkpoint"] = cp24.checkpoint.clone();
-        receipt["anchoring"]["later_checkpoint_witnesses"] = cp24.witnesses_array(keys);
+        receipt["anchoring"]["later_witnesses"] = cp24.witnesses_array(keys);
         receipt["anchoring"]["consistency_path"] = json!(path);
         receipt
     };
@@ -794,7 +794,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     );
     enumerated_with_later["claim"]["assurance"]["continued_history"] = json!(true);
     enumerated_with_later["anchoring"]["later_checkpoint"] = cp13.checkpoint.clone();
-    enumerated_with_later["anchoring"]["later_checkpoint_witnesses"] = cp13.witnesses_array(keys);
+    enumerated_with_later["anchoring"]["later_witnesses"] = cp13.witnesses_array(keys);
     enumerated_with_later["anchoring"]["consistency_path"] = json!(corpus.consistency_path(8, 13));
     out.push(Vector {
         file: "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl",
@@ -1237,7 +1237,6 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             // D — the propagation's own declared checkpoint, a real earlier checkpoint,
             // carried as its full signed object and authenticated against A (spec §2.3.4).
             "corpus_checkpoint": cp8.checkpoint.clone(),
-            "corpus_checkpoint_witnesses": cp8.witnesses_array(keys),
             "corpus_prefix": corpus.enumeration(0, 8, cp13),
             "trees": trees_block(&prefix_root_refs, drop_batch_leaf),
             "trigger": trigger_effective(1, "Embedded trigger-effective proof, bounded by cp8."),
@@ -1292,7 +1291,6 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         currency_material: corpus.enumeration(0, 29, cp29),
         claim_material: json!({
             "corpus_checkpoint": cp8.checkpoint.clone(),
-            "corpus_checkpoint_witnesses": cp8.witnesses_array(keys),
             "corpus_prefix": corpus.enumeration(0, 8, cp29),
             "trees": trees_block(&prefix_root_refs, false),
             "trigger": trigger_effective(1, "Embedded trigger-effective proof, bounded by cp8."),
@@ -1312,19 +1310,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     }
     .build(corpus, keys);
     // `Spec::build` only auto-populates the ONE `keys.log` entry a receipt's own `anchoring`
-    // needs (here, A at entry 25). Authenticating D (spec §2.2, round-5 substantive fix)
-    // additionally needs the log key bound to the manifest active for D's own tree size, and —
-    // since D's manifest (genesis) is L3 and now REQUIRES a verifying witness cosignature
-    // (I-D §3.3, §7.5) — the ORIGINAL witness-1 key bound to that same manifest, not the
-    // witness-2 key A's own manifest version declares after the rotation.
+    // needs (here, A at entry 25). Authenticating D (format §2.2) additionally needs the log
+    // key bound to the manifest active for D's own tree size — format §7.2 requires no
+    // witness cosignature on D at all, so no `keys.witness` entry is needed for it either.
     cross_rotation_receipt["keys"]["log"]
         .as_array_mut()
         .expect("keys.log is an array")
         .push(key_entry(&keys.log_1, None, 0));
-    cross_rotation_receipt["keys"]["witness"]
-        .as_array_mut()
-        .expect("keys.witness is an array")
-        .push(key_entry(&keys.witness_1, Some("witness-1"), 0));
     out.push(Vector {
         file: "propagation-complete-valid-across-manifest-rotation.ahl",
         receipt: cross_rotation_receipt,
@@ -1364,7 +1356,6 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 // The attack: substitute the *anchoring* checkpoint for the propagation's own
                 // declared D, so the closure would be recomputed over the whole corpus.
                 "corpus_checkpoint": cp28.checkpoint.clone(),
-                "corpus_checkpoint_witnesses": cp28.witnesses_array(keys),
                 "corpus_prefix": corpus.enumeration(0, 28, cp28),
                 "trees": trees_block(
                     &[
@@ -1428,7 +1419,6 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             currency_material: corpus.enumeration(0, 25, cp25),
             claim_material: json!({
                 "corpus_checkpoint": cp24.checkpoint.clone(),
-                "corpus_checkpoint_witnesses": cp24.witnesses_array(keys),
                 "corpus_prefix": corpus.enumeration(0, 24, cp25),
                 "trees": trees_block(
                     &[
