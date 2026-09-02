@@ -22,9 +22,10 @@ use ahl_core::receipt::{
 };
 use ahl_core::tree::ValidatedLeafSet;
 use ahl_core::{
-    checkpoint_signing_bytes, cosignature_bytes, decode_pubkey, entry_id, field_str, hash_hex, jcs,
-    leaf_hash, parse_hash_hex, proof_from_hex, range_proof, sha256_hex, statement_id, tree_root,
-    verify_envelope, verify_inclusion_proof, verify_signature, TestKey,
+    checkpoint, checkpoint_signing_bytes, cosignature_bytes, decode_pubkey, entry_id, field_str,
+    hash_hex, inclusion_proof, jcs, leaf_hash, parse_hash_hex, proof_from_hex, proof_path_hex,
+    range_proof, sha256_hex, statement_id, tree_root, verify_envelope, verify_inclusion_proof,
+    verify_signature, TestKey,
 };
 use serde_json::{json, Value};
 
@@ -1754,6 +1755,31 @@ fn assert_rejects(
     assert!(check(&error), "{rule}: wrong rule fired for {base}: {error}");
 }
 
+/// [`assert_rejects`], for a mutation that edits a carried governance envelope.
+///
+/// The edit changes that statement's entry id, so the receipt is re-anchored ([`reanchor`])
+/// and — where the edited statement is the genesis manifest — its `genesis_entry_id` and the
+/// policy anchor are refreshed to match. Without both repairs the receipt fails as an
+/// unanchored hop, or on an anchor that no longer digests its genesis envelope: true
+/// rejections, neither of them the rule under test.
+fn assert_rejects_anchored(
+    base: &str,
+    mutate: impl FnOnce(&mut Value),
+    check: impl FnOnce(&ReceiptError) -> bool,
+    rule: &str,
+) {
+    let (_, mut receipt) = read_receipt(base);
+    mutate(&mut receipt);
+    reanchor(&mut receipt);
+    let anchor = entry_id(&receipt["governance"]["chain"][0]["envelope"]);
+    receipt["governance"]["genesis_entry_id"] = json!(&anchor);
+    let policy = TrustPolicy { genesis_entry_id: anchor, ..trust_policy() };
+    let error = verify_receipt(&receipt, &policy)
+        .err()
+        .unwrap_or_else(|| panic!("{rule}: mutated {base} must be rejected, but verified"));
+    assert!(check(&error), "{rule}: wrong rule fired for {base}: {error}");
+}
+
 /// Flip one character of a family string, keeping the encoding well formed.
 ///
 /// `sha256:`/`hmac-sha256:` values are hex, `base64:` values are base64 — in both cases the
@@ -1771,13 +1797,89 @@ fn corrupt(value: &mut Value) {
     *value = Value::String(String::from_utf8(bytes).expect("ascii substitution"));
 }
 
-/// The corpus producer key, reconstructed from its committed seed — the same "published
-/// constant... never use for anything real" material `gen_vectors` signs with.
-fn producer_key() -> TestKey {
-    let path = test_data().join("keys").join("producer-1.seed");
+/// A corpus key, reconstructed from its committed seed — the same "published constant... never
+/// use for anything real" material `gen_vectors` signs with.
+fn test_key(name: &str) -> TestKey {
+    let path = test_data().join("keys").join(format!("{name}.seed"));
     let seed =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    TestKey::from_seed_hex("producer-1", seed.trim()).expect("committed 32-byte hex seed")
+    TestKey::from_seed_hex(name, seed.trim()).expect("committed 32-byte hex seed")
+}
+
+/// The corpus producer key.
+fn producer_key() -> TestKey {
+    test_key("producer-1")
+}
+
+/// The corpus key with this `key_id`, whatever its role.
+fn key_by_id(key_id: &str) -> TestKey {
+    ["producer-1", "producer-2", "log-1", "witness-1", "witness-2"]
+        .into_iter()
+        .map(test_key)
+        .find(|key| key.key_id() == key_id)
+        .expect("a corpus key")
+}
+
+/// Re-anchor a receipt whose carried governance material was edited: rebuild the corpus log
+/// tree over the edited envelopes, recompute every inclusion path the receipt carries, and
+/// reissue the checkpoint signature and the cosignature over it under the committed keys.
+///
+/// I-D §7.5 step 3 recomputes EVERY `governance.chain[]` element's inclusion path — and the
+/// subject's — before step 4's induction reads a single member of any of them, because "the
+/// path proof IS the index proof". An edited governance statement that is not also re-anchored
+/// is therefore rejected as an unanchored hop: a true rejection, and never the rule under
+/// test. Re-anchoring puts the edited statement genuinely in the log, so the rule the case
+/// targets is the first thing left to fail.
+fn reanchor(receipt: &mut Value) {
+    let index_of = |value: &Value| {
+        usize::try_from(value["entry_index"].as_u64().expect("entry_index")).expect("index fits")
+    };
+    let mut anchored = envelopes(&statement_vectors());
+    let subject_index = index_of(&receipt["subject"]);
+    for hop in receipt["governance"]["chain"].as_array().expect("chain").clone() {
+        anchored[index_of(&hop)] = hop["envelope"].clone();
+        // A governance statement that is ALSO the receipt's subject is ONE anchored entry, and
+        // one entry index holds one envelope. An edit to the hop is therefore an edit to the
+        // subject: carrying them apart would be a receipt no log could ever have produced, and
+        // the subject's own identifiers (§7.5 step 1) are recomputed from the edited bytes.
+        if index_of(&hop) == subject_index {
+            receipt["envelope"] = hop["envelope"].clone();
+            receipt["subject"]["statement_id"] =
+                json!(statement_id(&hop["envelope"]).expect("well-formed envelope"));
+            receipt["subject"]["entry_id"] = json!(entry_id(&hop["envelope"]));
+        }
+    }
+    let leaves: Vec<Vec<u8>> = anchored.iter().map(jcs).collect();
+    let checkpoint_object = receipt["anchoring"]["checkpoint"].clone();
+    let tree_size = checkpoint_object["tree_size"].as_u64().expect("tree_size");
+    let prefix = &leaves[..usize::try_from(tree_size).expect("tree size fits")];
+    let root = hash_hex(&tree_root(prefix));
+
+    let path = |index: usize| {
+        json!(proof_path_hex(
+            &inclusion_proof(prefix, index).expect("the entry is within the checkpoint")
+        ))
+    };
+    receipt["anchoring"]["inclusion_path"] = path(index_of(&receipt["subject"]));
+    for hop in receipt["governance"]["chain"].as_array_mut().expect("chain") {
+        let index =
+            usize::try_from(hop["entry_index"].as_u64().expect("entry_index")).expect("index fits");
+        hop["inclusion_path"] = path(index);
+    }
+
+    let signed = checkpoint(
+        field_str(&checkpoint_object, "log_id").expect("log_id"),
+        tree_size,
+        &root,
+        field_str(&checkpoint_object, "checkpoint_time").expect("checkpoint_time"),
+        &key_by_id(field_str(&checkpoint_object, "key_id").expect("key_id")),
+    );
+    for cosignature in receipt["anchoring"]["witnesses"].as_array_mut().expect("witnesses") {
+        let witness_id = field_str(cosignature, "witness_id").expect("witness_id").to_owned();
+        let witness = key_by_id(field_str(cosignature, "key_id").expect("key_id"));
+        cosignature["cosignature"] = json!(witness.sign(&cosignature_bytes(&signed, &witness_id)));
+    }
+    receipt["anchoring"]["checkpoint"] = signed;
 }
 
 /// Re-sign `envelope["payload"]` with `key`, replacing its single signature entry in place.
@@ -2081,6 +2183,7 @@ fn reject_by_manifest_schema(mutate: impl FnOnce(&mut serde_json::Map<String, Va
             .as_object_mut()
             .expect("manifest payload"),
     );
+    reanchor(&mut receipt);
     let anchor = entry_id(&receipt["governance"]["chain"][0]["envelope"]);
     receipt["governance"]["genesis_entry_id"] = json!(&anchor);
     let policy = TrustPolicy { genesis_entry_id: anchor, ..trust_policy() };
@@ -2407,6 +2510,7 @@ fn anchoring_adaptor_must_match_the_active_manifests_own_pin() {
         "id": "a-second-profile-local-policy-also-holds",
         "hash": other_hash,
     });
+    reanchor(&mut mismatched);
     let anchor = entry_id(&mismatched["governance"]["chain"][0]["envelope"]);
     mismatched["governance"]["genesis_entry_id"] = json!(&anchor);
     let repinned = TrustPolicy { genesis_entry_id: anchor, ..policy };
@@ -2498,17 +2602,18 @@ fn governance_chain_rules_reject() {
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — the chain starts at genesis",
     );
-    assert_rejects(
+    assert_rejects_anchored(
         "statement-anchored-valid.ahl",
         |r| r["governance"]["chain"][0]["envelope"]["payload"]["predecessor"] = json!("sha256:00"),
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — the genesis manifest has no predecessor",
     );
-    // These three mutate a governance hop's own PAYLOAD, so — since I-D §7.5.1 4b phase 1
-    // (signature, against K as established so far) now runs BEFORE phase 2 (the type-specific
-    // rule each of these targets) — they must re-sign afterward, or the mutation is caught by
-    // its OWN signature failing first, which is a real but different rejection.
-    assert_rejects(
+    // These three mutate a governance hop's own PAYLOAD, so they must re-sign afterward — I-D
+    // §7.5.1 4b phase 1 (signature, against K as established so far) runs BEFORE phase 2, the
+    // type-specific rule each of these targets — and they must be re-anchored, because §7.5
+    // step 3 proves every hop's inclusion path before phase 1 runs at all. Either repair
+    // omitted, the mutation is caught by a real but different rule.
+    assert_rejects_anchored(
         "governance-state-valid.ahl",
         |r| {
             r["governance"]["chain"][2]["envelope"]["payload"]
@@ -2520,7 +2625,7 @@ fn governance_chain_rules_reject() {
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — a non-genesis manifest references its predecessor",
     );
-    assert_rejects(
+    assert_rejects_anchored(
         "governance-state-valid.ahl",
         |r| {
             corrupt(&mut r["governance"]["chain"][2]["envelope"]["payload"]["predecessor"]);
@@ -2535,7 +2640,7 @@ fn governance_chain_rules_reject() {
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — chain hops ascend by entry index",
     );
-    assert_rejects(
+    assert_rejects_anchored(
         "governance-state-valid.ahl",
         |r| {
             r["governance"]["chain"][1]["envelope"]["payload"]["action"] = json!("revoke");
@@ -2549,6 +2654,48 @@ fn governance_chain_rules_reject() {
         |r| corrupt(&mut r["governance"]["genesis_entry_id"]),
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§5 step 4 — the anchor must digest the carried genesis envelope",
+    );
+}
+
+/// I-D §7.5: step 3 is "key-independent structural and path checks — no signature and no
+/// cosignature is verified in this step", and step 4's induction runs only after it.
+///
+/// A receipt carrying BOTH a broken chain inclusion path and a broken chain signature has two
+/// defects, one per step, and which one a verifier reports is the whole of the observable
+/// difference between the two orders. It must be the path: a governance statement whose
+/// asserted entry index is unproven has not been shown to be in the log at all, and verifying
+/// its signature first would be work driven by material nothing has anchored. The I-D permits
+/// an early signature check only as a fail-fast optimization whose "provisional pass is not a
+/// result", which is a licence to check early, never a licence to REPORT in that order.
+#[test]
+fn step_3_path_checks_precede_the_step_4_induction() {
+    // Entry 9's `key` statement, anchored WITH a signature that does not verify: corrupting a
+    // signature changes the envelope's bytes and therefore its entry id, so the hop has to be
+    // re-anchored or the defect under test never gets past step 3 on its own.
+    let (_, mut signature_only) = read_receipt("governance-state-valid.ahl");
+    corrupt(&mut signature_only["governance"]["chain"][1]["envelope"]["signatures"][0]["sig"]);
+    reanchor(&mut signature_only);
+
+    // The signature defect alone: step 3 passes, and phase 1 of the induction reports it.
+    assert!(
+        matches!(
+            verify_receipt(&signature_only, &trust_policy()),
+            Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: 9 })
+        ),
+        "a chain hop whose signature does not verify is caught by the induction (4b phase 1)"
+    );
+
+    // Both defects together: the path failure is what a verifier reports, because step 3 is
+    // where it is decided.
+    let mut both = signature_only;
+    corrupt(&mut both["governance"]["chain"][1]["inclusion_path"][0]);
+    assert!(
+        matches!(
+            verify_receipt(&both, &trust_policy()),
+            Err(ReceiptError::InclusionPathInvalid { what }) if what == "governance chain hop"
+        ),
+        "with a broken path AND a broken signature on the same hop, the path failure is the \
+         result: step 3 runs before step 4"
     );
 }
 
