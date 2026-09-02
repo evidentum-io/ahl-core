@@ -1119,23 +1119,30 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             error,
             ReceiptError::GovernanceStateNotCurrent { target_index: 10, entry_index: 9, .. }
         ),
-        "statement-anchored-dropped-producer-key-must-fail.ahl" => {
-            matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
+        // I-D §7.1/§7.5.1: this build does not implement `governance.rotation_proofs[]`
+        // verification, so ANY receipt whose carried chain rotates manifest v2's witness key
+        // set (entry 25) is refused at manifest-processing time before whatever rule the
+        // vector was originally built to demonstrate is ever reached. These four vectors — one
+        // renamed from a formerly-POSITIVE vector each — exist to prove that refusal fires; see
+        // `test_data/README.md`'s "Not yet implemented" section for the coverage this costs.
+        "statement-anchored-dropped-producer-key-must-fail.ahl"
+        | "trigger-effective-unverified-authority-signature-must-fail.ahl"
+        | "propagation-complete-past-declared-checkpoint-must-fail.ahl"
+        | "propagation-complete-rotation-unsupported-must-fail.ahl"
+        | "trigger-effective-co-signed-rotation-unsupported-must-fail.ahl"
+        | "trigger-effective-non-verifying-signature-rotation-unsupported-must-fail.ahl" => {
+            matches!(
+                error,
+                ReceiptError::GovernanceKeyRotationUnsupported { manifest_entry_index: 25 }
+            )
         }
         "trigger-effective-non-authority-issuer-must-fail.ahl"
         | "propagation-complete-challenge-trigger-must-fail.ahl" => {
             matches!(error, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. })
         }
-        "trigger-effective-unverified-authority-signature-must-fail.ahl" => {
-            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 29 })
-        }
-        "propagation-complete-past-declared-checkpoint-must-fail.ahl" => matches!(
-            error,
-            ReceiptError::CheckpointNotBound { field: "claim_material.corpus_checkpoint", .. }
-        ),
         "governance-state-short-range-must-fail.ahl" => matches!(
             error,
-            ReceiptError::GovernanceRangeNotComplete { got_from: 0, got_to: 6, tree_size: 28 }
+            ReceiptError::GovernanceRangeNotComplete { got_from: 0, got_to: 6, tree_size: 20 }
         ),
         "governance-state-key-subject-must-fail.ahl" => {
             matches!(error, ReceiptError::GovernanceSubjectNotManifest { .. })
@@ -1488,13 +1495,15 @@ fn corrupt(value: &mut Value) {
 fn version_and_identifier_rules_reject() {
     assert_rejects(
         "statement-anchored-valid.ahl",
-        |r| r["ahl_receipt_version"] = Value::String("2".to_owned()),
+        // "1" is the PRIOR revision's `ahl_receipt_version` — the exact case I-D §7.1
+        // "Revision and rule selection" describes: unverifiable, never invalid.
+        |r| r["ahl_receipt_version"] = Value::String("1".to_owned()),
         |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_receipt_version", .. }),
         "§5 step 1 — receipt version",
     );
     assert_rejects(
         "statement-anchored-valid.ahl",
-        |r| r["spec_version"] = Value::String("0.4.0".to_owned()),
+        |r| r["spec_version"] = Value::String("0.3.0".to_owned()),
         |e| matches!(e, ReceiptError::UnsupportedVersion { field: "spec_version", .. }),
         "§5 step 1 — spec version",
     );
@@ -1834,8 +1843,14 @@ fn a_governance_hop_the_checkpoint_cannot_commit_is_refused() {
     assert_rejects(
         "statement-anchored-valid.ahl",
         |r| {
-            let (_, source) = read_receipt("governance-state-valid.ahl");
-            let mut hop = source["governance"]["chain"][2].clone();
+            // The donor's own chain[2] (manifest v2) would trip
+            // `GovernanceKeyRotationUnsupported` (I-D §7.1) here too, since appending it makes
+            // this receipt's chain show a rotation relative to genesis — pre-empting the
+            // "does not commit" check this test is actually about. chain[1], the entry-9 `key`
+            // statement, carries no such baggage: `read_chain` never applies the
+            // governance-key-rotation check to a `key` hop, only to `manifest` ones.
+            let (_, source) = read_receipt("statement-anchored-dropped-producer-key-must-fail.ahl");
+            let mut hop = source["governance"]["chain"][1].clone();
             hop["entry_index"] = json!(9_999);
             r["governance"]["chain"].as_array_mut().expect("chain").push(hop);
         },
@@ -1861,8 +1876,15 @@ fn governance_chain_rules_reject() {
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — the genesis manifest has no predecessor",
     );
+    // These four sub-tests need a chain with a `key` statement hop AND a second, non-genesis
+    // `manifest` hop — `governance-state-valid.ahl` no longer carries either (it stays inside
+    // the genesis manifest's era to avoid tripping `GovernanceKeyRotationUnsupported`, I-D
+    // §7.1). `statement-anchored-dropped-producer-key-must-fail.ahl` still has the needed
+    // chain [0, 9, 25] shape; each mutation below fires its own, earlier
+    // `GovernanceChainInvalid` before the chain-walk ever reaches the rotation check at
+    // entry 25, so the donor's own unrelated rejection never masks these.
     assert_rejects(
-        "governance-state-valid.ahl",
+        "statement-anchored-dropped-producer-key-must-fail.ahl",
         |r| {
             r["governance"]["chain"][2]["envelope"]["payload"]
                 .as_object_mut()
@@ -1873,19 +1895,19 @@ fn governance_chain_rules_reject() {
         "§2.3.5 — a non-genesis manifest references its predecessor",
     );
     assert_rejects(
-        "governance-state-valid.ahl",
+        "statement-anchored-dropped-producer-key-must-fail.ahl",
         |r| corrupt(&mut r["governance"]["chain"][2]["envelope"]["payload"]["predecessor"]),
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — the predecessor reference is the predecessor's entry id",
     );
     assert_rejects(
-        "governance-state-valid.ahl",
+        "statement-anchored-dropped-producer-key-must-fail.ahl",
         |r| r["governance"]["chain"].as_array_mut().expect("chain").swap(0, 1),
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — chain hops ascend by entry index",
     );
     assert_rejects(
-        "governance-state-valid.ahl",
+        "statement-anchored-dropped-producer-key-must-fail.ahl",
         |r| r["governance"]["chain"][1]["envelope"]["payload"]["action"] = json!("revoke"),
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.6 — key actions are add or retire",
@@ -2064,12 +2086,14 @@ fn claim_material_rules_reject() {
         |e| matches!(e, ReceiptError::InclusionPathInvalid { what: "input-set member" }),
         "§3 — input_members open the leaf's input_set_root",
     );
-    assert_rejects(
-        "governance-state-valid.ahl",
-        |r| r["claim_material"]["target_index"] = json!(1),
-        |e| matches!(e, ReceiptError::EmbeddedOrderingViolation { what: "governance subject", .. }),
-        "§3 — subject.entry_index <= target_index",
-    );
+    // `subject.entry_index <= target_index` (I-D §3) is untestable end to end against
+    // `governance-state-valid.ahl` as rewritten: its subject is entry 0, the only manifest
+    // statement in this corpus a governance-state claim can name without the chain also
+    // carrying manifest v2's rotation (which `GovernanceKeyRotationUnsupported`, I-D §7.1,
+    // refuses before claim-material processing is reached at all) — and no `target_index`
+    // value is less than entry index 0, since indices are unsigned. This is the same coverage
+    // cost the "Not yet implemented" section of `test_data/README.md` documents for the
+    // rotation-affected receipt vectors.
     assert_rejects(
         "governance-state-valid.ahl",
         |r| r["claim_material"]["target_index"] = json!(99),
@@ -2163,8 +2187,11 @@ fn dedup_keys_on_the_whole_receipt_not_the_envelope() {
     // Same envelope — therefore the same entry id — but different claim material.
     invalid["claim"]["assurance"]["content_binding"] = json!("plain-verified");
     invalid["claim_material"] = json!({
-        "record_bytes": "base64:AAAA",
-        "canonicalization": "jcs-v1",
+        // Valid JSON so it clears canonicalization (I-D §2.6/§7.2) and reaches the commitment
+        // comparison this test is actually about; "jcs" matches the manifest's declared
+        // descriptor so it clears the I-D §6.3 descriptor-equality check first.
+        "record_bytes": "base64:e30=",
+        "canonicalization": "jcs",
     });
     assert_eq!(
         honest["subject"]["entry_id"], invalid["subject"]["entry_id"],
@@ -2265,8 +2292,11 @@ fn a_later_challenge_cannot_unseat_an_authorized_trigger() {
     assert!(!authority.contains(&signer(23)), "entry 23 must be the challenge");
 
     // Bounded to [0, 25): entries 22 (authorized) and 23 (challenge) are what this test
-    // illustrates. Entry 28 also names F — it is the non-verifying-signature fixture, covered
-    // end to end by `trigger-effective-non-verifying-signature-ignored.ahl` — and is
+    // illustrates. Entry 28 also names F — it is the non-verifying-signature fixture, once
+    // covered end to end by a positive vector and now covered instead by
+    // `trigger-effective-non-verifying-signature-rotation-unsupported-must-fail.ahl` (this
+    // build can no longer accept material anchored under manifest v2's rotation at all — see
+    // that vector's generator comment) — and is
     // deliberately out of scope here: a `key_id`-only "authority" filter, as used below, cannot
     // tell it apart from a genuine signature, which is exactly why `is_authorized_trigger` in
     // the verifier checks the signature cryptographically rather than reusing this shortcut.
@@ -2294,4 +2324,186 @@ fn a_later_challenge_cannot_unseat_an_authorized_trigger() {
         })
         .expect("an authorized trigger names the record");
     assert_eq!(governing, 22);
+}
+
+// ---------------------------------------------------------------------------
+// I-D revision 0.4 §2.6 / §6.3: descriptor conformance, full pipeline
+// ---------------------------------------------------------------------------
+//
+// Unlike the unit-level coverage in `src/descriptor.rs`, every case here runs a complete
+// receipt through `verify_receipt`, matching this file's own convention: these are the "full
+// pipeline" vectors the descriptor/preimage change added, exercised the same way every other
+// manifest-schema and claim-material rule in this file is (`reject_by_manifest_schema`,
+// `assert_rejects`), rather than as static fixture files — this corpus keeps schema-level
+// negative cases as reproducible mutations of a known-good receipt, not as hand-authored JSON on
+// disk (see `reject_by_log_schema` above for the established precedent).
+
+#[test]
+fn canonicalization_identifier_syntax_is_enforced_by_manifest_schema() {
+    // I-D §2.6 "Identifier syntax" / §6.3 table row 1: a syntactically invalid canonicalization
+    // identifier rejects the WHOLE manifest.
+    reject_by_manifest_schema(
+        |payload| {
+            payload["datasets"]["customers"]["canonicalization"] = json!("Bad-Identifier");
+        },
+        "canonicalization identifier syntax (I-D §2.6): uppercase is not admitted",
+    );
+    reject_by_manifest_schema(
+        |payload| {
+            payload["datasets"]["customers"]["canonicalization"] = json!(7);
+        },
+        "canonicalization identifier syntax (I-D §2.6): must be a string",
+    );
+}
+
+#[test]
+fn media_type_production_is_enforced_by_manifest_schema() {
+    // I-D §2.6 "Descriptor media-type production" / §6.3 table row 1: a `media_type` present
+    // but not matching the production rejects the WHOLE manifest — quoted-string parameter
+    // values and case-insensitive duplicate parameter names included.
+    reject_by_manifest_schema(
+        |payload| {
+            payload["datasets"]["customers"]["media_type"] = json!(r#"text/plain;a="b;c=d""#);
+        },
+        "descriptor media-type production (I-D §2.6): quoted-string parameter value",
+    );
+    reject_by_manifest_schema(
+        |payload| {
+            payload["datasets"]["customers"]["media_type"] = json!("text/plain;Foo=1;foo=2");
+        },
+        "descriptor media-type production (I-D §2.6): duplicate parameter name, \
+         case-insensitive (`Foo` vs `foo`)",
+    );
+}
+
+#[test]
+fn claim_material_descriptor_must_equal_the_governing_manifest() {
+    // I-D §6.3: `claim_material.canonicalization`/`media_type` must equal (normalized-form
+    // equality, I-D §2.6) the descriptor declared by the manifest version the SUBJECT
+    // STATEMENT's own `manifest` binding names.
+    assert_rejects(
+        "record-ingested-valid.ahl",
+        |r| r["claim_material"]["canonicalization"] = json!("exact-bytes"),
+        |e| matches!(e, ReceiptError::ClaimDescriptorMismatch { .. }),
+        "I-D §2.6/§6.3 — claim_material's descriptor must equal the governing manifest's",
+    );
+    assert_rejects(
+        "record-ingested-valid.ahl",
+        |r| {
+            r["claim_material"].as_object_mut().expect("claim_material").remove("canonicalization");
+        },
+        |e| matches!(e, ReceiptError::ClaimMaterialMissing { field: "canonicalization", .. }),
+        "I-D §6.3 — claim_material.canonicalization is required where content_binding != none",
+    );
+}
+
+// I-D §2.6 `media_type` PRESENCE rule ("jcs" MUST NOT carry it, "exact-bytes" MUST): unlike the
+// schema-syntax cases above, testing this end to end would require mutating the anchored
+// GENESIS MANIFEST's own descriptor content, which changes that envelope's JCS bytes and so
+// its leaf hash — invalidating the chain hop's own committed inclusion path long before
+// content-binding logic is ever reached, and recomputing a genuine inclusion path for a
+// mutated envelope is a generator-level operation (rebuilding the log tree), not something an
+// ad-hoc receipt mutation can do. The rule itself — `descriptor::media_type_required` — is
+// therefore covered directly, at the unit level, immediately below and in `descriptor.rs`;
+// see `test_data/README.md`'s "Not yet implemented" section, which documents the analogous
+// governance-key-rotation coverage gap this same structural constraint (inclusion paths are not
+// recomputed by test-level mutation) also causes.
+#[test]
+fn media_type_presence_rule_matches_the_registered_identifiers() {
+    use ahl_core::descriptor::media_type_required;
+    assert_eq!(media_type_required("jcs"), Some(false), "jcs must not carry media_type");
+    assert_eq!(media_type_required("exact-bytes"), Some(true), "exact-bytes must carry media_type");
+    assert_eq!(
+        media_type_required("x-custom"),
+        None,
+        "an identifier this crate does not implement has an undecidable presence rule, not a \
+         false one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Generator determinism, proven in CI
+// ---------------------------------------------------------------------------
+
+/// Removes its directory on drop, so a panicking assertion above still cleans up.
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Every file under `root`, keyed by its path relative to `root`, with its exact bytes.
+fn collect_generated_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).expect("read_dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let relative = path.strip_prefix(root).expect("entry is under root").to_path_buf();
+                out.insert(relative, std::fs::read(&path).expect("read generated file"));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn the_generator_is_deterministic_across_runs() {
+    // "Two consecutive runs must leave `test_data/` byte-identical — if they do not, that is a
+    // bug" (test_data/README.md). Proven here, in CI, by running the generator into two fresh
+    // temporary directories and diffing byte-for-byte, rather than asserted only in that
+    // sentence. The third comparison — against the COMMITTED `test_data/` — is what catches a
+    // generator change whose output was never regenerated onto disk.
+    let base = std::env::temp_dir()
+        .join(format!("ahl-core-gen-vectors-determinism-{}", std::process::id()));
+    let run_a = base.join("run-a");
+    let run_b = base.join("run-b");
+    let _cleanup = TempDirGuard(base);
+
+    for dir in [&run_a, &run_b] {
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_gen_vectors"))
+            .arg(dir)
+            .status()
+            .expect("gen_vectors binary runs");
+        assert!(status.success(), "gen_vectors exited with {status} writing to {}", dir.display());
+    }
+
+    let a = collect_generated_files(&run_a);
+    let b = collect_generated_files(&run_b);
+    assert_eq!(
+        a.keys().collect::<Vec<_>>(),
+        b.keys().collect::<Vec<_>>(),
+        "two generator runs must write the same set of files"
+    );
+    for (path, bytes_a) in &a {
+        assert_eq!(
+            bytes_a,
+            &b[path],
+            "{}: two generator runs produced different bytes — the generator has hidden \
+             nondeterminism",
+            path.display()
+        );
+    }
+
+    let committed = collect_generated_files(&test_data());
+    assert_eq!(
+        a.keys().collect::<Vec<_>>(),
+        committed.keys().collect::<Vec<_>>(),
+        "the generator's file set must match the committed test_data/ exactly — regenerate \
+         with `cargo run --bin gen_vectors`"
+    );
+    for (path, bytes) in &a {
+        assert_eq!(
+            bytes,
+            &committed[path],
+            "{}: committed test_data/ is stale relative to the generator — regenerate with \
+             `cargo run --bin gen_vectors`",
+            path.display()
+        );
+    }
 }
