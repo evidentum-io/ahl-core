@@ -144,8 +144,16 @@ pub struct TrustPolicy {
     pub adaptor_profiles: BTreeMap<String, AdaptorProfile>,
     /// Dataset HMAC keys this verifier is authorized to hold (`keyed-authorized` binding only).
     pub dataset_keys: BTreeMap<String, Vec<u8>>,
-    /// Witness key ids trusted by local policy rather than through the manifest chain.
-    pub trusted_witness_key_ids: BTreeSet<String>,
+    /// Witness keys trusted by local policy rather than through the manifest chain, as
+    /// `key_id -> pubkey` (I-D §7.1: "`source: \"local-policy\"` is an acceptable source only
+    /// for witness keys the verifier ALREADY TRUSTS").
+    ///
+    /// Both members are compared, never the id alone: a receipt supplies the `pubkey` it wants
+    /// a cosignature verified under, so accepting a trusted `key_id` carrying a public key
+    /// policy never saw would let an unauthorized party choose the verification key. A policy
+    /// holding none — the default — makes every `local-policy` witness key unacceptable, which
+    /// is the correct reading of "already trusts" for a verifier that trusts none.
+    pub trusted_witness_keys: BTreeMap<String, String>,
     /// Resource limits.
     pub limits: Limits,
 }
@@ -375,6 +383,41 @@ pub enum ReceiptError {
     WitnessCosignatureInvalid {
         /// The witness whose cosignature failed.
         witness_id: String,
+    },
+
+    /// A `keys.witness[]` entry sourced `local-policy` is not in the verifier's own trusted
+    /// witness set (I-D §7.1: admissible only "for witness keys the verifier already trusts").
+    ///
+    /// Distinct from [`Self::KeyNotBound`], which names a key that failed to bind to a
+    /// manifest key object: this key claims no manifest binding at all, and the set it must
+    /// appear in is local configuration rather than carried material.
+    #[error(
+        "witness key `{key_id}` is sourced `local-policy`, but neither it nor its public key \
+         is in the verifier's trusted witness set (I-D §7.1)"
+    )]
+    WitnessKeyNotTrusted {
+        /// The offending key id.
+        key_id: String,
+    },
+
+    /// A cosignature names a `witness_id` other than the identity the manifest declares for
+    /// the key it is verified under (I-D §7.1: a witness key object "carries `witness_id`, the
+    /// identity under which the manifest declares that witness").
+    ///
+    /// The identity is part of the cosignature preimage, so this is not a cosmetic label: an
+    /// unauthorized party that could name an identity of its own choosing under a key the
+    /// manifest declares would cosign bytes no declared witness ever agreed to.
+    #[error(
+        "cosignature under witness key `{key_id}` names `{carried}`, but the manifest declares \
+         that key under `{declared}` (I-D §7.1)"
+    )]
+    WitnessIdentityMismatch {
+        /// The witness key the cosignature names.
+        key_id: String,
+        /// The identity the manifest declares for that key.
+        declared: String,
+        /// The identity the cosignature carried.
+        carried: String,
     },
 
     /// AT L3, a checkpoint carries no verifying witness cosignature at all (I-D §3.3, §7.5:
@@ -2274,53 +2317,103 @@ struct Anchoring {
     continued_history: bool,
 }
 
-/// Bind a log or witness key to a key object in the manifest version active for the checkpoint
-/// being verified (format §2.2). A key a later manifest replaced cannot validate that
-/// checkpoint, because `active_index` is fixed by the checkpoint's `tree_size`.
+/// A `keys.log[]`/`keys.witness[]` entry resolved to the public key verification uses.
+struct ResolvedKey {
+    /// The public key a signature or cosignature is verified under.
+    pubkey: String,
+    /// For a `manifest-chain` witness key, the identity the manifest declares that key object
+    /// under (I-D §7.1). `None` for a log key, which carries no identity member, and for a
+    /// `local-policy` witness key, which no manifest declares — there is no manifest-declared
+    /// identity to compare a cosignature against in either case.
+    witness_id: Option<String>,
+}
+
+/// Bind a log or witness key to the key object the receipt says it comes from (I-D §7.1
+/// "`keys`"), under the one of the two admissible sources the entry declares.
+///
+/// **`manifest-chain`.** The key object must appear in the manifest version active for the
+/// checkpoint being verified, and `active_index` is fixed by that checkpoint's `tree_size`, so
+/// a key a later manifest replaced cannot validate it. A log key matches on `(key_id, pubkey)`;
+/// a witness key matches on `(witness_id, key_id, pubkey)`, because §7.1 makes `witness_id`
+/// part of the witness key object rather than a free-text label — dropping it would let one
+/// declared witness's key be presented under another witness's identity.
+///
+/// **`local-policy`.** Admissible for witness keys only, and only for keys the verifier already
+/// trusts: the entry's `key_id` AND `pubkey` must both be what [`TrustPolicy`] holds. Nothing
+/// carried in the receipt contributes to that decision, which is the whole point — a policy
+/// holding no trusted witness key accepts no `local-policy` witness key at all.
 fn bind_log_or_witness_key(
+    policy: &TrustPolicy,
     governance: &Governance<'_>,
     entry: &Value,
     group: &str,
     active_index: u64,
-) -> Result<String> {
+) -> Result<ResolvedKey> {
     let key_id = text(entry, "key_id")?.to_owned();
-    if text(entry, "source")? == "local-policy" {
-        // Permitted only for witness keys the verifier already trusts (§2.2).
-        return if group == "witness" {
-            Ok(text(entry, "pubkey")?.to_owned())
-        } else {
-            Err(ReceiptError::KeyNotBound { key_id, entry_index: active_index })
-        };
-    }
-    let binding_index = number(obj(entry, "binding")?, "entry_index")?;
-    if binding_index != active_index {
-        return Err(ReceiptError::KeyNotBound { key_id, entry_index: binding_index });
-    }
-    let (_, manifest) = governance
-        .manifests
-        .iter()
-        .find(|(index, _)| *index == binding_index)
-        .copied()
-        .ok_or_else(|| ReceiptError::KeyNotBound {
-            key_id: key_id.clone(),
-            entry_index: binding_index,
-        })?;
-
-    let declared: Vec<(String, String)> = if group == "log" {
-        key_objects(log_object(manifest)?)?
-    } else {
-        let mut all = Vec::new();
-        for witness in array(manifest, "witnesses")? {
-            all.extend(key_objects(witness)?);
+    let pubkey = text(entry, "pubkey")?.to_owned();
+    match text(entry, "source")? {
+        // I-D §7.1: "`source: \"local-policy\"` is an acceptable source only for witness keys
+        // the verifier already trusts, for the genesis anchor, and for authorized dataset
+        // keys" — neither of the latter two is a `keys.log[]`/`keys.producer[]` entry, so
+        // within this block the source is admissible for the witness group and nowhere else.
+        "local-policy" => {
+            if group != "witness" {
+                return Err(ReceiptError::KeyNotBound { key_id, entry_index: active_index });
+            }
+            if policy.trusted_witness_keys.get(&key_id).map(String::as_str) != Some(pubkey.as_str())
+            {
+                return Err(ReceiptError::WitnessKeyNotTrusted { key_id });
+            }
+            Ok(ResolvedKey { pubkey, witness_id: None })
         }
-        all
-    };
-    let pubkey = text(entry, "pubkey")?;
-    declared
-        .into_iter()
-        .find(|(id, key)| id == &key_id && key == pubkey)
-        .map(|(_, key)| key)
-        .ok_or(ReceiptError::KeyNotBound { key_id, entry_index: binding_index })
+        "manifest-chain" => {
+            let binding_index = number(obj(entry, "binding")?, "entry_index")?;
+            if binding_index != active_index {
+                return Err(ReceiptError::KeyNotBound { key_id, entry_index: binding_index });
+            }
+            let not_bound =
+                || ReceiptError::KeyNotBound { key_id: key_id.clone(), entry_index: binding_index };
+            let (_, manifest) = governance
+                .manifests
+                .iter()
+                .find(|(index, _)| *index == binding_index)
+                .copied()
+                .ok_or_else(not_bound)?;
+
+            // AMBIGUITY (I-D §7.1, keys block): "the manifest object is `{key_id, pubkey,
+            // valid_from_index}` and every member must be equal" names a member the
+            // receipt-side key object does not carry — §7.1's own container shape gives a log
+            // or witness key object `{key_id, pubkey, source, binding}` (plus `witness_id`),
+            // with no `valid_from_index` to compare. Minimal reading: every member the two
+            // objects have in common must be equal, which is what this compares.
+            if group == "log" {
+                key_objects(log_object(manifest)?)?
+                    .into_iter()
+                    .find(|(id, key)| id == &key_id && key == &pubkey)
+                    .map(|(_, key)| ResolvedKey { pubkey: key, witness_id: None })
+                    .ok_or_else(not_bound)
+            } else {
+                let witness_id = text(entry, "witness_id")?.to_owned();
+                witness_key_set(manifest)?
+                    .into_iter()
+                    .find(|(declared_id, id, key, _)| {
+                        declared_id == &witness_id && id == &key_id && key == &pubkey
+                    })
+                    .map(|(declared_id, _, key, _)| ResolvedKey {
+                        pubkey: key,
+                        witness_id: Some(declared_id),
+                    })
+                    .ok_or_else(not_bound)
+            }
+        }
+        // Unreachable in a receipt that reached this point — [`check_keys_block`] admits only
+        // the two tokens above, and runs over the whole `keys` block first — but stated rather
+        // than defaulted, so no third source can ever be read as one of the two.
+        other => Err(ReceiptError::Malformed(format!(
+            "`keys.{group}[]` entry `{key_id}` declares `source` `{other}`: I-D §7.1 admits \
+             exactly `manifest-chain` or `local-policy`"
+        ))),
+    }
 }
 
 /// Bind every producer key the receipt lists to the key set in force at the subject's entry
@@ -2360,10 +2453,118 @@ fn check_key_id(entry: &Value) -> Result<()> {
     Ok(())
 }
 
-/// `key_id -> pubkey` for `keys.log`/`keys.witness` entries that bound successfully at some
-/// checkpoint's active manifest index, plus, for every `key_id` that never did, the binding
-/// index its first failing entry actually carried.
-type BoundAndAttempted = (BTreeMap<String, String>, BTreeMap<String, u64>);
+/// Require a cosignature's `witness_id` to be the identity the manifest declares for the key
+/// it is verified under (I-D §7.1: `anchoring.witnesses[]` carries "the witness identity AS
+/// DECLARED IN THE MANIFEST", and a witness key object carries "`witness_id`, the identity
+/// under which the manifest declares that witness").
+///
+/// The identity is not decorative: `cosignature_bytes` puts it in the preimage, so a
+/// cosignature naming an identity of the presenter's own choosing is a signature over bytes no
+/// declared witness ever cosigned. Applied identically to `anchoring.witnesses[]` and
+/// `anchoring.later_witnesses[]`; `governance.rotation_proofs[].witnesses[]` resolves its keys
+/// straight out of the outgoing manifest by `(witness_id, key_id)` and so is bound to the same
+/// identity by construction ([`verify_rotation_proof`]).
+///
+/// A `local-policy` witness key has no manifest-declared identity to compare against, so there
+/// is nothing to check for one: what makes it acceptable at all is that policy holds its
+/// `key_id` and `pubkey` ([`bind_log_or_witness_key`]).
+fn check_witness_identity(resolved: &ResolvedKey, key_id: &str, carried: &str) -> Result<()> {
+    match &resolved.witness_id {
+        Some(declared) if declared != carried => Err(ReceiptError::WitnessIdentityMismatch {
+            key_id: key_id.to_owned(),
+            declared: declared.clone(),
+            carried: carried.to_owned(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// The two `source` tokens I-D §7.1 admits for a key object, in the order it states them.
+const KEY_SOURCES: [&str; 2] = ["manifest-chain", "local-policy"];
+
+/// Validate the `keys` block's container shapes (I-D §7.1 "`keys`"), over EVERY entry the
+/// receipt carries, before any key is resolved.
+///
+/// This belongs to §7.5 step 3 — "the family-string, arity, and ordering checks the container
+/// shapes of Section 7.1 require" — and is separate from binding for a reason. Binding is
+/// deliberately tolerant per entry ([`bind_keys_by_group`]), because one receipt legitimately
+/// carries the same physical key bound to two different manifest versions; a shape defect on an
+/// entry no checkpoint happens to reach for would therefore never be reported at all. Shape is
+/// not tolerant: an ill-formed key object is `invalid` whether or not verification needs it.
+fn check_keys_block(receipt: &Value) -> Result<()> {
+    let keys = obj(receipt, "keys")?;
+    for group in ["log", "witness", "producer"] {
+        for (position, entry) in array(keys, group)?.iter().enumerate() {
+            let invalid = |detail: &str| {
+                ReceiptError::Malformed(format!("`keys.{group}[{position}]`: {detail}"))
+            };
+            if !entry.is_object() {
+                return Err(invalid("MUST be a key object (I-D §7.1)"));
+            }
+            if !entry.get("key_id").and_then(Value::as_str).is_some_and(is_family_hash) {
+                return Err(invalid(
+                    "`key_id` is REQUIRED, a `sha256:` family string in lowercase hex (I-D §7.1)",
+                ));
+            }
+            if !entry.get("pubkey").is_some_and(Value::is_string) {
+                return Err(invalid(
+                    "`pubkey` is REQUIRED and MUST be a `base64:` family string (I-D §7.1)",
+                ));
+            }
+            // I-D §7.1: "`source` is exactly one of `\"manifest-chain\"` or
+            // `\"local-policy\"`." There is no third token and no default — an unrecognized
+            // one is a schema failure, never a source the verifier picks on the receipt's
+            // behalf. And "`local-policy` is an acceptable source only for witness keys the
+            // verifier already trusts, for the genesis anchor, and for authorized dataset
+            // keys": neither of the latter two is a `keys[]` entry, so within this block the
+            // token is admissible in the witness group and nowhere else.
+            let source = entry
+                .get("source")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("`source` is REQUIRED (I-D §7.1)"))?;
+            if !KEY_SOURCES.contains(&source) {
+                return Err(invalid(&format!(
+                    "`source` is `{source}`: I-D §7.1 admits exactly `manifest-chain` or \
+                     `local-policy`"
+                )));
+            }
+            if source == "local-policy" && group != "witness" {
+                return Err(invalid(
+                    "`local-policy` is an acceptable source only for witness keys (I-D §7.1)",
+                ));
+            }
+            // "`binding` is the object `{ \"entry_index\": <integer> }`... it is REQUIRED
+            // where `source` is `\"manifest-chain\"`."
+            if source == "manifest-chain"
+                && !entry
+                    .get("binding")
+                    .is_some_and(|binding| binding.get("entry_index").is_some_and(Value::is_u64))
+            {
+                return Err(invalid(
+                    "`binding` is REQUIRED where `source` is `manifest-chain`, and is the \
+                     object `{\"entry_index\": <integer>}` (I-D §7.1)",
+                ));
+            }
+            // "A witness key object additionally carries `witness_id`, the identity under
+            // which the manifest declares that witness."
+            //
+            // AMBIGUITY (I-D §7.1, keys block): that sentence is unconditional about the
+            // shape of a witness key object, but it explains the member by a manifest
+            // declaration a `local-policy` key does not have. Minimal reading: the member is
+            // part of the object's shape either way, and it is compared against a manifest
+            // only where the source is `manifest-chain`.
+            if group == "witness" && !entry.get("witness_id").is_some_and(Value::is_string) {
+                return Err(invalid("`witness_id` is REQUIRED on a witness key object (I-D §7.1)"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `key_id -> ` [`ResolvedKey`] for `keys.log`/`keys.witness` entries that bound successfully
+/// at some checkpoint's active manifest index, plus, for every `key_id` that never did, the
+/// binding index its first failing entry actually carried.
+type BoundAndAttempted = (BTreeMap<String, ResolvedKey>, BTreeMap<String, u64>);
 
 /// Bind every `keys.{group}[]` entry against `active_index`, tolerantly per entry.
 ///
@@ -2382,6 +2583,7 @@ type BoundAndAttempted = (BTreeMap<String, String>, BTreeMap<String, u64>);
 /// receipt-borne checkpoint this crate authenticates resolves its keys the same way.
 fn bind_keys_by_group(
     receipt: &Value,
+    policy: &TrustPolicy,
     governance: &Governance<'_>,
     active_index: u64,
     group: &str,
@@ -2392,10 +2594,20 @@ fn bind_keys_by_group(
     for entry in array(keys, group)? {
         check_key_id(entry)?;
         let key_id = text(entry, "key_id")?.to_owned();
-        match bind_log_or_witness_key(governance, entry, group, active_index) {
-            Ok(pubkey) => {
-                bound.insert(key_id, pubkey);
+        match bind_log_or_witness_key(policy, governance, entry, group, active_index) {
+            Ok(resolved) => {
+                bound.insert(key_id, resolved);
             }
+            // The tolerance below is for `manifest-chain` entries only, and exists for one
+            // reason: a receipt authenticating two checkpoints legitimately carries the same
+            // physical key twice, bound to each checkpoint's own manifest version, so a
+            // failure at THIS `active_index` is not yet a defect. Neither of these two is of
+            // that kind. A `local-policy` key policy does not hold cannot bind at any active
+            // index, and an unrecognized `source` is a schema failure of the entry itself;
+            // tolerating either would replace a precise report with a missing-key one.
+            Err(
+                error @ (ReceiptError::WitnessKeyNotTrusted { .. } | ReceiptError::Malformed(_)),
+            ) => return Err(error),
             Err(_) if !bound.contains_key(&key_id) => {
                 let index = obj(entry, "binding")
                     .and_then(|b| number(b, "entry_index"))
@@ -2410,6 +2622,7 @@ fn bind_keys_by_group(
 
 fn verify_checkpoint(
     receipt: &Value,
+    policy: &TrustPolicy,
     governance: &Governance<'_>,
     profile: &AdaptorProfile,
     profile_id: &str,
@@ -2441,9 +2654,10 @@ fn verify_checkpoint(
     // than merely gating on the capability flag.
     reconcile_checkpoint_raw(checkpoint, profile_id)?;
 
-    let (log_keys, log_attempted) = bind_keys_by_group(receipt, governance, active_index, "log")?;
+    let (log_keys, log_attempted) =
+        bind_keys_by_group(receipt, policy, governance, active_index, "log")?;
     let (witness_keys, witness_attempted) =
-        bind_keys_by_group(receipt, governance, active_index, "witness")?;
+        bind_keys_by_group(receipt, policy, governance, active_index, "witness")?;
 
     let signing_key = log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| {
         let key_id = text(checkpoint, "key_id").unwrap_or_default().to_owned();
@@ -2452,7 +2666,7 @@ fn verify_checkpoint(
     })?;
     budget.spend(1)?;
     if !verify_signature(
-        &decode_pubkey(signing_key)?,
+        &decode_pubkey(&signing_key.pubkey)?,
         &checkpoint_signing_bytes_for(checkpoint, profile_id)?,
         text(checkpoint, "signature")?,
     )? {
@@ -2464,13 +2678,14 @@ fn verify_checkpoint(
         let cosignature = witness_cosignature_object(cosignature)?;
         let witness_id = text(cosignature, "witness_id")?.to_owned();
         let key_id = text(cosignature, "key_id")?;
-        let pubkey = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
+        let resolved = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
             key_id: key_id.to_owned(),
             entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
         })?;
+        check_witness_identity(resolved, key_id, &witness_id)?;
         budget.spend(1)?;
         if !verify_signature(
-            &decode_pubkey(pubkey)?,
+            &decode_pubkey(&resolved.pubkey)?,
             &cosignature_bytes(checkpoint, &witness_id),
             text(cosignature, "cosignature")?,
         )? {
@@ -2498,7 +2713,7 @@ fn verify_checkpoint(
         });
     }
     let continued_history = verify_continued_history(
-        receipt, governance, anchoring, tree_size, &root, profile, profile_id, budget,
+        receipt, policy, governance, anchoring, tree_size, &root, profile, profile_id, budget,
     )?;
 
     Ok(Anchoring { tree_size, root, witnessed, continued_history })
@@ -2532,6 +2747,7 @@ fn verify_checkpoint(
 #[allow(clippy::too_many_arguments)]
 fn verify_continued_history(
     receipt: &Value,
+    policy: &TrustPolicy,
     governance: &Governance<'_>,
     anchoring: &Value,
     from_size: u64,
@@ -2586,8 +2802,8 @@ fn verify_continued_history(
         // continued history; it is the size regression a witness refuses to cosign over.
         return Err(ReceiptError::ConsistencyPathInvalid);
     }
-    authenticate_checkpoint(receipt, governance, later, profile, profile_id, budget)?;
-    verify_later_witnesses(receipt, governance, later, later_witnesses, budget)?;
+    authenticate_checkpoint(receipt, policy, governance, later, profile, profile_id, budget)?;
+    verify_later_witnesses(receipt, policy, governance, later, later_witnesses, budget)?;
 
     let to_root = parse_hash_hex(text(later, "root_hash")?)?;
     let path = path_strings(anchoring, "consistency_path")?;
@@ -2813,11 +3029,15 @@ fn verify_nested(
         });
     }
 
+    // I-D §7.5 step 3: the container shapes of §7.1, over the whole `keys` block, before any
+    // key is resolved and before the induction runs — key-independent, so decidable here.
+    check_keys_block(receipt)?;
+
     // --- §5 step 4 (chain structure first: key binding depends on it) ---------------
     let governance = read_chain(receipt, policy, profile, adaptor_id, budget)?;
 
     // --- §5 step 3: checkpoint, keys, cosignatures, inclusion -----------------------
-    let anchoring = verify_checkpoint(receipt, &governance, profile, adaptor_id, budget)?;
+    let anchoring = verify_checkpoint(receipt, policy, &governance, profile, adaptor_id, budget)?;
     if subject_index >= anchoring.tree_size {
         return Err(ReceiptError::EntryIndexBeyondCheckpoint {
             entry_index: subject_index,
@@ -3857,6 +4077,7 @@ fn verify_disposition(
 /// state must be validated by that state's key (format §2.2).
 fn authenticate_checkpoint(
     receipt: &Value,
+    policy: &TrustPolicy,
     governance: &Governance<'_>,
     declared: &Value,
     profile: &AdaptorProfile,
@@ -3896,7 +4117,8 @@ fn authenticate_checkpoint(
     // checkpoints can legitimately carry the same physical log key bound to each checkpoint's
     // own active manifest — so this resolves against THIS checkpoint's own `active_index`,
     // exactly as [`verify_checkpoint`] does for the primary checkpoint.
-    let (log_keys, log_attempted) = bind_keys_by_group(receipt, governance, active_index, "log")?;
+    let (log_keys, log_attempted) =
+        bind_keys_by_group(receipt, policy, governance, active_index, "log")?;
     let signing_key = log_keys.get(key_id).ok_or_else(|| {
         let entry_index = log_attempted.get(key_id).copied().unwrap_or(active_index);
         ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
@@ -3904,7 +4126,7 @@ fn authenticate_checkpoint(
 
     budget.spend(1)?;
     if !verify_signature(
-        &decode_pubkey(signing_key)?,
+        &decode_pubkey(&signing_key.pubkey)?,
         &checkpoint_signing_bytes_for(declared, profile_id)?,
         text(declared, "signature")?,
     )? {
@@ -3937,6 +4159,7 @@ fn authenticate_checkpoint(
 /// touches witnesses, and this function exists only for `later_checkpoint`.
 fn verify_later_witnesses(
     receipt: &Value,
+    policy: &TrustPolicy,
     governance: &Governance<'_>,
     later_checkpoint: &Value,
     later_witnesses: &Value,
@@ -3951,19 +4174,20 @@ fn verify_later_witnesses(
     })?;
 
     let (witness_keys, witness_attempted) =
-        bind_keys_by_group(receipt, governance, active_index, "witness")?;
+        bind_keys_by_group(receipt, policy, governance, active_index, "witness")?;
     let mut witnessed = false;
     for cosignature in candidates {
         let cosignature = witness_cosignature_object(cosignature)?;
         let witness_id = text(cosignature, "witness_id")?.to_owned();
         let key_id = text(cosignature, "key_id")?;
-        let pubkey = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
+        let resolved = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
             key_id: key_id.to_owned(),
             entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
         })?;
+        check_witness_identity(resolved, key_id, &witness_id)?;
         budget.spend(1)?;
         if !verify_signature(
-            &decode_pubkey(pubkey)?,
+            &decode_pubkey(&resolved.pubkey)?,
             &cosignature_bytes(later_checkpoint, &witness_id),
             text(cosignature, "cosignature")?,
         )? {
@@ -4018,6 +4242,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
     // ([`verify_later_witnesses`]).
     authenticate_checkpoint(
         ctx.receipt,
+        ctx.policy,
         ctx.governance,
         carried_d,
         ctx.profile,

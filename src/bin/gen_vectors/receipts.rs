@@ -58,7 +58,7 @@ pub fn trust_policy(corpus: &Corpus, keys: &Keys, dataset_key: &[u8]) -> TrustPo
             },
         )]),
         dataset_keys: BTreeMap::from([(DS_CUSTOMERS.to_owned(), dataset_key.to_vec())]),
-        trusted_witness_key_ids: BTreeSet::new(),
+        trusted_witness_keys: BTreeMap::new(),
         limits: ahl_core::receipt::Limits::default(),
     }
 }
