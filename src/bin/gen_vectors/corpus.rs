@@ -88,6 +88,20 @@ impl Anchor {
             "cosigned_at": T0,
         })
     }
+
+    /// This anchor's cosignature, as the one-element `witnesses` ARRAY a receipt carries
+    /// alongside — never inside — a checkpoint object that stands as
+    /// `anchoring.later_checkpoint` or `claim_material.corpus_checkpoint` (I-D §3.3, §7.5: "At
+    /// L3 a verifier accepts a checkpoint C only with a valid witness cosignature" — a rule
+    /// about ANY checkpoint C, not merely the primary one). The sibling member is
+    /// `anchoring.later_checkpoint_witnesses` / `claim_material.corpus_checkpoint_witnesses`:
+    /// nesting it INSIDE the checkpoint object would change the very bytes the log's own
+    /// signature (`checkpoint_signing_bytes`, "`JCS(cp)` with `signature` removed") and each
+    /// cosignature's own preimage (`cosignature_bytes`, "the signed checkpoint object") are
+    /// computed over.
+    pub fn witnesses_array(&self, keys: &Keys) -> Value {
+        json!([self.witness_entry(keys)])
+    }
 }
 
 /// One closure scenario the corpus publishes and the generator re-checks.

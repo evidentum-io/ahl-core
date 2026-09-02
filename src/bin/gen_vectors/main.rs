@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+mod atl;
 mod corpus;
 mod receipts;
 mod scenario;
@@ -42,6 +43,7 @@ fn main() {
     corpus.self_check(&keys);
     corpus.write(&root, &keys);
     receipts::write_all(&corpus, &keys, &root, &dataset_key);
+    atl::write_all(&keys, &root);
 
     println!("test_data written to {}", root.display());
 }
