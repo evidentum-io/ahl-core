@@ -23,7 +23,7 @@ use crate::scenario::{
 };
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 32] = [
+pub const NAMES: [&str; 33] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -56,6 +56,7 @@ pub const NAMES: [&str; 32] = [
     "29-unverified-authority-signature-trigger-f",
     "30-key-readd-producer-2",
     "31-retraction-f-co-signed-authority-and-producer-2",
+    "32-ingestion-customers-e-stale-manifest",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -118,6 +119,8 @@ pub struct Records {
     pub e2: String,
     pub e3: String,
     pub c_f: String,
+    /// Introduced solely by the stale-manifest-binding negative vector's entry 32.
+    pub c_e: String,
     pub h: String,
     pub z: String,
     /// Canonical bytes of record B — the wrong bytes for the negative receipt.
@@ -686,10 +689,31 @@ impl Corpus {
         );
         let env_31 = Value::Object(env_31_map);
 
+        // --- entry 32: an otherwise-ordinary ingestion, genuinely signed and genuinely
+        // anchored — B2's own requirement is that this be real, not a standalone "malformed"
+        // fixture, so the "structural wall" earlier rounds hit (mutating an anchored envelope
+        // invalidates its own inclusion path) does not apply here: this envelope's payload
+        // carries the wrong `manifest` reference FROM THE START, before it is ever signed or
+        // included. Anchored after manifest v2 (entry 25), it wrongly names `m1` (genesis)
+        // instead of `m2` (I-D §2.2: the manifest ACTIVE at an entry index is the one with the
+        // greatest entry index smaller than it — here, v2). Every other member is genuine: a
+        // real signature by the `customers` authority, over a real new record, real inclusion
+        // in the rebuilt log tree.
+        let env_32 = signed(
+            "ingestion",
+            &m1,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_e,
+                "origin": "batch:2026-08-16/customers-06",
+            }),
+            &keys.producer_1,
+        );
+
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
-            env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31,
+            env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -720,6 +744,7 @@ impl Corpus {
             (29, 25),
             (30, 25),
             (32, 25),
+            (33, 25),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
@@ -738,7 +763,8 @@ impl Corpus {
                     28 => "cp28",
                     29 => "cp29",
                     30 => "cp30",
-                    _ => "cp32",
+                    32 => "cp32",
+                    _ => "cp33",
                 },
                 checkpoint: cp,
                 witness_id,
@@ -1960,6 +1986,7 @@ impl Records {
             e2: plain(&json!({ "customer_id": "C-3003", "model": "risk-v4.2", "score": 502 })),
             e3: plain(&json!({ "customer_id": "C-3003", "model": "risk-v4.2", "score": 503 })),
             c_f: keyed(&json!({ "customer_id": "C-5005", "country": "PT", "segment": "retail" })),
+            c_e: keyed(&json!({ "customer_id": "C-6006", "country": "NL", "segment": "retail" })),
             h: plain(&json!({ "customer_id": "C-5005", "model": "risk-v4.2", "score": 421 })),
             z: plain(&json!({ "customer_id": "C-1001", "metric": "rollup", "value_bp": 4200 })),
             c_b_bytes: jcs(&b),

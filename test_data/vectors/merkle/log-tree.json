@@ -196,6 +196,12 @@
       "entry_index": 31,
       "leaf_hash": "sha256:536b04fd63e92a2671ea5338a287012b6ca95de0f1c65518de8be3ab39167b0f",
       "name": "31-retraction-f-co-signed-authority-and-producer-2"
+    },
+    {
+      "entry_id": "sha256:e5dcfae38f6b7ac54683c15f3421b9c0eeb370341f99c00eddbd1aa035583fc0",
+      "entry_index": 32,
+      "leaf_hash": "sha256:5094731f9703702734a5cd32efc007fecb907992f3b9ffeecb83a67854fe1bec",
+      "name": "32-ingestion-customers-e-stale-manifest"
     }
   ],
   "inclusion": {
@@ -263,6 +269,11 @@
       "name": "cp32",
       "root": "sha256:1d9f4634f92a49dc669d5de4723dcd5b2567fe139827db0cf203aa9cd59a32f6",
       "tree_size": 32
+    },
+    {
+      "name": "cp33",
+      "root": "sha256:5937fa710a077b6e7964c810562bffd3e71606bbd1934ba5b41ac74f887b0a3e",
+      "tree_size": 33
     }
   ]
 }

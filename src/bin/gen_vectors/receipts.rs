@@ -313,6 +313,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp29 = corpus.anchor("cp29");
     let cp30 = corpus.anchor("cp30");
     let cp32 = corpus.anchor("cp32");
+    let cp33 = corpus.anchor("cp33");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -506,6 +507,46 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Reject {
             rule: "receipt §2.1 — carried record bytes must recompute to the anchored commitment",
             matches: |e| matches!(e, ReceiptError::ContentBindingMismatch { .. }),
+        },
+    });
+
+    // I-D §2.2 / §7.6: entry 32 is a genuine, fully anchored ingestion of record E into
+    // `customers`, signed by the `customers` authority — but its payload names manifest v1
+    // (genesis) as governing it, even though it is anchored well after manifest v2 (entry 25)
+    // became active. This is a real corpus statement (see `corpus.rs`'s entry 32), not a
+    // mutated fixture: the "structural wall" earlier rounds hit — mutating an anchored
+    // envelope invalidates its own inclusion path before the rule under test is ever reached —
+    // does not apply here, because the defect was baked in before the statement was ever
+    // signed or included.
+    out.push(Vector {
+        file: "record-ingested-stale-manifest-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "record-ingested",
+            subject_index: 32,
+            anchor: cp33,
+            chain: vec![0, 9, 25],
+            record_subject: customers(&r.c_e),
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: None,
+            note: format!(
+                "MUST FAIL. Entry 32's payload names manifest `{}` (v1, genesis), but I-D §2.2 \
+                 resolves \"the manifest version active at the statement's entry index\" as \
+                 the manifest with the greatest entry index smaller than the statement's own — \
+                 here manifest `{}` (v2, entry 25), not v1. A receipt is invalid however genuine \
+                 the rest of the statement is: real signature, real inclusion, real record.",
+                corpus.manifest_id(0),
+                corpus.manifest_id(25),
+            ),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §2.2 / §7.6 — subject.manifest must be the manifest ACTIVE at \
+                   subject.entry_index, not merely an earlier one",
+            matches: |e| matches!(e, ReceiptError::SubjectManifestBindingInvalid(_)),
         },
     });
 

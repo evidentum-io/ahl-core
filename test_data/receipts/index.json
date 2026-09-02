@@ -75,6 +75,13 @@
       "rule": "receipt §2.1 — carried record bytes must recompute to the anchored commitment"
     },
     {
+      "claim_type": "record-ingested",
+      "expect": "reject",
+      "file": "record-ingested-stale-manifest-must-fail.ahl",
+      "reason": "`subject.manifest` binding is invalid: `subject.manifest` (`sha256:19227e22afd16e6a588810c475010b7d5da123f1baee229f11cbc9319a72b21d`) is not the manifest version ACTIVE at subject.entry_index 32 (`sha256:35f7435f758f91941631bb90bebde9e879836bec43d4f3fbfa6a2b234a61a453`) (I-D §2.2, §7.6)",
+      "rule": "I-D §2.2 / §7.6 — subject.manifest must be the manifest ACTIVE at subject.entry_index, not merely an earlier one"
+    },
+    {
       "boundary": "the subject derivation committed the named output record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "record-derived",
       "embedded_receipts": 0,
