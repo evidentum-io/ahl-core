@@ -3282,3 +3282,72 @@ fn render(claim_type: &str, assurance: &Assurance) -> String {
     });
     boundary
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{log_key_set, witness_key_set};
+
+    /// I-D §6.2: "Each manifest version's log and witness key objects replace the prior set in
+    /// full" — a SET, not a sequence, so re-listing the same key objects in a different order
+    /// is NOT a governance-key rotation (I-D §7.1). `log_key_set`/`witness_key_set` back the
+    /// rotation-detection comparison in `read_chain`, and this is the case a full receipt
+    /// vector cannot exercise: reordering a manifest's carried `log`/`witnesses` array changes
+    /// that manifest envelope's JCS bytes, and so its leaf hash, invalidating the governance
+    /// chain hop's own committed inclusion path before the rotation check is ever reached —
+    /// the same structural constraint documented for the `media_type` presence test in
+    /// `tests/vectors.rs`.
+    #[test]
+    fn key_set_comparison_is_order_independent() {
+        let forward = json!({
+            "log": { "keys": [
+                { "key_id": "sha256:aa", "pubkey": "base64:AA==", "valid_from_index": 0 },
+                { "key_id": "sha256:bb", "pubkey": "base64:BB==", "valid_from_index": 0 },
+            ] },
+            "witnesses": [
+                { "witness_id": "witness-1", "keys": [
+                    { "key_id": "sha256:cc", "pubkey": "base64:CC==", "valid_from_index": 0 },
+                ] },
+                { "witness_id": "witness-2", "keys": [
+                    { "key_id": "sha256:dd", "pubkey": "base64:DD==", "valid_from_index": 0 },
+                ] },
+            ],
+        });
+        let reordered = json!({
+            "log": { "keys": [
+                { "key_id": "sha256:bb", "pubkey": "base64:BB==", "valid_from_index": 0 },
+                { "key_id": "sha256:aa", "pubkey": "base64:AA==", "valid_from_index": 0 },
+            ] },
+            "witnesses": [
+                { "witness_id": "witness-2", "keys": [
+                    { "key_id": "sha256:dd", "pubkey": "base64:DD==", "valid_from_index": 0 },
+                ] },
+                { "witness_id": "witness-1", "keys": [
+                    { "key_id": "sha256:cc", "pubkey": "base64:CC==", "valid_from_index": 0 },
+                ] },
+            ],
+        });
+
+        assert_eq!(
+            log_key_set(&forward),
+            log_key_set(&reordered),
+            "reordering `log.keys` must not look like a rotation"
+        );
+        assert_eq!(
+            witness_key_set(&forward),
+            witness_key_set(&reordered),
+            "reordering `witnesses[]`, or the `keys` within one witness, must not look like a \
+             rotation"
+        );
+
+        let genuinely_different = json!({
+            "log": { "keys": [
+                { "key_id": "sha256:aa", "pubkey": "base64:AA==", "valid_from_index": 0 },
+            ] },
+            "witnesses": [],
+        });
+        assert_ne!(log_key_set(&forward), log_key_set(&genuinely_different));
+        assert_ne!(witness_key_set(&forward), witness_key_set(&genuinely_different));
+    }
+}
