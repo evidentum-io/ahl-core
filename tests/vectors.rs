@@ -2285,6 +2285,95 @@ fn every_carried_byte_field_is_a_family_string_even_where_unused() {
     );
 }
 
+/// I-D §7.1, keys block: "a receipt-side entry carrying any member beyond those and
+/// `source`/`binding` is a schema failure."
+///
+/// The member set is closed, and closing it is what keeps the match meaningful. The match
+/// compares the members the receipt-side entry and the manifest key object SHARE; an entry
+/// free to carry others could assert `valid_from_index` — or anything else — alongside the
+/// compared members, where nothing compares it and a reader might believe it.
+#[test]
+fn a_key_object_carries_no_member_beyond_the_closed_set() {
+    for (group, extra) in [
+        // A selected log key, an unused witness entry, and a producer entry: the rule is a
+        // property of the receipt, not of what verification happened to reach for.
+        ("log", "valid_from_index"),
+        ("witness", "trusted"),
+        ("producer", "note"),
+    ] {
+        assert_rejects(
+            "statement-anchored-valid.ahl",
+            move |r| r["keys"][group][0][extra] = json!("anything at all"),
+            move |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains(extra)),
+            "I-D §7.1 — a key object carries no member beyond the closed set",
+        );
+    }
+    // The unused-entry case in full: a second witness entry nothing resolves, carrying a
+    // member no rule compares.
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| {
+            let mut unused = r["keys"]["witness"][0].clone();
+            unused["witness_id"] = json!("witness-2");
+            unused["valid_from_index"] = json!(0);
+            r["keys"]["witness"].as_array_mut().expect("keys.witness array").push(unused);
+        },
+        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("valid_from_index")),
+        "I-D §7.1 — the closed set applies to entries verification never selects",
+    );
+}
+
+/// I-D §7.1: "The member shapes shown above are normative", and the container gives an anchor
+/// as `{ "type": ..., "target": ..., "target_hash": "sha256:<hex>", ... }`.
+///
+/// This verifier computes no verdict from `anchors[]` — §8.3 offers external timestamps as
+/// evidence a deployment can compose with checkpoints, not as an input to any rule here — and
+/// that is exactly why the shape has to be checked rather than assumed: nothing downstream
+/// would ever notice. The trailing ellipsis leaves an anchor format's own members alone.
+#[test]
+fn a_carried_anchor_takes_the_shape_the_container_fixes() {
+    let well_formed = json!({
+        "type": "rfc3161",
+        "target": "checkpoint_root",
+        "target_hash": format!("sha256:{}", "11".repeat(32)),
+    });
+    for (case, anchors) in [
+        ("a null element", json!([Value::Null])),
+        ("an empty object", json!([{}])),
+        ("no target_hash", json!([{ "type": "rfc3161", "target": "checkpoint_root" }])),
+        (
+            "a non-canonical target_hash",
+            json!([{
+                "type": "rfc3161",
+                "target": "checkpoint_root",
+                "target_hash": "sha256:00FF",
+            }]),
+        ),
+        (
+            "a non-string type",
+            json!([{ "type": 1, "target": "checkpoint_root", "target_hash": format!("sha256:{}", "11".repeat(32)) }]),
+        ),
+        ("not an array", json!({ "type": "rfc3161" })),
+    ] {
+        let value = anchors.clone();
+        assert_rejects(
+            "statement-anchored-valid.ahl",
+            move |r| r["anchors"] = value,
+            |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("anchors")),
+            case,
+        );
+    }
+
+    // And an anchor that takes the shape verifies, carrying whatever else its own format needs
+    // — the ellipsis is not a licence this verifier withdraws.
+    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+    let mut carried = well_formed;
+    carried["token"] = json!("base64:AAAA");
+    receipt["anchors"] = json!([carried]);
+    verify_receipt(&receipt, &trust_policy())
+        .expect("a well-formed anchor is carried, not interpreted (I-D §7.1)");
+}
+
 /// I-D §7.1: "`source` is exactly one of `\"manifest-chain\"` or `\"local-policy\"`."
 ///
 /// There is no third token and no default. An unrecognized one is a schema failure over the
