@@ -2323,6 +2323,124 @@ fn a_key_object_carries_no_member_beyond_the_closed_set() {
     );
 }
 
+/// I-D §7.1: `binding` "is the object `{ \"entry_index\": <integer> }`", and "the member shapes
+/// shown above are normative".
+///
+/// One member, and it is an entry index — so a float, a negative, a string, or a companion
+/// member alongside it is a schema failure, on every entry the receipt carries.
+#[test]
+fn a_binding_is_exactly_one_entry_index() {
+    for (case, binding) in [
+        ("an extra member", json!({ "entry_index": 0, "ignored": true })),
+        ("a fractional entry index", json!({ "entry_index": 1.5 })),
+        ("a negative entry index", json!({ "entry_index": -1 })),
+        ("a stringly entry index", json!({ "entry_index": "0" })),
+        ("no entry index at all", json!({})),
+        ("not an object", json!(0)),
+    ] {
+        let value = binding.clone();
+        assert_rejects(
+            "statement-anchored-valid.ahl",
+            // The SELECTED log key: this is the binding the checkpoint's own signing key is
+            // resolved through, so nothing about it is incidental.
+            move |r| r["keys"]["log"][0]["binding"] = value,
+            |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("binding")),
+            case,
+        );
+    }
+}
+
+/// I-D §7.1: "The member shapes shown above are normative." The container marks its own
+/// extension points — an elided body (`{ ... }`) or a trailing `...` — and draws every other
+/// object complete.
+///
+/// So the complete ones are closed, and the elided ones are not. Both halves are the rule: a
+/// verifier that closed `claim_material` would reject claim types §7.2 defines and this build
+/// does not implement, and one that left `anchoring` open would accept a member no rule reads
+/// beside the ones every rule does.
+#[test]
+fn the_container_objects_drawn_complete_are_closed() {
+    for (case, path) in [
+        ("the receipt itself", vec!["extra"]),
+        ("claim", vec!["claim", "extra"]),
+        ("claim.record_subject", vec!["claim", "record_subject", "extra"]),
+        ("subject", vec!["subject", "extra"]),
+        ("keys", vec!["keys", "extra"]),
+        ("anchoring", vec!["anchoring", "extra"]),
+        ("anchoring.adaptor", vec!["anchoring", "adaptor", "extra"]),
+        ("anchoring.checkpoint", vec!["anchoring", "checkpoint", "extra"]),
+        ("a witness cosignature", vec!["anchoring", "witnesses", "0", "extra"]),
+        ("governance", vec!["governance", "extra"]),
+        ("governance.currency", vec!["governance", "currency", "extra"]),
+        ("a chain element", vec!["governance", "chain", "0", "extra"]),
+    ] {
+        // `record_subject` is absent from `statement-anchored`, so that one case uses a receipt
+        // whose claim type carries it.
+        let base = if path.contains(&"record_subject") {
+            "record-ingested-valid.ahl"
+        } else {
+            "statement-anchored-valid.ahl"
+        };
+        let path = path.clone();
+        assert_rejects(
+            base,
+            move |r| {
+                let mut cursor = r;
+                for step in &path[..path.len() - 1] {
+                    cursor = match step.parse::<usize>() {
+                        Ok(index) => &mut cursor[index],
+                        Err(_) => &mut cursor[*step],
+                    };
+                }
+                cursor[path[path.len() - 1]] = json!("not a member of this object");
+            },
+            |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("extra")),
+            case,
+        );
+    }
+
+    // A rotation-proof element, on the one receipt family that carries the member.
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| r["governance"]["rotation_proofs"][0]["extra"] = json!(true),
+        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("extra")),
+        "a rotation-proof element",
+    );
+
+    // The two envelopes need their identifiers repaired first, and that is the whole point of
+    // checking their shape: an envelope with an extra member whose ids were computed OVER that
+    // member satisfies §2.1's digest binding, so the member set is the only thing left to
+    // refuse it.
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| {
+            r["envelope"]["extra"] = json!("digest-bound, and still not a member");
+            r["subject"]["statement_id"] =
+                json!(statement_id(&r["envelope"]).expect("well-formed envelope"));
+            r["subject"]["entry_id"] = json!(entry_id(&r["envelope"]));
+        },
+        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("extra")),
+        "the subject envelope",
+    );
+    assert_rejects_anchored(
+        "statement-anchored-valid.ahl",
+        |r| {
+            r["governance"]["chain"][0]["envelope"]["extra"] =
+                json!("re-anchored, still not a member");
+        },
+        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("extra")),
+        "a chain element's envelope",
+    );
+
+    // And the elided bodies stay open, which is the other half of the rule. `assurance` is
+    // `{ ... }` in the container — §7.3 defines its members, not §7.1 — so this verifier reads
+    // the members §7.3 gives it and does not refuse a receipt over one §7.1 never fixed.
+    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+    receipt["claim"]["assurance"]["future_field"] = json!("reserved for a later revision");
+    verify_receipt(&receipt, &trust_policy())
+        .expect("an elided body is not closed by §7.1's normative shapes");
+}
+
 /// I-D §7.1: "The member shapes shown above are normative", and the container gives an anchor
 /// as `{ "type": ..., "target": ..., "target_hash": "sha256:<hex>", ... }`.
 ///
@@ -2402,7 +2520,7 @@ fn a_key_object_declares_one_of_the_two_sources_the_container_admits() {
             |r| {
                 r["keys"][group][0].as_object_mut().expect("key object").remove("binding");
             },
-            |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("`binding`")),
+            |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("binding")),
             "I-D §7.1 — binding is REQUIRED where source is manifest-chain",
         );
         // The member's SHAPE is normative wherever it appears, and that is the wider rule:
@@ -2412,7 +2530,7 @@ fn a_key_object_declares_one_of_the_two_sources_the_container_admits() {
             assert_rejects(
                 "statement-anchored-valid.ahl",
                 move |r| r["keys"][group][0]["binding"] = value,
-                |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("`binding`")),
+                |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("binding")),
                 "I-D §7.1 — a present binding is {\"entry_index\": <integer>}",
             );
         }
@@ -2425,7 +2543,7 @@ fn a_key_object_declares_one_of_the_two_sources_the_container_admits() {
             r["keys"]["witness"][0]["source"] = json!("local-policy");
             r["keys"]["witness"][0]["binding"] = json!({ "entry_index": "0" });
         },
-        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("`binding`")),
+        |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains("binding")),
         "I-D §7.1 — a present binding is shaped even where it is optional",
     );
 }
