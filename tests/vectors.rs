@@ -1261,6 +1261,12 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "governance-key-statement-malformed-valid-time-must-fail.ahl" => {
             matches!(error, ReceiptError::Malformed(detail) if detail.contains("valid_time"))
         }
+        "governance-key-rotation-proof-witness-key-unlisted-must-fail.ahl" => {
+            matches!(error, ReceiptError::KeyNotBound { entry_index: 0, .. })
+        }
+        "governance-key-rotation-proof-key-bound-to-incoming-must-fail.ahl" => {
+            matches!(error, ReceiptError::KeyNotBound { entry_index: 25, .. })
+        }
         "record-ingested-stale-manifest-must-fail.ahl" => {
             matches!(error, ReceiptError::SubjectManifestBindingInvalid(_))
         }
