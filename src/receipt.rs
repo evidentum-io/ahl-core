@@ -88,21 +88,39 @@ pub struct AdaptorCapabilities {
     pub consistency_proofs: bool,
 }
 
-/// A locally possessed adaptor profile: the hash of the document plus what it defines.
+/// A locally possessed adaptor profile: the exact bytes of the held document plus what it
+/// defines.
+///
+/// I-D §3.2, §7.5 step 2: a verifier "MUST recompute the digest over the artifact rather than
+/// trusting any value carried with it, and MUST reject a receipt whose pinned digest does not
+/// match the artifact held." This crate therefore stores the ARTIFACT itself — never a
+/// caller-asserted hash string, which a caller could get wrong (or leave stale after the held
+/// document changed) with nothing left to catch it — and computes the digest FROM it at
+/// resolution time ([`AdaptorProfile::hash`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdaptorProfile {
-    /// SHA-256 of the published profile document, as `sha256:<hex>`.
-    pub hash: String,
+    /// The exact bytes of the published profile document, held locally (core spec §3 item 6:
+    /// versioned, immutable, content-addressed).
+    pub document: Vec<u8>,
     /// What the document defines. Anything not listed here is unusable *under this profile*.
     pub capabilities: AdaptorCapabilities,
 }
 
 impl AdaptorProfile {
-    /// A profile that defines only what the corpus adaptor `ahl-test-log-v1` defines.
+    /// The SHA-256 digest of the held document, as `sha256:<hex>` — recomputed from
+    /// [`Self::document`] every time, never cached from or trusted as a value supplied
+    /// alongside it.
     #[must_use]
-    pub const fn minimal(hash: String) -> Self {
+    pub fn hash(&self) -> String {
+        sha256_hex(&self.document)
+    }
+
+    /// A profile that defines only what the corpus adaptor `ahl-test-log-v1` defines, over the
+    /// given held document.
+    #[must_use]
+    pub const fn minimal(document: Vec<u8>) -> Self {
         Self {
-            hash,
+            document,
             capabilities: AdaptorCapabilities { checkpoint_raw: false, consistency_proofs: false },
         }
     }
@@ -210,9 +228,32 @@ pub enum ReceiptError {
         field: &'static str,
     },
 
-    /// The adaptor profile is not locally possessed, or its hash differs (§5 step 2).
-    #[error("adaptor profile `{id}` is not locally possessed at the pinned hash")]
+    /// The pinned profile id is not one local policy holds a document for at all (§5 step 2).
+    ///
+    /// I-D §7.5 step 2 distinguishes this — a capability gap, `unverifiable` — from
+    /// [`Self::AdaptorHashMismatch`], where the profile IS held but its recomputed digest
+    /// disagrees with what the receipt pins — a stronger, `invalid` claim: the receipt names a
+    /// document policy can prove is not the one it trusts, not merely one it has never heard
+    /// of.
+    #[error("adaptor profile `{id}` is not locally possessed")]
     AdaptorUnknown {
+        /// The profile id the receipt pins.
+        id: String,
+    },
+
+    /// The pinned profile id IS locally held, but `anchoring.adaptor.hash` does not equal the
+    /// SHA-256 digest recomputed over the document actually held for it (I-D §3.2, §7.5 step
+    /// 2: "MUST recompute the digest over the artifact rather than trusting any value carried
+    /// with it, and MUST reject a receipt whose pinned digest does not match the artifact
+    /// held").
+    ///
+    /// Distinct from [`Self::AdaptorUnknown`] — see its own doc comment for why the I-D treats
+    /// the two differently.
+    #[error(
+        "adaptor profile `{id}` is held, but its recomputed digest does not match the hash \
+         `anchoring.adaptor` pins"
+    )]
+    AdaptorHashMismatch {
         /// The profile id the receipt pins.
         id: String,
     },
@@ -1064,136 +1105,34 @@ fn checkpoint_object(value: &Value) -> Result<&Value> {
     Ok(value)
 }
 
-/// The only adaptor profile this build carries a dedicated wire-format procedure for beyond
-/// the corpus's own test profile: `ahl-adaptor-atl-v1`.
-///
-/// I-D §3.2 leaves the checkpoint's signing form, and the `raw` framing, both profile-defined;
-/// this crate implements exactly two profiles' procedures — the corpus's own minimal
-/// `ahl-test-log-v1` (§5 of its document: `JCS(checkpoint minus "signature")`,
-/// [`crate::checkpoint_signing_bytes`]) and the pinned companion profile `ahl-adaptor-atl-v1`
-/// (its §6.1 "ATL binary form", below). Any OTHER profile id has no procedure here, by
-/// construction, and reaching one is the profile-limitation outcome
-/// ([`ReceiptError::AdaptorCapabilityUnsupported`]) — never a silent fallback to either
-/// documented form by default.
-const ATL_ADAPTOR_PROFILE_ID: &str = "ahl-adaptor-atl-v1";
-
-/// The corpus's own minimal test profile — the ONE other profile this build has a checkpoint
+/// The corpus's own minimal test profile — the ONE profile this VERIFIER has a checkpoint
 /// signing-bytes procedure for.
+///
+/// `ahl-adaptor-atl-v1` is deliberately NOT dispatched here even though
+/// `ahl_core::checkpoint_signing_bytes_for`/`ahl_core::reconcile_atl_checkpoint_raw` implement
+/// its checkpoint-blob mechanism and are unit-tested in `lib.rs`: that profile's leaf
+/// construction (adaptor §4.2, `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`) and
+/// origin-derived `log_id` (§7.1, the SHA-256 of a 16-byte Data Tree UUID) are not yet
+/// profile-dispatched anywhere ELSE in this crate — inclusion proofs and entry ids still use
+/// the one generic form every corpus here shares — so a checkpoint whose SIGNATURE verified
+/// correctly would still rest on entries hashed the wrong way. And adaptor §14: "Until this
+/// document is released as an immutable, openly published artifact… no manifest may pin it."
+/// A receipt naming `ahl-adaptor-atl-v1` is therefore refused as
+/// [`ReceiptError::AdaptorCapabilityUnsupported`] — a profile-limitation outcome, never
+/// `invalid` — regardless of what local policy holds for it.
 const TEST_ADAPTOR_PROFILE_ID: &str = "ahl-test-log-v1";
 
-/// Parse an `ahl-adaptor-atl-v1` §6.3 `checkpoint_time` rendering into its exact Unix
-/// nanosecond count.
+/// The bytes a checkpoint's own log signature is verified over.
 ///
-/// §6.3: "`checkpoint_time` MUST be the UTC rendering of the ATL nanosecond timestamp with
-/// EXACTLY NINE fractional digits and the `Z` suffix... verifiers MUST parse the nine
-/// fractional digits back to the exact u64 nanosecond value and MUST reject a `checkpoint_time`
-/// that is not in this form." This is stricter than the generic RFC 3339 grammar
-/// [`crate::bitemporal::parse_rfc3339`] accepts elsewhere in this crate (any digit count, any
-/// numeric offset) — deliberately: only THIS exact rendering round-trips to the 98-byte blob a
-/// producer actually signed (§6.1), so any other rendering is rejected outright here rather
-/// than "generously" converted.
-fn atl_checkpoint_time_nanos(value: &str) -> Result<u64> {
-    let invalid = || {
-        ReceiptError::Malformed(format!(
-            "checkpoint_time `{value}`: not the ATL adaptor's required rendering — exactly \
-             nine fractional-second digits and a literal `Z` (adaptor profile \
-             `ahl-adaptor-atl-v1` §6.3)"
-        ))
-    };
-    // "YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ" is exactly 30 ASCII bytes: a literal `.` at offset 19
-    // and a literal `Z` at the last byte, with nine ASCII digits between them — checked here
-    // directly rather than trusted to whatever the generic RFC 3339 parser happens to accept.
-    let bytes = value.as_bytes();
-    if bytes.len() != 30
-        || bytes[19] != b'.'
-        || bytes[29] != b'Z'
-        || !value[20..29].bytes().all(|b| b.is_ascii_digit())
-    {
-        return Err(invalid());
-    }
-    let parsed =
-        crate::bitemporal::parse_rfc3339("checkpoint_time", value).map_err(|_| invalid())?;
-    let seconds = u64::try_from(parsed.unix_timestamp()).map_err(|_| invalid())?;
-    let nanos = u64::from(parsed.nanosecond());
-    seconds.checked_mul(1_000_000_000).and_then(|s| s.checked_add(nanos)).ok_or_else(invalid)
-}
-
-/// Assemble the `ahl-adaptor-atl-v1` §6.1 98-byte blob FROM a receipt-borne checkpoint's own
-/// JSON members — `log_id`, `tree_size`, `checkpoint_time`, `root_hash` — under the §6.2
-/// mapping table. This is the exact reverse of parsing `raw`: the same layout, built from the
-/// JSON side rather than read from the wire side, so [`reconcile_atl_checkpoint_raw`] (compare
-/// a carried `raw` against it) and [`atl_checkpoint_signing_bytes`] (the bytes the log actually
-/// signs, §6.5 steps 1-2) share one assembler rather than two hand-written copies of the same
-/// layout.
-fn atl_checkpoint_blob(checkpoint: &Value) -> Result<[u8; 98]> {
-    let invalid = |detail: String| ReceiptError::Malformed(format!("checkpoint: {detail}"));
-
-    let log_id = checkpoint
-        .get("log_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid("`log_id` is REQUIRED".to_owned()))?;
-    let origin = hex::decode(log_id.strip_prefix("sha256:").unwrap_or(log_id))
-        .ok()
-        .filter(|bytes| bytes.len() == 32)
-        .ok_or_else(|| {
-            invalid(
-                "`log_id` is not a `sha256:` family string in lowercase hex (adaptor profile \
-                 `ahl-adaptor-atl-v1` §6.2)"
-                    .to_owned(),
-            )
-        })?;
-    let tree_size = checkpoint
-        .get("tree_size")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid("`tree_size` is REQUIRED, an entry count".to_owned()))?;
-    let checkpoint_time = checkpoint
-        .get("checkpoint_time")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid("`checkpoint_time` is REQUIRED".to_owned()))?;
-    let timestamp_ns = atl_checkpoint_time_nanos(checkpoint_time)?;
-    let root_hash = checkpoint
-        .get("root_hash")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid("`root_hash` is REQUIRED".to_owned()))?;
-    let root = hex::decode(root_hash.strip_prefix("sha256:").unwrap_or(root_hash))
-        .ok()
-        .filter(|bytes| bytes.len() == 32)
-        .ok_or_else(|| {
-            invalid(
-                "`root_hash` is not a `sha256:` family string in lowercase hex (adaptor \
-                 profile `ahl-adaptor-atl-v1` §6.2)"
-                    .to_owned(),
-            )
-        })?;
-
-    let mut blob = [0u8; 98];
-    blob[0..18].copy_from_slice(b"ATL-Protocol-v1-CP");
-    blob[18..50].copy_from_slice(&origin);
-    blob[50..58].copy_from_slice(&tree_size.to_le_bytes());
-    blob[58..66].copy_from_slice(&timestamp_ns.to_le_bytes());
-    blob[66..98].copy_from_slice(&root);
-    Ok(blob)
-}
-
-/// The bytes the log signs under `ahl-adaptor-atl-v1` (§6.1: "The Ed25519 signature is over
-/// these 98 bytes"; §6.5 steps 1-2: "Assemble the 98-byte blob... in the layout of §6.1").
-fn atl_checkpoint_signing_bytes(checkpoint: &Value) -> Result<Vec<u8>> {
-    Ok(atl_checkpoint_blob(checkpoint)?.to_vec())
-}
-
-/// The bytes a checkpoint's OWN log signature is verified over, dispatched on the resolved
-/// adaptor profile (I-D §3.2: the checkpoint's signing form is profile-defined).
-///
-/// `ahl-test-log-v1` signs `JCS(checkpoint minus "signature")` (its own §5);
-/// `ahl-adaptor-atl-v1` signs the 98-byte blob assembled by [`atl_checkpoint_blob`] (its §6.1,
-/// §6.5). Any OTHER profile has no procedure here — the crate does not know how that profile
-/// serializes a checkpoint for signing — so this returns the profile-limitation outcome rather
-/// than falling back to either documented form by default; a policy is never trusted to imply
-/// a signing procedure it did not itself resolve to one of these two ids.
+/// Narrower than the crate-level, profile-string-dispatched
+/// `ahl_core::checkpoint_signing_bytes_for`: this verifier only ever trusts the ONE profile
+/// procedure it actually stands behind ([`TEST_ADAPTOR_PROFILE_ID`]'s own, I-D §3.2). Any other
+/// profile id — `ahl-adaptor-atl-v1` included — is the profile-limitation outcome rather than
+/// a silent fallback to a form this crate cannot yet vouch for end to end (see
+/// [`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment).
 fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> Result<Vec<u8>> {
     match profile_id {
         TEST_ADAPTOR_PROFILE_ID => Ok(crate::checkpoint_signing_bytes(checkpoint)?),
-        ATL_ADAPTOR_PROFILE_ID => atl_checkpoint_signing_bytes(checkpoint),
         other => Err(ReceiptError::AdaptorCapabilityUnsupported {
             id: other.to_owned(),
             capability: "a checkpoint signing-bytes procedure",
@@ -1201,82 +1140,24 @@ fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> Result<
     }
 }
 
-/// Reconcile a receipt-borne checkpoint's optional `raw` framing against its own JSON members,
-/// under the pinned adaptor profile's wire-format definition (I-D §7.1, §7.5 step 2: "WHERE
-/// `raw` is carried it MUST parse to the same values as the JSON members... the JSON members
-/// govern the comparison, and a mismatch is `invalid`").
+/// Reject a receipt-borne checkpoint's optional `raw` framing (I-D §7.1, §7.5 step 2: "WHERE
+/// `raw` is carried it MUST parse to the same values as the JSON members").
 ///
-/// Shared by every receipt-borne checkpoint this crate reads — `anchoring.checkpoint`,
-/// `anchoring.later_checkpoint`, `claim_material.corpus_checkpoint` (via
-/// [`authenticate_checkpoint`]), and every `governance.rotation_proofs[].checkpoint` — so this
-/// rule cannot drift between call sites the way a capability boolean alone would let it.
-///
-/// A boolean capability flag is not reconciliation: `raw` present under a profile that claims
-/// `checkpoint_raw` but that this build cannot parse is refused as a POLICY configuration
-/// error before any receipt is even read (`verify_nested`'s adaptor-profile resolution), so by
-/// the time this function runs with `profile.capabilities.checkpoint_raw` true, `profile_id` is
-/// already known to name a profile this build parses. The `profile_id` check below is
-/// defensive, not load-bearing — this function makes no other assumption about how it was
-/// reached, and refuses rather than guesses if that invariant is ever wrong.
-fn reconcile_checkpoint_raw(
-    checkpoint: &Value,
-    profile: &AdaptorProfile,
-    profile_id: &str,
-) -> Result<()> {
-    let Some(raw) = checkpoint.get("raw").and_then(Value::as_str) else {
-        return Ok(());
-    };
-    if !profile.capabilities.checkpoint_raw {
+/// This build wires NO profile's `raw` parser into the verifier — `ahl-test-log-v1` defines no
+/// binary framing at all (its own §5), and `ahl-adaptor-atl-v1`'s is deliberately not reachable
+/// here either (see [`TEST_ADAPTOR_PROFILE_ID`]'s doc comment: leaf/origin construction for
+/// that profile is not yet dispatched anywhere in this crate, and the profile document is not
+/// yet released, adaptor §14). So `raw`'s mere presence is always the profile-limitation
+/// outcome, unconditionally — `verify_nested`'s policy-level check already refuses a policy
+/// that claims `checkpoint_raw: true` for ANY profile before a receipt is even read, so
+/// `profile`/`profile_id` are accepted here only to name the profile in the error, never to
+/// branch on what the policy claims.
+fn reconcile_checkpoint_raw(checkpoint: &Value, profile_id: &str) -> Result<()> {
+    if checkpoint.get("raw").is_some() {
         return Err(ReceiptError::AdaptorCapabilityUnsupported {
             id: profile_id.to_owned(),
             capability: "a binary checkpoint framing for `checkpoint.raw`",
         });
-    }
-    if profile_id != ATL_ADAPTOR_PROFILE_ID {
-        return Err(ReceiptError::AdaptorCapabilityUnsupported {
-            id: profile_id.to_owned(),
-            capability: "a binary checkpoint framing for `checkpoint.raw`",
-        });
-    }
-    reconcile_atl_checkpoint_raw(checkpoint, raw)
-}
-
-/// The actual `ahl-adaptor-atl-v1` §6.4/§6.5 reconciliation: decode `raw`, assemble the blob
-/// its JSON sibling members imply ([`atl_checkpoint_blob`]), and require the two to be
-/// byte-for-byte IDENTICAL (§6.5 step 3: "compare it byte for byte with the assembled blob; a
-/// mismatch is a rejection") — not a looser field-by-field comparison that could accept a
-/// `raw` differing only in, say, unused padding no such blob has.
-fn reconcile_atl_checkpoint_raw(checkpoint: &Value, raw: &str) -> Result<()> {
-    let invalid = |detail: String| ReceiptError::Malformed(format!("checkpoint raw: {detail}"));
-
-    let encoded = raw.strip_prefix("base64:").ok_or_else(|| {
-        invalid(
-            "`raw` MUST be `base64:<...>` (adaptor profile `ahl-adaptor-atl-v1` §6.4)".to_owned(),
-        )
-    })?;
-    let bytes = B64
-        .decode(encoded)
-        .map_err(|source| invalid(format!("`raw` does not decode as base64: {source}")))?;
-    let Ok(carried): core::result::Result<[u8; 98], _> = bytes.try_into() else {
-        return Err(invalid(
-            "`raw` MUST decode to exactly 98 octets (adaptor profile `ahl-adaptor-atl-v1` §6.1)"
-                .to_owned(),
-        ));
-    };
-    if carried[0..18] != *b"ATL-Protocol-v1-CP" {
-        return Err(invalid(
-            "`raw`'s magic is not `ATL-Protocol-v1-CP` (adaptor profile `ahl-adaptor-atl-v1` \
-             §6.1)"
-                .to_owned(),
-        ));
-    }
-    let assembled = atl_checkpoint_blob(checkpoint)?;
-    if carried != assembled {
-        return Err(invalid(
-            "`raw` does not equal the blob assembled from the JSON checkpoint members — the \
-             JSON members govern (adaptor profile `ahl-adaptor-atl-v1` §6.2, §6.4, §6.5)"
-                .to_owned(),
-        ));
     }
     Ok(())
 }
@@ -1500,10 +1381,10 @@ fn check_adaptor_binding(
     let adaptor = obj(active_log, "adaptor")?;
     let pinned_id = text(adaptor, "id")?;
     let pinned_hash = text(adaptor, "hash")?;
-    if pinned_id != profile_id || pinned_hash != profile.hash {
+    if pinned_id != profile_id || pinned_hash != profile.hash() {
         return Err(ReceiptError::AdaptorBindingInvalid {
             pinned: format!("{pinned_id} ({pinned_hash})"),
-            carried: format!("{profile_id} ({})", profile.hash),
+            carried: format!("{profile_id} ({})", profile.hash()),
         });
     }
     Ok(())
@@ -1918,7 +1799,7 @@ fn verify_rotation_proof(
     // "WHERE `raw` is present, the verifier MUST check that it parses to the same values" —
     // the same reconciliation `verify_checkpoint` applies to `anchoring.checkpoint.raw`
     // applies here, identically (I-D §7.1).
-    reconcile_checkpoint_raw(checkpoint, profile, profile_id)?;
+    reconcile_checkpoint_raw(checkpoint, profile_id)?;
     let tree_size = number(checkpoint, "tree_size")?;
     if tree_size <= manifest_entry_index {
         return Err(invalid(format!(
@@ -2558,7 +2439,7 @@ fn verify_checkpoint(
     // document, not of this verifier — `ahl-test-log-v1` defines no framing, so receipts under
     // it may carry none — but WHERE it is usable, this actually parses and compares it rather
     // than merely gating on the capability flag.
-    reconcile_checkpoint_raw(checkpoint, profile, profile_id)?;
+    reconcile_checkpoint_raw(checkpoint, profile_id)?;
 
     let (log_keys, log_attempted) = bind_keys_by_group(receipt, governance, active_index, "log")?;
     let (witness_keys, witness_attempted) =
@@ -2660,7 +2541,20 @@ fn verify_continued_history(
     budget: &mut Budget,
 ) -> Result<bool> {
     match (anchoring.get("later_checkpoint"), anchoring.get("consistency_path")) {
-        (None, None) => return Ok(false),
+        (None, None) => {
+            // I-D §7.1: `later_witnesses` is "Present if and only if `later_checkpoint` is
+            // carried" — checked here too, before either member's own content is read, so a
+            // stray `later_witnesses` with no `later_checkpoint` at all cannot slip past this
+            // gate unexamined.
+            if anchoring.get("later_witnesses").is_some() {
+                return Err(ReceiptError::Malformed(
+                    "`anchoring.later_witnesses` is present without `later_checkpoint` (I-D \
+                     §7.1: present if and only if `later_checkpoint` is carried)"
+                        .to_owned(),
+                ));
+            }
+            return Ok(false);
+        }
         (Some(_), None) => {
             return Err(ReceiptError::Malformed(
                 "`anchoring.consistency_path` is REQUIRED whenever `later_checkpoint` is \
@@ -2677,6 +2571,13 @@ fn verify_continued_history(
         }
         (Some(_), Some(_)) => {}
     }
+    let later_witnesses = anchoring.get("later_witnesses").ok_or_else(|| {
+        ReceiptError::Malformed(
+            "`anchoring.later_witnesses` is REQUIRED whenever `later_checkpoint` is carried \
+             (I-D §7.1)"
+                .to_owned(),
+        )
+    })?;
 
     let later = checkpoint_object(obj(anchoring, "later_checkpoint")?)?;
     let to_size = number(later, "tree_size")?;
@@ -2685,15 +2586,8 @@ fn verify_continued_history(
         // continued history; it is the size regression a witness refuses to cosign over.
         return Err(ReceiptError::ConsistencyPathInvalid);
     }
-    authenticate_checkpoint(
-        receipt,
-        governance,
-        later,
-        anchoring.get("later_checkpoint_witnesses"),
-        profile,
-        profile_id,
-        budget,
-    )?;
+    authenticate_checkpoint(receipt, governance, later, profile, profile_id, budget)?;
+    verify_later_witnesses(receipt, governance, later, later_witnesses, budget)?;
 
     let to_root = parse_hash_hex(text(later, "root_hash")?)?;
     let path = path_strings(anchoring, "consistency_path")?;
@@ -2889,20 +2783,30 @@ fn verify_nested(
     let subject_type = statement_type(payload)?.to_owned();
 
     // --- §5 step 2: adaptor profile -------------------------------------------------
+    // I-D §3.2, §7.5 step 2: "MUST recompute the digest over the artifact rather than trusting
+    // any value carried with it, and MUST reject a receipt whose pinned digest does not match
+    // the artifact held." Two DIFFERENT facts, two DIFFERENT outcomes: the profile id itself
+    // not being held at all is `unverifiable` ([`ReceiptError::AdaptorUnknown`]); the profile
+    // being held but its RECOMPUTED digest disagreeing with what the receipt pins is `invalid`
+    // ([`ReceiptError::AdaptorHashMismatch`]) — the receipt names a document policy can prove
+    // is not the one it trusts, never conflated into the same outcome as simply not knowing
+    // the profile.
     let adaptor = obj(obj(receipt, "anchoring")?, "adaptor")?;
     let adaptor_id = text(adaptor, "id")?;
     let profile = policy
         .adaptor_profiles
         .get(adaptor_id)
-        .filter(|profile| profile.hash == text(adaptor, "hash").unwrap_or_default())
         .ok_or_else(|| ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() })?;
+    if profile.hash() != text(adaptor, "hash")? {
+        return Err(ReceiptError::AdaptorHashMismatch { id: adaptor_id.to_owned() });
+    }
     // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values" — a
-    // capability boolean is not itself reconciliation. A policy asserting `checkpoint_raw:
-    // true` for a profile this build has no parser for ([`ATL_ADAPTOR_PROFILE_ID`] is the
-    // only one it carries one for) can never make good on that claim, so it is refused here,
-    // once, as a POLICY defect — never silently downgraded to "accept `raw` unparsed" for
-    // every receipt this policy verifies.
-    if profile.capabilities.checkpoint_raw && adaptor_id != ATL_ADAPTOR_PROFILE_ID {
+    // capability boolean is not itself reconciliation. This build wires NO profile's `raw`
+    // parser into the verifier ([`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment), so a policy
+    // asserting `checkpoint_raw: true` for ANY profile can never make good on that claim, and
+    // is refused here, once, as a POLICY defect — never silently downgraded to "accept `raw`
+    // unparsed" for every receipt this policy verifies.
+    if profile.capabilities.checkpoint_raw {
         return Err(ReceiptError::AdaptorProfileMisconfigured {
             id: adaptor_id.to_owned(),
             capability: "a binary checkpoint framing for `checkpoint.raw`",
@@ -3955,7 +3859,6 @@ fn authenticate_checkpoint(
     receipt: &Value,
     governance: &Governance<'_>,
     declared: &Value,
-    witness_cosignatures: Option<&Value>,
     profile: &AdaptorProfile,
     profile_id: &str,
     budget: &mut Budget,
@@ -3982,7 +3885,7 @@ fn authenticate_checkpoint(
     // checkpoint gets, applied identically here — `declared` is `anchoring.later_checkpoint`
     // or `propagation-complete`'s own declared checkpoint D, both receipt-borne checkpoints in
     // the same form.
-    reconcile_checkpoint_raw(declared, profile, profile_id)?;
+    reconcile_checkpoint_raw(declared, profile_id)?;
 
     // The log key resolves against the manifest active for this checkpoint's *own* tree size,
     // and its `keys.log` entry binds to that same manifest version (format §2.2) — the normal
@@ -4008,53 +3911,69 @@ fn authenticate_checkpoint(
         return Err(ReceiptError::CheckpointSignatureInvalid);
     }
 
-    // I-D §3.3, §7.5: "At L3 a verifier accepts a checkpoint C only with a valid witness
-    // cosignature" — a rule about accepting ANY checkpoint C at L3, not merely the primary
-    // one, so it applies identically here: `declared` is `anchoring.later_checkpoint` or
-    // propagation's own declared D, and either one, where the manifest active for ITS OWN
-    // tree size is L3, needs a verifying cosignature the same way. The cosignatures travel in
-    // `witnesses`, a SIBLING to `declared` (`anchoring.later_checkpoint_witnesses` /
-    // `claim_material.corpus_checkpoint_witnesses`) rather than nested inside it: the log
-    // signs `declared` itself (`checkpoint_signing_bytes_for`, above), and a witness cosigns
-    // that SAME signed object verbatim (adaptor §6/§11: "the signed checkpoint object,
-    // INCLUDING its signature member") — nesting the cosignatures INTO `declared` would
-    // change the very bytes both the log's signature and each cosignature's own preimage are
-    // computed over.
-    if active_manifest.get("level").and_then(Value::as_str) == Some("L3") {
-        let (witness_keys, witness_attempted) =
-            bind_keys_by_group(receipt, governance, active_index, "witness")?;
-        let candidates = match witness_cosignatures {
-            None => &[][..],
-            Some(value) => value.as_array().ok_or_else(|| {
-                ReceiptError::Malformed(
-                    "checkpoint witnesses, where present, MUST be an array".to_owned(),
-                )
-            })?,
-        };
-        let mut witnessed = false;
-        for cosignature in candidates {
-            let cosignature = witness_cosignature_object(cosignature)?;
-            let witness_id = text(cosignature, "witness_id")?.to_owned();
-            let key_id = text(cosignature, "key_id")?;
-            let pubkey = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
-                key_id: key_id.to_owned(),
-                entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
-            })?;
-            budget.spend(1)?;
-            if !verify_signature(
-                &decode_pubkey(pubkey)?,
-                &cosignature_bytes(declared, &witness_id),
-                text(cosignature, "cosignature")?,
-            )? {
-                return Err(ReceiptError::WitnessCosignatureInvalid { witness_id });
-            }
-            witnessed = true;
-        }
-        if !witnessed {
-            return Err(ReceiptError::CheckpointUnwitnessed { tree_size });
-        }
-    }
+    Ok(())
+}
 
+/// Verify `anchoring.later_witnesses[]` against `later_checkpoint` (I-D §7.1: "Present if and
+/// only if `later_checkpoint` is carried. An array in the shape of `anchoring.witnesses[]`,
+/// each element a cosignature over `later_checkpoint` rather than over `anchoring.checkpoint`,
+/// and validated under the manifest version active for `later_checkpoint.tree_size`... At L3…
+/// a receipt asserting `continued_history` MUST carry at least one element that verifies, and
+/// one that does not is `invalid` for that assertion; below L3 the array MAY be empty").
+///
+/// Distinct from `anchoring.checkpoint`'s own witnesses in exactly one respect: WHICH bytes a
+/// cosignature is computed over (`later_checkpoint`, not the primary checkpoint) and WHICH
+/// manifest version's witness key set validates it (the one active for `later_checkpoint`'s
+/// own `tree_size`). The cosignatures travel as a SIBLING to `later_checkpoint`, never nested
+/// inside it: the log signs `later_checkpoint` itself, and a witness cosigns that SAME signed
+/// object verbatim (adaptor §6/§11: "the signed checkpoint object, INCLUDING its signature
+/// member") — nesting cosignatures into it would change the very bytes both the log's
+/// signature and each cosignature's own preimage are computed over.
+///
+/// This has NO counterpart for `propagation-complete`'s declared checkpoint D: format §7.2
+/// authenticates D "by either a consistency proof from D to the receipt's checkpoint or
+/// recomputation of D's prefix root from the enumerated prefix" — no cosignature requirement
+/// on D at all, so [`authenticate_checkpoint`] (shared by both D and `later_checkpoint`) never
+/// touches witnesses, and this function exists only for `later_checkpoint`.
+fn verify_later_witnesses(
+    receipt: &Value,
+    governance: &Governance<'_>,
+    later_checkpoint: &Value,
+    later_witnesses: &Value,
+    budget: &mut Budget,
+) -> Result<()> {
+    let tree_size = number(later_checkpoint, "tree_size")?;
+    let (active_index, active_manifest) = governance.active_for(tree_size)?;
+    let candidates = later_witnesses.as_array().ok_or_else(|| {
+        ReceiptError::Malformed(
+            "`anchoring.later_witnesses` MUST be an array (I-D §7.1)".to_owned(),
+        )
+    })?;
+
+    let (witness_keys, witness_attempted) =
+        bind_keys_by_group(receipt, governance, active_index, "witness")?;
+    let mut witnessed = false;
+    for cosignature in candidates {
+        let cosignature = witness_cosignature_object(cosignature)?;
+        let witness_id = text(cosignature, "witness_id")?.to_owned();
+        let key_id = text(cosignature, "key_id")?;
+        let pubkey = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
+            key_id: key_id.to_owned(),
+            entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
+        })?;
+        budget.spend(1)?;
+        if !verify_signature(
+            &decode_pubkey(pubkey)?,
+            &cosignature_bytes(later_checkpoint, &witness_id),
+            text(cosignature, "cosignature")?,
+        )? {
+            return Err(ReceiptError::WitnessCosignatureInvalid { witness_id });
+        }
+        witnessed = true;
+    }
+    if active_manifest.get("level").and_then(Value::as_str) == Some("L3") && !witnessed {
+        return Err(ReceiptError::CheckpointUnwitnessed { tree_size });
+    }
     Ok(())
 }
 
@@ -4093,11 +4012,14 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
             member: "tree_size".to_owned(),
         });
     }
+    // Format §7.2: D is authenticated "by either a consistency proof from D to the receipt's
+    // checkpoint or recomputation of D's prefix root from the enumerated prefix" — no
+    // cosignature requirement on D at all, unlike `anchoring.later_checkpoint`
+    // ([`verify_later_witnesses`]).
     authenticate_checkpoint(
         ctx.receipt,
         ctx.governance,
         carried_d,
-        material.get("corpus_checkpoint_witnesses"),
         ctx.profile,
         ctx.profile_id,
         budget,
@@ -4359,7 +4281,8 @@ mod tests {
         Budget, Limits, ReceiptError, TEST_ADAPTOR_PROFILE_ID,
     };
     use crate::{
-        checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, tree_root, TestKey,
+        checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, sha256_hex, tree_root,
+        TestKey,
     };
 
     /// I-D §6.2: "Each manifest version's log and witness key objects replace the prior set in
@@ -4467,7 +4390,8 @@ mod tests {
         let log_key = TestKey::from_seed_hex("log-1", &"11".repeat(32)).expect("test key");
         let witness_key = TestKey::from_seed_hex("witness-1", &"22".repeat(32)).expect("test key");
 
-        let profile_hash = format!("sha256:{}", "cc".repeat(32));
+        let document = b"a synthetic adaptor profile document".to_vec();
+        let profile_hash = sha256_hex(&document);
         let outgoing_manifest = json!({
             "log": {
                 "log_id": format!("sha256:{}", "dd".repeat(32)),
@@ -4517,8 +4441,7 @@ mod tests {
             ],
         });
 
-        let profile =
-            AdaptorProfile { hash: profile_hash, capabilities: AdaptorCapabilities::default() };
+        let profile = AdaptorProfile { document, capabilities: AdaptorCapabilities::default() };
         let mut budget = Budget::new(Limits::default());
         let result = verify_rotation_proof(
             &element,
