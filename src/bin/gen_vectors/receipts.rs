@@ -223,7 +223,7 @@ impl Spec<'_> {
             block
         });
 
-        json!({
+        let mut receipt = json!({
             "ahl_receipt_version": "2",
             "spec_version": "0.4.0",
             "claim": claim,
@@ -252,17 +252,18 @@ impl Spec<'_> {
                     }))
                     .collect::<Vec<_>>(),
                 "currency": { "mode": self.currency_mode, "material": self.currency_material },
-                // I-D §7.1: REQUIRED iff the carried chain contains a governance-key rotation.
-                // This corpus rotates exactly once, at manifest v2 (entry 25), so any chain
-                // carrying it needs exactly this one element.
-                "rotation_proofs": if self.chain.contains(&25) {
-                    json!([ corpus.rotation_proof_element(keys) ])
-                } else {
-                    json!([])
-                },
             },
             "claim_material": self.claim_material,
-        })
+        });
+        // I-D §7.1: "REQUIRED IF AND ONLY IF the carried chain contains a governance-key
+        // rotation... The member is ABSENT where the chain rotates neither set" — never present
+        // as an empty array. This corpus rotates exactly once, at manifest v2 (entry 25), so
+        // any chain carrying it needs exactly this one element, and no other chain carries the
+        // member at all.
+        if self.chain.contains(&25) {
+            receipt["governance"]["rotation_proofs"] = json!([corpus.rotation_proof_element(keys)]);
+        }
+        receipt
     }
 }
 
@@ -1488,16 +1489,16 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             &governance_state_valid,
             |proofs| proofs.as_array_mut().expect("rotation_proofs array").clear(),
             "MUST FAIL. `governance.rotation_proofs` is emptied, so the manifest v2 rotation \
-             the carried chain contains has no element proving it. I-D §7.1: \
-             `governance.rotation_proofs[]` is REQUIRED IFF the chain contains a \
-             governance-key rotation, and its absence — indistinguishable here from an \
-             empty array — is `invalid`, not a capability gap.",
+             the carried chain contains has no element proving it. I-D §7.1: the carried \
+             `manifest_entry_index` sequence (here empty) must equal EXACTLY the ascending \
+             sequence of rotating manifests' entry indexes (here `[25]`) — checked as a \
+             collection-level rule before any element's own content.",
         ),
         expect: Expect::Reject {
-            rule: "I-D §7.1 — a governance-key rotation the chain contains requires a \
-                   rotation_proofs[] element",
+            rule: "I-D §7.1 — rotation_proofs[]'s manifest_entry_index sequence must equal \
+                   exactly the rotating manifests' entry indexes",
             matches: |e| {
-                matches!(e, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, .. })
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not equal EXACTLY"))
             },
         },
     });
@@ -1507,15 +1508,93 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             &governance_state_valid,
             |proofs| proofs[0]["manifest_entry_index"] = json!(24),
             "MUST FAIL. The element's `manifest_entry_index` is changed from 25 (the rotating \
-             manifest's real entry index) to 24, so no element in `rotation_proofs[]` names \
-             the manifest that actually rotates — identical, from the verifier's side, to the \
-             element being absent altogether.",
+             manifest's real entry index) to 24, so the carried sequence `[24]` does not equal \
+             the expected `[25]` — caught by the SAME collection-level sequence check as the \
+             empty-member case, before any element's own content is read.",
         ),
         expect: Expect::Reject {
-            rule: "I-D §7.1 — a rotation_proofs[] element's manifest_entry_index must name the \
-                   rotating manifest",
+            rule: "I-D §7.1 — rotation_proofs[]'s manifest_entry_index sequence must equal \
+                   exactly the rotating manifests' entry indexes",
             matches: |e| {
-                matches!(e, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, .. })
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not equal EXACTLY"))
+            },
+        },
+    });
+    out.push(Vector {
+        file: "governance-key-rotation-proof-empty-on-non-rotating-must-fail.ahl",
+        receipt: {
+            // `governance-state-not-current-must-fail.ahl`'s own base (chain [0, 9], no
+            // rotation) is itself a MUST-FAIL vector for a different reason, so build a fresh,
+            // otherwise-valid, non-rotating receipt to carry this one defect alone.
+            let mut bad = Spec {
+                claim_type: "governance-state",
+                subject_index: 0,
+                anchor: cp20,
+                chain: vec![0, 9],
+                record_subject: None,
+                competing: "not-checked",
+                content_binding: "none",
+                currency_mode: "enumerated",
+                currency_material: corpus.enumeration(0, 20, cp20),
+                claim_material: json!({ "target_index": 15 }),
+                producer_keys: None,
+                note: "MUST FAIL. `governance.rotation_proofs` is present (as an empty array) \
+                       even though this chain — genesis plus the entry-9 `key` statement only \
+                       — rotates neither the log nor the witness key set. I-D §7.1: \"The \
+                       member is ABSENT where the chain rotates neither set\"; a receipt \
+                       carrying it regardless, even empty, is invalid."
+                    .to_owned(),
+            }
+            .build(corpus, keys);
+            bad["governance"]["rotation_proofs"] = json!([]);
+            bad
+        },
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — rotation_proofs is ABSENT where the chain rotates neither set",
+            matches: |e| {
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("rotates neither"))
+            },
+        },
+    });
+    out.push(Vector {
+        file: "governance-key-rotation-proof-duplicate-must-fail.ahl",
+        receipt: rotation_proof_case(
+            &governance_state_valid,
+            |proofs| {
+                let element = proofs[0].clone();
+                proofs.as_array_mut().expect("rotation_proofs array").push(element);
+            },
+            "MUST FAIL. The genuine element for manifest entry index 25 is duplicated, so the \
+             carried sequence is `[25, 25]` against an expected `[25]` — I-D §7.1 fixes \
+             exactly ONE element per rotation.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — one element per rotation, no duplicates",
+            matches: |e| {
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not equal EXACTLY"))
+            },
+        },
+    });
+    out.push(Vector {
+        file: "governance-key-rotation-proof-extra-must-fail.ahl",
+        receipt: rotation_proof_case(
+            &governance_state_valid,
+            |proofs| {
+                // A second element for entry 0 — the genesis manifest, which never rotates
+                // anything relative to itself — appended after the genuine one for entry 25.
+                let mut extra = proofs[0].clone();
+                extra["manifest_entry_index"] = json!(0);
+                proofs.as_array_mut().expect("rotation_proofs array").push(extra);
+            },
+            "MUST FAIL. An extra element names manifest entry index 0, which never rotates \
+             anything (it is the genesis manifest, with no predecessor to differ from), so \
+             the carried sequence `[25, 0]` neither equals the expected `[25]` nor is even in \
+             ascending order.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — no extra elements for manifests that do not rotate",
+            matches: |e| {
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not equal EXACTLY"))
             },
         },
     });
@@ -1562,6 +1641,59 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    OUTGOING witness set",
             matches: |e| {
                 matches!(e, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, .. })
+            },
+        },
+    });
+    out.push(Vector {
+        file: "governance-key-rotation-proof-checkpoint-missing-log-id-must-fail.ahl",
+        receipt: rotation_proof_case(
+            &governance_state_valid,
+            |proofs| {
+                proofs[0]["checkpoint"]
+                    .as_object_mut()
+                    .expect("rotation-proof checkpoint object")
+                    .remove("log_id");
+            },
+            "MUST FAIL. The element's `checkpoint` is missing `log_id`. I-D §7.1: a \
+             rotation-proof checkpoint is \"in the receipt-borne form defined above\" — the \
+             SAME strict shape `anchoring.checkpoint` takes, `log_id` REQUIRED among the rest \
+             — not a looser one that happens to carry only what this build reads.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — the rotation-proof checkpoint takes the receipt-borne shape, \
+                   log_id included",
+            matches: |e| matches!(e, ReceiptError::Malformed(detail) if detail.contains("log_id")),
+        },
+    });
+    out.push(Vector {
+        file: "governance-key-rotation-proof-malformed-witness-entry-must-fail.ahl",
+        receipt: rotation_proof_case(
+            &governance_state_valid,
+            |proofs| {
+                // A SECOND witnesses[] entry, missing `cosigned_at` — appended after the one
+                // genuine, correctly-cosigning entry already present.
+                let mut malformed = proofs[0]["witnesses"][0].clone();
+                malformed
+                    .as_object_mut()
+                    .expect("witness cosignature object")
+                    .remove("cosigned_at");
+                proofs[0]["witnesses"]
+                    .as_array_mut()
+                    .expect("witnesses array")
+                    .push(malformed);
+            },
+            "MUST FAIL. The element's `witnesses` array carries two entries: the genuine \
+             outgoing-witness cosignature, and a second entry missing `cosigned_at`. I-D §7.1: \
+             `witnesses` is \"an array in the shape of `anchoring.witnesses[]`\" — EVERY \
+             element of that array is held to the shape, not merely the one a match happens to \
+             reach; a verifier that stopped at the first cosignature that verifies would wrongly \
+             accept this receipt.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — every rotation-proof witnesses[] entry takes the \
+                   anchoring.witnesses[] shape, cosigned_at included",
+            matches: |e| {
+                matches!(e, ReceiptError::Malformed(detail) if detail.contains("cosigned_at"))
             },
         },
     });
