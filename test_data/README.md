@@ -36,14 +36,28 @@ rather than silently mis-verifying wherever the gap could otherwise be mistaken 
     `content_binding: "none"`, exactly as I-D §6.3's conformance table requires. No vector in
     this corpus currently exercises an unimplemented identifier end to end.
 
+Also not yet in the corpus: this corpus's ONE governance-key rotation (manifest v2, entry 25)
+rotates the WITNESS set only — the log checkpoint-signing key never itself rotates anywhere in
+this corpus. `governance-key-rotation-proof-incoming-key-must-fail.ahl` therefore substitutes a
+witness key for the rotation-proof checkpoint's signer to demonstrate "not a key of the outgoing
+set", which exercises the same code path (`log_key_set` membership) a genuine incoming LOG key
+would, but is not the same fact: a verifier that wrongly accepted an INCOMING log key
+specifically is not what that vector rules out. A second, LOG-rotating manifest version (a
+third manifest, or a variant corpus branch) with its own outgoing/incoming-key positive and
+negative pair — and, since this corpus would then carry two governance-key rotations, a genuine
+"out-of-order pair" `rotation_proofs[]` negative alongside it — is the intended follow-up.
+
 `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1) IS implemented: a manifest whose
 log or witness key objects, compared as sets, differ from its predecessor's is a GOVERNANCE-KEY
 ROTATION, and its rotation-proof element is verified under the OUTGOING key state — the
 checkpoint signature under the outgoing log key, the manifest's inclusion under that checkpoint,
 and, AT L3, a cosignature under the outgoing witness set. The corpus's manifest version 2 (entry
 25) rotates the witness key set, and every vector whose chain carries it now carries a genuine
-`governance.rotation_proofs[]` element proving that transition; `governance-key-rotation-proof-\
-*-must-fail.ahl` cover four ways such an element can fail.
+`governance.rotation_proofs[]` element proving that transition; the nine
+`governance-key-rotation-proof-*-must-fail.ahl` vectors cover the collection-level rules (I-D
+§7.1: required iff a rotation is present, one element per rotation, ascending order, no
+duplicates, no extras) and the per-element ones (checkpoint and witness shape, the outgoing-key
+requirement).
 
 ## Layout
 
@@ -52,7 +66,7 @@ and, AT L3, a cosignature under the outgoing witness set. The corpus's manifest 
 | `adaptor/` | The test adaptor profile document, content-addressed and pinned in both manifest versions |
 | `vectors/statements/` | The 32-entry toy corpus, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
-| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 28, 29, 30 and 32, each cosigned by the witness its active manifest version declares |
+| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32 and 33, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
 | `vectors/closure/` | Six closure scenarios (see below) |
 | `vectors/witness/` | Signed witness refusal evidence carrying two conflicting checkpoints (spec §3.3 step 3) |
 | `receipts/` | One positive and at least one negative receipt per claim-type registry entry, plus `index.json` naming the expected outcome, the rule each negative must trip, and the trust policy those outcomes assume |
@@ -60,7 +74,7 @@ and, AT L3, a cosignature under the outgoing witness set. The corpus's manifest 
 
 ## The scenarios
 
-The corpus is 32 anchored entries carrying these interlocking scenarios:
+The corpus is 33 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -101,7 +115,19 @@ The corpus is 32 anchored entries carrying these interlocking scenarios:
 
 Entry 25 anchors a second manifest version that rotates the witness key set in full and drops a
 producer key from its snapshot, chained to its predecessor by *entry* id; entries 26 onward are
-anchored under it.
+anchored under it. I-D §7.1 requires a `governance.rotation_proofs[]` element proving this
+transition under the OUTGOING witness state (witness-1): `cp26` (tree size 26) is that proof's
+own checkpoint, deliberately cosigned by witness-1 even though it postdates entry 25, exactly
+the "operator kept signing under the outgoing key until cutover" case I-D §7.1 describes as an
+ordinary artifact of a real log rather than something a producer must manufacture.
+
+8. **Stale manifest binding.** Entry 32 is a genuine, fully anchored, genuinely signed ingestion
+   whose payload nonetheless names manifest v1 (genesis) as governing it, even though v2 (entry
+   25) is the manifest ACTIVE at entry 32 (I-D §2.2). `record-ingested-stale-manifest-must-fail.ahl`
+   proves this is `invalid` however genuine the rest of the statement is — real signature, real
+   inclusion, real record — and needs a genuinely anchored statement rather than a mutated
+   fixture, because mutating any already-anchored envelope invalidates its own inclusion path
+   before the rule under test is ever reached.
 
 ## Regenerating
 
