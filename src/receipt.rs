@@ -342,26 +342,19 @@ pub enum ReceiptError {
 
     /// A carried governance chain rotates a log or witness key set (I-D §7.1 "governance-key
     /// rotation": a manifest whose log checkpoint-signing key objects or whose witness key
-    /// objects differ from its predecessor's), and this build does not implement
-    /// `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1 "the rotation-anchoring
-    /// rule").
+    /// objects, compared as SETS, differ from its predecessor's), and either
+    /// `governance.rotation_proofs[]` carries no element for it, or the element fails a
+    /// requirement I-D §7.1 / §7.5.1 4b(M) states for it.
     ///
-    /// The I-D's own rule for this case is `invalid` when the proof is absent or fails
-    /// (I-D §7.1: "A receipt that omits `governance.rotation_proofs[]` where the carried chain
+    /// I-D §7.1: "A receipt that omits `governance.rotation_proofs[]` where the carried chain
     /// rotates either governance key set, or that carries an element failing any requirement
-    /// above, is `invalid`"). This build cannot distinguish an absent proof from one it simply
-    /// cannot check, so it refuses BOTH cases outright under this distinct variant rather than
-    /// silently reporting either as verified, or misreporting a possibly-valid rotation as a
-    /// definite schema defect.
-    #[error(
-        "governance-key rotation at manifest entry index {manifest_entry_index} is not \
-         supported by this build: `governance.rotation_proofs[]` verification (I-D §7.1, \
-         §7.5.1) is not yet implemented, so a receipt whose carried chain rotates a log or \
-         witness key set is refused rather than silently accepted or misreported"
-    )]
-    GovernanceKeyRotationUnsupported {
+    /// above, is `invalid`". This is that rule.
+    #[error("rotation proof for manifest entry index {manifest_entry_index} is invalid: {detail}")]
+    RotationProofInvalid {
         /// Entry index of the rotating manifest.
         manifest_entry_index: u64,
+        /// Which requirement failed.
+        detail: String,
     },
 
     /// This build does not implement the canonicalization procedure a dataset's descriptor
@@ -487,6 +480,14 @@ pub enum ReceiptError {
         /// The subject statement's type.
         statement_type: String,
     },
+
+    /// `subject.manifest` fails the I-D §7.6 binding rule: it does not equal the subject
+    /// envelope's OWN `payload.manifest` (the only thing that authenticates the receipt's
+    /// copy, since the copy itself is outside the subject's signature), or the manifest version
+    /// it names is absent from `governance.chain`, or that version's `entry_index` is not
+    /// STRICTLY SMALLER than `subject.entry_index`.
+    #[error("`subject.manifest` binding is invalid: {0}")]
+    SubjectManifestBindingInvalid(String),
 
     /// An embedded receipt's entry index violates the §2.3 ordering rule.
     #[error(
@@ -756,12 +757,13 @@ struct Governance<'a> {
     /// Manifest payloads keyed by their MANIFEST VERSION ID — the manifest statement's own
     /// `statement_id` (I-D §2.4.5), which is what a subject statement's `manifest` field
     /// references (I-D §2.2). Distinct from `entry_id`, which `predecessor` references.
-    manifest_by_version_id: BTreeMap<String, &'a Value>,
+    manifest_by_version_id: BTreeMap<String, (u64, &'a Value)>,
 }
 
 impl<'a> Governance<'a> {
-    /// The manifest payload named by a statement's `manifest` field (I-D §2.2, §2.4.5).
-    fn manifest_by_version_id(&self, version_id: &str) -> Option<&'a Value> {
+    /// The `(entry_index, payload)` of the manifest named by a statement's `manifest` field
+    /// (I-D §2.2, §2.4.5).
+    fn manifest_by_version_id(&self, version_id: &str) -> Option<(u64, &'a Value)> {
         self.manifest_by_version_id.get(version_id).copied()
     }
 }
@@ -1121,11 +1123,188 @@ fn datasets_object(manifest: &Value) -> Result<()> {
     Ok(())
 }
 
+/// The SET of a manifest's log key objects, normalized for I-D §7.1 governance-key-rotation
+/// comparison: `(key_id, pubkey, valid_from_index)` tuples, order-independent (I-D §6.2: "Each
+/// manifest version's log and witness key objects replace the prior set in full" — a SET, not a
+/// sequence).
+///
+/// Called only where the manifest schema (`log_object`) has already validated `log.keys`, so
+/// every member read here is known present and well typed.
+fn log_key_set(payload: &Value) -> BTreeSet<(String, String, u64)> {
+    payload
+        .get("log")
+        .and_then(|log| log.get("keys"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|object| {
+            Some((
+                object.get("key_id")?.as_str()?.to_owned(),
+                object.get("pubkey")?.as_str()?.to_owned(),
+                object.get("valid_from_index")?.as_u64()?,
+            ))
+        })
+        .collect()
+}
+
+/// The SET of a manifest's witness key objects, normalized the same way, with `witness_id`
+/// carried alongside each key object since it is part of the object's identity (I-D §7.1: "A
+/// witness key object additionally carries `witness_id`, the identity under which the manifest
+/// declares that witness").
+fn witness_key_set(payload: &Value) -> BTreeSet<(String, String, String, u64)> {
+    payload
+        .get("witnesses")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|witness| {
+            let witness_id = witness.get("witness_id")?.as_str()?.to_owned();
+            let keys = witness.get("keys")?.as_array()?;
+            Some(keys.iter().filter_map(move |object| {
+                Some((
+                    witness_id.clone(),
+                    object.get("key_id")?.as_str()?.to_owned(),
+                    object.get("pubkey")?.as_str()?.to_owned(),
+                    object.get("valid_from_index")?.as_u64()?,
+                ))
+            }))
+        })
+        .flatten()
+        .collect()
+}
+
+/// Verify this manifest's `governance.rotation_proofs[]` element (I-D §7.1; §7.5.1 4b(M) "The
+/// rotation-anchoring rule, also phase 2"): a manifest may be trusted to introduce a rotated log
+/// or witness key set only where its own anchoring is proven under the OUTGOING states.
+///
+/// `rotating_manifest`/`rotating_envelope` are this manifest's own payload/envelope;
+/// `outgoing_manifest` is its predecessor's payload — the state being retired, which is what the
+/// proof must be signed and cosigned under, never the incoming state the rotation installs.
+#[allow(clippy::too_many_lines)]
+fn verify_rotation_proof(
+    receipt: &Value,
+    rotating_envelope: &Value,
+    manifest_entry_index: u64,
+    rotating_manifest: &Value,
+    outgoing_manifest: &Value,
+    budget: &mut Budget,
+) -> Result<()> {
+    let invalid =
+        |detail: String| ReceiptError::RotationProofInvalid { manifest_entry_index, detail };
+
+    let empty = Vec::new();
+    let proofs = receipt
+        .get("governance")
+        .and_then(|governance| governance.get("rotation_proofs"))
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let element = proofs
+        .iter()
+        .find(|element| number(element, "manifest_entry_index").ok() == Some(manifest_entry_index))
+        .ok_or_else(|| {
+            invalid(
+                "`governance.rotation_proofs[]` carries no element for this rotation (I-D §7.1: \
+                 REQUIRED where the carried chain rotates either governance key set)"
+                    .to_owned(),
+            )
+        })?;
+
+    let checkpoint = obj(element, "checkpoint")?;
+    let tree_size = number(checkpoint, "tree_size")?;
+    if tree_size <= manifest_entry_index {
+        return Err(invalid(format!(
+            "the element's checkpoint tree_size ({tree_size}) must be GREATER than \
+             manifest_entry_index ({manifest_entry_index}) (I-D §7.1)"
+        )));
+    }
+
+    // The checkpoint MUST verify under a log key of the OUTGOING state — never the incoming
+    // manifest's own log keys, which is exactly the substitution this proof exists to rule out.
+    let checkpoint_key_id = text(checkpoint, "key_id")?;
+    let outgoing_log = log_key_set(outgoing_manifest);
+    let signer_pubkey = outgoing_log
+        .iter()
+        .find(|entry| entry.0.as_str() == checkpoint_key_id)
+        .map(|entry| entry.1.clone())
+        .ok_or_else(|| {
+            invalid(format!(
+                "the element's checkpoint `key_id` (`{checkpoint_key_id}`) is not a log key of \
+                 the OUTGOING state at manifest entry index {manifest_entry_index} — a \
+                 checkpoint signed by the INCOMING key does not attest the transition (I-D §7.1)"
+            ))
+        })?;
+    budget.spend(1)?;
+    if !verify_signature(
+        &decode_pubkey(&signer_pubkey)?,
+        &checkpoint_signing_bytes(checkpoint)?,
+        text(checkpoint, "signature")?,
+    )? {
+        return Err(invalid(
+            "the element's checkpoint signature does not verify under the outgoing log key"
+                .to_owned(),
+        ));
+    }
+
+    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
+    check_inclusion(
+        &jcs(rotating_envelope),
+        manifest_entry_index,
+        tree_size,
+        &path_strings(element, "inclusion_path")?,
+        &root,
+        "rotation-proof manifest inclusion",
+        budget,
+    )?;
+
+    // AT L3, at least one `witnesses[]` cosignature MUST verify under a witness key of the
+    // OUTGOING state, whichever set actually rotated — I-D §7.1: "a change to EITHER set is
+    // attested under BOTH outgoing states". This build reads the rotating manifest's OWN
+    // declared `level` to decide whether L3 applies going forward.
+    if rotating_manifest.get("level").and_then(Value::as_str) == Some("L3") {
+        let outgoing_witnesses = witness_key_set(outgoing_manifest);
+        let candidates = element.get("witnesses").and_then(Value::as_array);
+        let mut cosigned = false;
+        for witness in candidates.into_iter().flatten() {
+            let witness_id = text(witness, "witness_id")?.to_owned();
+            let key_id = text(witness, "key_id")?;
+            let Some(pubkey) = outgoing_witnesses
+                .iter()
+                .find(|entry| entry.0 == witness_id && entry.1.as_str() == key_id)
+                .map(|entry| entry.2.clone())
+            else {
+                continue;
+            };
+            budget.spend(1)?;
+            if verify_signature(
+                &decode_pubkey(&pubkey)?,
+                &cosignature_bytes(checkpoint, &witness_id),
+                text(witness, "cosignature")?,
+            )? {
+                cosigned = true;
+                break;
+            }
+        }
+        if !cosigned {
+            return Err(invalid(
+                "AT L3, at least one `witnesses[]` cosignature must verify under a witness key \
+                 of the OUTGOING state (I-D §7.1) — none did"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Build and structurally validate the governance chain (spec §2.3.5).
 // The governance-key-rotation check (I-D §7.1, §7.5.1) folds naturally into this same
 // per-manifest walk rather than a second pass over the same material.
 #[allow(clippy::too_many_lines)]
-fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance<'a>> {
+fn read_chain<'a>(
+    receipt: &'a Value,
+    policy: &TrustPolicy,
+    budget: &mut Budget,
+) -> Result<Governance<'a>> {
     let chain = array(obj(receipt, "governance")?, "chain")?;
     if chain.is_empty() {
         return Err(ReceiptError::GovernanceChainInvalid("chain is empty".to_owned()));
@@ -1136,7 +1315,7 @@ fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance
     let mut previous_index: Option<u64> = None;
     let mut previous_manifest_entry_id: Option<String> = None;
     let mut previous_manifest_payload: Option<&Value> = None;
-    let mut manifest_by_version_id: BTreeMap<String, &Value> = BTreeMap::new();
+    let mut manifest_by_version_id: BTreeMap<String, (u64, &Value)> = BTreeMap::new();
 
     for hop in chain {
         let index = number(hop, "entry_index")?;
@@ -1194,34 +1373,21 @@ fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance
                         key_objects(witness)?;
                     }
                 }
-                // I-D §7.1 / §7.5.1: a manifest whose log or witness key objects differ from
-                // its predecessor's in the chain is a GOVERNANCE-KEY ROTATION and requires a
-                // `governance.rotation_proofs[]` element this build does not implement checking
-                // (`GovernanceKeyRotationUnsupported`).
-                //
-                // AMBIGUITY (I-D §7.1 "governance-key rotation" definition): the I-D says a
-                // rotating manifest's key objects "differ from those of its predecessor",
-                // without stating whether an array of key objects is compared as an ORDERED
-                // SEQUENCE or as a SET — a manifest that re-lists the same key objects in a
-                // different order is a case the text does not resolve either way. This
-                // implementation takes the minimal (stricter) reading — whole-array inequality,
-                // order-sensitive — rather than guessing at a set-membership diff: it can flag
-                // a harmless reordering as a rotation, but never the reverse, which is the safe
-                // direction for a check whose only job is to refuse rather than silently accept
-                // an unproven rotation. No vector in this corpus exercises reordering-without-
-                // change, so this reading is untested against that specific case.
+                // I-D §7.1 / §7.5.1: a manifest whose log or witness key objects DIFFER, as
+                // SETS, from its predecessor's in the chain is a GOVERNANCE-KEY ROTATION (I-D
+                // §6.2: "Each manifest version's log and witness key objects replace the prior
+                // set in full" — a set, not a sequence, so a harmless reordering is never a
+                // rotation) and requires its `governance.rotation_proofs[]` element to verify
+                // under the outgoing key state (`verify_rotation_proof`).
                 if let Some(previous) = previous_manifest_payload {
-                    let log_rotated = payload.get("log").and_then(|log| log.get("keys"))
-                        != previous.get("log").and_then(|log| log.get("keys"));
-                    let witnesses_rotated = payload.get("witnesses") != previous.get("witnesses");
-                    if log_rotated || witnesses_rotated {
-                        return Err(ReceiptError::GovernanceKeyRotationUnsupported {
-                            manifest_entry_index: index,
-                        });
+                    let rotated = log_key_set(payload) != log_key_set(previous)
+                        || witness_key_set(payload) != witness_key_set(previous);
+                    if rotated {
+                        verify_rotation_proof(receipt, envelope, index, payload, previous, budget)?;
                     }
                 }
                 previous_manifest_payload = Some(payload);
-                manifest_by_version_id.insert(statement_id(envelope)?, payload);
+                manifest_by_version_id.insert(statement_id(envelope)?, (index, payload));
                 manifests.push((index, payload));
             }
             "key" => {
@@ -1637,7 +1803,14 @@ fn verify_enumeration(
                 detail: format!("entry {offset} claims index {claimed}, expected {expected}"),
             });
         }
-        envelopes.push(obj(entry, "envelope")?.clone());
+        let envelope = obj(entry, "envelope")?;
+        // I-D §2.2 / §7.1: every carried statement's `ahl_version` is checked before
+        // validating that statement — enumerated envelopes included. This is the one choke
+        // point every enumerated envelope (governance currency, competing-trigger, and
+        // propagation-prefix material alike) passes through before its payload is read
+        // anywhere downstream.
+        check_ahl_version(payload_of(envelope)?)?;
+        envelopes.push(envelope.clone());
     }
 
     let proof = range_proof::decode(text(obj(material, "range_proof")?, "adaptor_form")?)?;
@@ -1716,6 +1889,14 @@ fn verify_nested(
 
     let envelope = obj(receipt, "envelope")?;
     let subject = obj(receipt, "subject")?;
+    // I-D §2.2 / §7.1 / §7.5 step 1: every carried statement's `ahl_version` is checked
+    // BEFORE validating that statement — id recomputation and every other per-envelope check
+    // included, the subject's own envelope included. Reading `payload_of` needs no trust in
+    // `subject`'s own copied fields, so it can run first; checking version on it before
+    // touching `subject.statement_id`/`entry_id` is what keeps a foreign-version subject from
+    // being reported `invalid` over a copied identifier this document has no rules for.
+    let payload = payload_of(envelope)?;
+    check_ahl_version(payload)?;
     if text(subject, "statement_id")? != statement_id(envelope)? {
         return Err(ReceiptError::IdentifierMismatch { field: "statement_id" });
     }
@@ -1723,10 +1904,6 @@ fn verify_nested(
         return Err(ReceiptError::IdentifierMismatch { field: "entry_id" });
     }
     let subject_index = number(subject, "entry_index")?;
-    let payload = payload_of(envelope)?;
-    // I-D §2.2 / §7.1: every carried statement's `ahl_version` is checked before validating
-    // that statement, the subject's own envelope included.
-    check_ahl_version(payload)?;
     let subject_type = statement_type(payload)?.to_owned();
 
     // --- §5 step 2: adaptor profile -------------------------------------------------
@@ -1739,7 +1916,7 @@ fn verify_nested(
         .ok_or_else(|| ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() })?;
 
     // --- §5 step 4 (chain structure first: key binding depends on it) ---------------
-    let governance = read_chain(receipt, policy)?;
+    let governance = read_chain(receipt, policy, budget)?;
 
     // --- §5 step 3: checkpoint, keys, cosignatures, inclusion -----------------------
     let anchoring = verify_checkpoint(receipt, &governance, profile, adaptor_id, budget)?;
@@ -1853,10 +2030,37 @@ fn verify_nested(
         other => return Err(ReceiptError::Malformed(format!("unknown governance mode `{other}`"))),
     };
 
-    // --- §2.3: subject-level cross-field consistency --------------------------------
+    // --- §2.3 / I-D §7.6: subject-level cross-field consistency ----------------------
     let manifest_declared = subject.get("manifest").is_some();
     if manifest_declared == (subject_type == "manifest") {
         return Err(ReceiptError::SubjectManifestPresence { statement_type: subject_type });
+    }
+    // I-D §7.6: "`subject.manifest` equals the subject envelope's `payload.manifest` for
+    // every subject other than a manifest statement. The payload's `manifest` member is
+    // covered by the subject's signature; the receipt's copy is not, so this equality is the
+    // only thing that authenticates the copy. Section 6.3 anchors the descriptor check to the
+    // version this member names, and that check establishes nothing without this rule." And:
+    // "The manifest version named by `subject.manifest` is PRESENT in `governance.chain`... and
+    // that element's `entry_index` is strictly smaller than `subject.entry_index`. A named
+    // version absent from the chain, or anchored at or after the subject, cannot have governed
+    // the subject."
+    if let Some(claimed) = subject.get("manifest").and_then(Value::as_str) {
+        let payload_manifest = text(payload, "manifest")?;
+        if claimed != payload_manifest {
+            return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
+                "`subject.manifest` (`{claimed}`) does not equal the subject envelope's own                  `payload.manifest` (`{payload_manifest}`) (I-D §7.6)"
+            )));
+        }
+        let (governing_index, _) = governance.manifest_by_version_id(claimed).ok_or_else(|| {
+            ReceiptError::SubjectManifestBindingInvalid(format!(
+                "the manifest version `{claimed}` named by `subject.manifest` is not present                  in `governance.chain` (I-D §7.6)"
+            ))
+        })?;
+        if governing_index >= subject_index {
+            return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
+                "the manifest version `{claimed}` named by `subject.manifest` is anchored at                  entry index {governing_index}, which is not STRICTLY SMALLER than                  subject.entry_index {subject_index} (I-D §7.6)"
+            )));
+        }
     }
     let record_subject = check_record_subject(claim, payload, &claim_type, &subject_type)?;
 
@@ -2104,11 +2308,13 @@ fn verify_content_binding(
     }
 
     let manifest_version_id = text(ctx.payload, "manifest")?;
-    let manifest = ctx.governance.manifest_by_version_id(manifest_version_id).ok_or_else(|| {
-        ReceiptError::GovernanceChainInvalid(format!(
-            "manifest version `{manifest_version_id}` named by the subject statement's              `manifest` binding is not in the carried governance chain"
-        ))
-    })?;
+    let (_, manifest) =
+        ctx.governance.manifest_by_version_id(manifest_version_id).ok_or_else(|| {
+            ReceiptError::GovernanceChainInvalid(format!(
+                "manifest version `{manifest_version_id}` named by the subject statement's \
+             `manifest` binding is not in the carried governance chain"
+            ))
+        })?;
     let declared = obj(obj(manifest, "datasets")?, dataset)?;
     let declared_mode = text(declared, "commitment_mode")?.to_owned();
     // `datasets_object` already validated this manifest's descriptor syntax at manifest-schema
