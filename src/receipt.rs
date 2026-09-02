@@ -760,11 +760,33 @@ struct Governance<'a> {
     manifest_by_version_id: BTreeMap<String, (u64, &'a Value)>,
 }
 
+/// The MANIFEST VERSION ID (I-D §2.4.5: a manifest statement's own `statement_id`) of the
+/// manifest ACTIVE at `index` — I-D §2.2: "the manifest version active at the statement's
+/// entry index... the manifest statement with the greatest entry index smaller than the
+/// statement's own." Free function so `read_chain` can call it mid-induction, with only the
+/// manifests known so far, exactly like [`snapshot_manifest_in`].
+fn active_manifest_version_id(
+    manifests: &[(u64, &Value)],
+    manifest_by_version_id: &BTreeMap<String, (u64, &Value)>,
+    index: u64,
+) -> Option<String> {
+    let (active_index, _) = snapshot_manifest_in(manifests, index)?;
+    manifest_by_version_id
+        .iter()
+        .find(|(_, (mi, _))| *mi == active_index)
+        .map(|(version_id, _)| version_id.clone())
+}
+
 impl<'a> Governance<'a> {
     /// The `(entry_index, payload)` of the manifest named by a statement's `manifest` field
     /// (I-D §2.2, §2.4.5).
     fn manifest_by_version_id(&self, version_id: &str) -> Option<(u64, &'a Value)> {
         self.manifest_by_version_id.get(version_id).copied()
+    }
+
+    /// The manifest version id ACTIVE at `index` (I-D §2.2). See [`active_manifest_version_id`].
+    fn active_manifest_version_id_at(&self, index: u64) -> Option<String> {
+        active_manifest_version_id(&self.manifests, &self.manifest_by_version_id, index)
     }
 }
 
@@ -1499,6 +1521,24 @@ fn read_chain<'a>(
                 };
                 let key_id = text(key, "key_id")?.to_owned();
                 let pubkey = text(key, "pubkey")?.to_owned();
+                // I-D §2.2: a `key` statement is not a manifest statement, so it carries a
+                // `manifest` field of its own, and that field is held to the SAME rule as the
+                // subject's copy (§7.6) — it must name the manifest version ACTIVE at THIS
+                // statement's own entry index, never a stale one.
+                let claimed_manifest = text(payload, "manifest")?;
+                let active = active_manifest_version_id(&manifests, &manifest_by_version_id, index)
+                    .ok_or_else(|| {
+                        ReceiptError::GovernanceChainInvalid(format!(
+                            "no manifest version is active at entry index {index} (I-D §2.2)"
+                        ))
+                    })?;
+                if claimed_manifest != active {
+                    return Err(ReceiptError::GovernanceChainInvalid(format!(
+                        "key statement at entry index {index} names manifest \
+                         `{claimed_manifest}`, which is not the manifest version active at \
+                         that index (`{active}`) (I-D §2.2)"
+                    )));
+                }
                 // Phase 3: effect — modifies the producer key set only (I-D §6.2: log and
                 // witness keys rotate only by anchoring a new manifest version).
                 events.push(KeyEvent { entry_index: index, key_id, pubkey, added });
@@ -2124,17 +2164,25 @@ fn verify_nested(
         let payload_manifest = text(payload, "manifest")?;
         if claimed != payload_manifest {
             return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
-                "`subject.manifest` (`{claimed}`) does not equal the subject envelope's own                  `payload.manifest` (`{payload_manifest}`) (I-D §7.6)"
+                "`subject.manifest` (`{claimed}`) does not equal the subject envelope's own \
+                 `payload.manifest` (`{payload_manifest}`) (I-D §7.6)"
             )));
         }
-        let (governing_index, _) = governance.manifest_by_version_id(claimed).ok_or_else(|| {
+        // I-D §2.2: "the manifest version active at the statement's entry index — that is, the
+        // manifest statement with the greatest entry index smaller than the statement's own."
+        // Presence in the chain and being strictly before the subject are necessary but NOT
+        // sufficient — `payload.manifest` must name exactly THAT manifest, never a stale,
+        // superseded one, or content-binding descriptor resolution takes `ddig` from the wrong
+        // manifest version (I-D §6.3).
+        let active = governance.active_manifest_version_id_at(subject_index).ok_or_else(|| {
             ReceiptError::SubjectManifestBindingInvalid(format!(
-                "the manifest version `{claimed}` named by `subject.manifest` is not present                  in `governance.chain` (I-D §7.6)"
+                "no manifest version is active at subject.entry_index {subject_index} (I-D §2.2)"
             ))
         })?;
-        if governing_index >= subject_index {
+        if claimed != active {
             return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
-                "the manifest version `{claimed}` named by `subject.manifest` is anchored at                  entry index {governing_index}, which is not STRICTLY SMALLER than                  subject.entry_index {subject_index} (I-D §7.6)"
+                "`subject.manifest` (`{claimed}`) is not the manifest version ACTIVE at \
+                 subject.entry_index {subject_index} (`{active}`) (I-D §2.2, §7.6)"
             )));
         }
     }
