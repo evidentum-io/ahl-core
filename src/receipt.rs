@@ -1874,6 +1874,29 @@ fn witnesses_object(manifest: &Value) -> Result<()> {
     Ok(())
 }
 
+/// The already-established context one `governance.rotation_proofs[]` element is validated
+/// against, gathered so the element's own material can be told apart from it at a glance.
+///
+/// `manifests` is the induction's key state SO FAR — every manifest version established
+/// strictly before the rotating one — and `outgoing` is the last of them: the state being
+/// retired, which is what the proof must be signed and cosigned under, and the version the
+/// receipt's own `keys` entries for this proof must bind to (I-D §7.1's transition exception).
+#[derive(Clone, Copy)]
+struct RotationContext<'a> {
+    /// The receipt, for the `keys` block every key used in verification must appear in.
+    receipt: &'a Value,
+    /// Local policy, for the source rules a `keys` entry is bound under.
+    policy: &'a TrustPolicy,
+    /// The manifest versions established before the rotating one.
+    manifests: &'a [(u64, &'a Value)],
+    /// Entry index and payload of the OUTGOING manifest version.
+    outgoing: (u64, &'a Value),
+    /// The pinned adaptor profile, for the §3.2 binding check.
+    profile: &'a AdaptorProfile,
+    /// The pinned adaptor profile's id.
+    profile_id: &'a str,
+}
+
 /// Verify this manifest's `governance.rotation_proofs[]` element (I-D §7.1; §7.5.1 4b(M) "The
 /// rotation-anchoring rule, also phase 2"): a manifest may be trusted to introduce a rotated log
 /// or witness key set only where its own anchoring is proven under the OUTGOING states.
@@ -1886,21 +1909,21 @@ fn witnesses_object(manifest: &Value) -> Result<()> {
 /// `manifest_entry_index` already matched, by the caller's positional walk (I-D §7.5.1): this
 /// function trusts neither the array nor the index — it validates the one element it was
 /// handed, nothing more.
-// Eight arguments: the element plus five independent pieces of already-established context
-// (the rotating hop's own envelope/entry-index/payload, its predecessor's payload, and the
-// adaptor profile the `raw` capability gate needs) that this function does not re-derive —
-// bundling them into a struct would only rename this list, not shorten it.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// The element and the rotating hop's own material are the arguments; everything already
+// established — the induction's key state, the outgoing version, policy, the receipt's `keys`
+// block and the pinned profile — travels in [`RotationContext`], so what this function
+// VALIDATES stays visible against what it merely CONSULTS.
+#[allow(clippy::too_many_lines)]
 fn verify_rotation_proof(
     element: &Value,
     rotating_envelope: &Value,
     manifest_entry_index: u64,
     rotating_manifest: &Value,
-    outgoing_manifest: &Value,
-    profile: &AdaptorProfile,
-    profile_id: &str,
+    context: &RotationContext<'_>,
     budget: &mut Budget,
 ) -> Result<()> {
+    let RotationContext { receipt, policy, manifests, outgoing, profile, profile_id } = *context;
+    let (outgoing_index, outgoing_manifest) = outgoing;
     let invalid =
         |detail: String| ReceiptError::RotationProofInvalid { manifest_entry_index, detail };
 
@@ -1926,21 +1949,30 @@ fn verify_rotation_proof(
     // The checkpoint MUST verify under a log key of the OUTGOING state — never the incoming
     // manifest's own log keys, which is exactly the substitution this proof exists to rule out.
     let checkpoint_key_id = text(checkpoint, "key_id")?;
-    let outgoing_log = log_key_set(outgoing_manifest);
-    let signer_pubkey = outgoing_log
-        .iter()
-        .find(|entry| entry.0.as_str() == checkpoint_key_id)
-        .map(|entry| entry.1.clone())
-        .ok_or_else(|| {
-            invalid(format!(
-                "the element's checkpoint `key_id` (`{checkpoint_key_id}`) is not a log key of \
-                 the OUTGOING state at manifest entry index {manifest_entry_index} — a \
-                 checkpoint signed by the INCOMING key does not attest the transition (I-D §7.1)"
-            ))
-        })?;
+    if !log_key_set(outgoing_manifest).iter().any(|entry| entry.0.as_str() == checkpoint_key_id) {
+        return Err(invalid(format!(
+            "the element's checkpoint `key_id` (`{checkpoint_key_id}`) is not a log key of the \
+             OUTGOING state at manifest entry index {manifest_entry_index} — a checkpoint \
+             signed by the INCOMING key does not attest the transition (I-D §7.1)"
+        )));
+    }
+    // I-D §7.1: "Every key used in verification MUST appear in `keys` with its source and its
+    // binding", and under the transition exception "the corresponding `keys.log[]` and
+    // `keys.witness[]` entries carry `manifest-chain` bindings naming that predecessor
+    // version." The key this signature is verified under is therefore resolved THROUGH the
+    // receipt's own `keys` block, bound at the outgoing manifest's entry index, rather than
+    // lifted out of the manifest behind the block's back. Where the receipt is well formed the
+    // two agree; where they do not, it is verifying under a key it never declared.
+    let (outgoing_log_keys, outgoing_log_attempted) =
+        bind_keys_by_group(receipt, policy, manifests, outgoing_index, "log")?;
+    let signer = outgoing_log_keys.get(checkpoint_key_id).ok_or_else(|| {
+        let entry_index =
+            outgoing_log_attempted.get(checkpoint_key_id).copied().unwrap_or(outgoing_index);
+        ReceiptError::KeyNotBound { key_id: checkpoint_key_id.to_owned(), entry_index }
+    })?;
     budget.spend(1)?;
     if !verify_signature(
-        &decode_pubkey(&signer_pubkey)?,
+        &decode_pubkey(&signer.pubkey)?,
         &checkpoint_signing_bytes_for(checkpoint, profile_id)?,
         text(checkpoint, "signature")?,
     )? {
@@ -1988,20 +2020,39 @@ fn verify_rotation_proof(
     // already shape-checked above where present, but no cosignature is required from it.
     if rotating_manifest.get("level").and_then(Value::as_str) == Some("L3") {
         let outgoing_witnesses = witness_key_set(outgoing_manifest)?;
+        // The cosigning keys go through the receipt's own `keys.witness[]`, bound at the
+        // outgoing manifest's entry index, for the same reason the log key does: I-D §7.1
+        // requires every key used in verification to appear in `keys`, and the transition
+        // exception says which version this proof's entries name.
+        let (outgoing_witness_keys, outgoing_witness_attempted) =
+            bind_keys_by_group(receipt, policy, manifests, outgoing_index, "witness")?;
         let mut cosigned = false;
         for witness in &witness_candidates {
             let witness_id = text(witness, "witness_id")?.to_owned();
             let key_id = text(witness, "key_id")?;
-            let Some(pubkey) = outgoing_witnesses
+            // A cosignature by a witness the OUTGOING manifest does not declare under that
+            // identity attests nothing about the handover, and is passed over rather than
+            // refused: §7.1 asks only that at least one element verify under an outgoing
+            // witness key, so an element that is not such a key is simply not that one.
+            if !outgoing_witnesses
                 .iter()
-                .find(|entry| entry.0 == witness_id && entry.1.as_str() == key_id)
-                .map(|entry| entry.2.clone())
-            else {
+                .any(|entry| entry.0 == witness_id && entry.1.as_str() == key_id)
+            {
                 continue;
-            };
+            }
+            // Having selected it, the key it verifies under must be one the receipt declared.
+            // This is the point of difference: the identity is the manifest's, the key comes
+            // from the `keys` block, and an outgoing witness the receipt never listed — or
+            // listed under the INCOMING version's binding index — cannot cosign the proof.
+            let resolved = outgoing_witness_keys.get(key_id).ok_or_else(|| {
+                let entry_index =
+                    outgoing_witness_attempted.get(key_id).copied().unwrap_or(outgoing_index);
+                ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
+            })?;
+            check_witness_identity(resolved, key_id, &witness_id)?;
             budget.spend(1)?;
             if verify_signature(
-                &decode_pubkey(&pubkey)?,
+                &decode_pubkey(&resolved.pubkey)?,
                 &cosignature_bytes(checkpoint, &witness_id),
                 text(witness, "cosignature")?,
             )? {
@@ -2137,6 +2188,10 @@ fn read_chain<'a>(
     let mut previous_index = 0u64;
     let mut previous_manifest_entry_id = entry_id(genesis_envelope);
     let mut previous_manifest_payload = genesis_payload;
+    // The entry index of the manifest version a rotation would be retiring — the OUTGOING
+    // version, which I-D §7.1's transition exception says the proof's own `keys` entries bind
+    // to. Genesis is anchored at entry index 0.
+    let mut previous_manifest_index = 0u64;
 
     // --- I-D §7.5.1 4b. Inductive step: three phases, in this order, for every later hop. ---
     for hop in &chain[1..] {
@@ -2250,9 +2305,14 @@ fn read_chain<'a>(
                         envelope,
                         index,
                         payload,
-                        previous_manifest_payload,
-                        profile,
-                        profile_id,
+                        &RotationContext {
+                            receipt,
+                            policy,
+                            manifests: &manifests,
+                            outgoing: (previous_manifest_index, previous_manifest_payload),
+                            profile,
+                            profile_id,
+                        },
                         budget,
                     )?;
                     rotation_cursor += 1;
@@ -2260,6 +2320,7 @@ fn read_chain<'a>(
                 // Phase 3: effect — replaces the log, witness, and producer key state in full.
                 previous_manifest_entry_id = entry_id(envelope);
                 previous_manifest_payload = payload;
+                previous_manifest_index = index;
                 manifest_by_version_id.insert(statement_id(envelope)?, (index, payload));
                 manifests.push((index, payload));
             }
@@ -2414,7 +2475,7 @@ struct ResolvedKey {
 /// holding no trusted witness key accepts no `local-policy` witness key at all.
 fn bind_log_or_witness_key(
     policy: &TrustPolicy,
-    governance: &Governance<'_>,
+    manifests: &[(u64, &Value)],
     entry: &Value,
     group: &str,
     active_index: u64,
@@ -2451,8 +2512,7 @@ fn bind_log_or_witness_key(
             }
             let not_bound =
                 || ReceiptError::KeyNotBound { key_id: key_id.clone(), entry_index: binding_index };
-            let (_, manifest) = governance
-                .manifests
+            let (_, manifest) = manifests
                 .iter()
                 .find(|(index, _)| *index == binding_index)
                 .copied()
@@ -2822,7 +2882,7 @@ type BoundAndAttempted = (BTreeMap<String, ResolvedKey>, BTreeMap<String, u64>);
 fn bind_keys_by_group(
     receipt: &Value,
     policy: &TrustPolicy,
-    governance: &Governance<'_>,
+    manifests: &[(u64, &Value)],
     active_index: u64,
     group: &str,
 ) -> Result<BoundAndAttempted> {
@@ -2832,7 +2892,7 @@ fn bind_keys_by_group(
     for entry in array(keys, group)? {
         check_key_id(entry)?;
         let key_id = text(entry, "key_id")?.to_owned();
-        match bind_log_or_witness_key(policy, governance, entry, group, active_index) {
+        match bind_log_or_witness_key(policy, manifests, entry, group, active_index) {
             Ok(resolved) => {
                 bound.insert(key_id, resolved);
             }
@@ -2887,9 +2947,9 @@ fn verify_checkpoint(
     }
 
     let (log_keys, log_attempted) =
-        bind_keys_by_group(receipt, policy, governance, active_index, "log")?;
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log")?;
     let (witness_keys, witness_attempted) =
-        bind_keys_by_group(receipt, policy, governance, active_index, "witness")?;
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness")?;
 
     let signing_key = log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| {
         let key_id = text(checkpoint, "key_id").unwrap_or_default().to_owned();
@@ -4415,7 +4475,7 @@ fn authenticate_checkpoint(
     // own active manifest — so this resolves against THIS checkpoint's own `active_index`,
     // exactly as [`verify_checkpoint`] does for the primary checkpoint.
     let (log_keys, log_attempted) =
-        bind_keys_by_group(receipt, policy, governance, active_index, "log")?;
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log")?;
     let signing_key = log_keys.get(key_id).ok_or_else(|| {
         let entry_index = log_attempted.get(key_id).copied().unwrap_or(active_index);
         ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
@@ -4467,7 +4527,7 @@ fn verify_later_witnesses(
     let candidates = cosignature_array(anchoring, "later_witnesses", "anchoring.later_witnesses")?;
 
     let (witness_keys, witness_attempted) =
-        bind_keys_by_group(receipt, policy, governance, active_index, "witness")?;
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness")?;
     let mut witnessed = false;
     for cosignature in candidates {
         let cosignature = witness_cosignature_object(cosignature)?;
@@ -4797,7 +4857,7 @@ mod tests {
 
     use super::{
         log_key_set, verify_rotation_proof, witness_key_set, AdaptorCapabilities, AdaptorProfile,
-        Budget, Limits, ReceiptError, TEST_ADAPTOR_PROFILE_ID,
+        Budget, Limits, ReceiptError, RotationContext, TrustPolicy, TEST_ADAPTOR_PROFILE_ID,
     };
     use crate::{
         checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, sha256_hex, tree_root,
@@ -4962,14 +5022,36 @@ mod tests {
 
         let profile = AdaptorProfile { document, capabilities: AdaptorCapabilities::default() };
         let mut budget = Budget::new(Limits::default());
+        // The element's checkpoint-signing key is resolved through the receipt's own `keys`
+        // block (I-D §7.1), bound to the outgoing manifest version, so the surrounding receipt
+        // carries that one entry; the witness shape check under test comes after it.
+        let receipt = json!({
+            "keys": {
+                "log": [ {
+                    "key_id": log_key.key_id(),
+                    "pubkey": log_key.pubkey(),
+                    "source": "manifest-chain",
+                    "binding": { "entry_index": 0 },
+                } ],
+                "witness": [],
+                "producer": [],
+            },
+        });
+        let policy = TrustPolicy::default();
+        let manifests = [(0u64, &outgoing_manifest)];
         let result = verify_rotation_proof(
             &element,
             &rotating_envelope,
             0,
             &rotating_manifest,
-            &outgoing_manifest,
-            &profile,
-            TEST_ADAPTOR_PROFILE_ID,
+            &RotationContext {
+                receipt: &receipt,
+                policy: &policy,
+                manifests: &manifests,
+                outgoing: (0, &outgoing_manifest),
+                profile: &profile,
+                profile_id: TEST_ADAPTOR_PROFILE_ID,
+            },
             &mut budget,
         );
         assert!(
