@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::corpus::{Anchor, Corpus};
 use crate::scenario::{
-    write_jcs, write_json, Keys, ADAPTOR_ID, CANONICALIZATION, DS_CUSTOMERS, DS_SCORES,
+    signed, write_jcs, write_json, Keys, ADAPTOR_ID, CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, T0,
 };
 
 /// What a receipt vector asserts about its own verification outcome.
@@ -42,7 +42,7 @@ struct Vector {
 pub fn trust_policy(corpus: &Corpus, keys: &Keys, dataset_key: &[u8]) -> TrustPolicy {
     TrustPolicy {
         genesis_entry_id: entry_id(&corpus.envelopes[0]),
-        genesis_key_ids: BTreeSet::from([keys.producer_1.key_id()]),
+        genesis_key_ids: Some(BTreeSet::from([keys.producer_1.key_id()])),
         // `ahl-test-log-v1` defines the consistency-proof serialization (profile §9) but no
         // binary checkpoint framing, so a receipt carrying `anchoring.checkpoint.raw` is
         // rejected as a limitation of *this profile*, naming it, not as a limitation of the
@@ -1489,16 +1489,17 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             &governance_state_valid,
             |proofs| proofs.as_array_mut().expect("rotation_proofs array").clear(),
             "MUST FAIL. `governance.rotation_proofs` is emptied, so the manifest v2 rotation \
-             the carried chain contains has no element proving it. I-D §7.1: the carried \
-             `manifest_entry_index` sequence (here empty) must equal EXACTLY the ascending \
-             sequence of rotating manifests' entry indexes (here `[25]`) — checked as a \
-             collection-level rule before any element's own content.",
+             the carried chain contains has no element proving it. I-D §7.1/§7.5.1: the \
+             rotation is detected inside the signed per-hop walk, at manifest entry index 25, \
+             only after that hop's own signature and schema pass — the NEXT unconsumed \
+             `rotation_proofs[]` element is then required, and here there is none.",
         ),
         expect: Expect::Reject {
-            rule: "I-D §7.1 — rotation_proofs[]'s manifest_entry_index sequence must equal \
-                   exactly the rotating manifests' entry indexes",
+            rule: "I-D §7.1 — a detected rotation requires the next unconsumed \
+                   rotation_proofs[] element",
             matches: |e| {
-                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not equal EXACTLY"))
+                matches!(e, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, detail }
+                    if detail.contains("carries no (further) element"))
             },
         },
     });
@@ -1508,15 +1509,16 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             &governance_state_valid,
             |proofs| proofs[0]["manifest_entry_index"] = json!(24),
             "MUST FAIL. The element's `manifest_entry_index` is changed from 25 (the rotating \
-             manifest's real entry index) to 24, so the carried sequence `[24]` does not equal \
-             the expected `[25]` — caught by the SAME collection-level sequence check as the \
-             empty-member case, before any element's own content is read.",
+             manifest's real entry index) to 24. I-D §7.1/§7.5.1: the next unconsumed \
+             `rotation_proofs[]` element at the entry-25 rotation must carry \
+             `manifest_entry_index` 25 — it carries 24 instead.",
         ),
         expect: Expect::Reject {
-            rule: "I-D §7.1 — rotation_proofs[]'s manifest_entry_index sequence must equal \
-                   exactly the rotating manifests' entry indexes",
+            rule: "I-D §7.1 — the next unconsumed rotation_proofs[] element must carry this \
+                   hop's own manifest_entry_index",
             matches: |e| {
-                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not equal EXACTLY"))
+                matches!(e, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, detail }
+                    if detail.contains("carries `manifest_entry_index` 24, not 25"))
             },
         },
     });
@@ -1564,14 +1566,16 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 let element = proofs[0].clone();
                 proofs.as_array_mut().expect("rotation_proofs array").push(element);
             },
-            "MUST FAIL. The genuine element for manifest entry index 25 is duplicated, so the \
-             carried sequence is `[25, 25]` against an expected `[25]` — I-D §7.1 fixes \
-             exactly ONE element per rotation.",
+            "MUST FAIL. The genuine element for manifest entry index 25 is duplicated. The \
+             walk consumes the first (matching) element at the entry-25 rotation and never \
+             encounters a second rotation to consume the duplicate against — I-D §7.1 fixes \
+             exactly ONE element per rotation, so the unconsumed duplicate left over after \
+             the walk is invalid.",
         ),
         expect: Expect::Reject {
-            rule: "I-D §7.1 — one element per rotation, no duplicates",
+            rule: "I-D §7.1 — one element per rotation, no duplicates left unconsumed",
             matches: |e| {
-                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not equal EXACTLY"))
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("beyond the"))
             },
         },
     });
@@ -1587,14 +1591,14 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 proofs.as_array_mut().expect("rotation_proofs array").push(extra);
             },
             "MUST FAIL. An extra element names manifest entry index 0, which never rotates \
-             anything (it is the genesis manifest, with no predecessor to differ from), so \
-             the carried sequence `[25, 0]` neither equals the expected `[25]` nor is even in \
-             ascending order.",
+             anything (it is the genesis manifest, with no predecessor to differ from), so the \
+             walk never encounters a rotation to consume it against — it is left over, \
+             unconsumed, after the walk ends.",
         ),
         expect: Expect::Reject {
             rule: "I-D §7.1 — no extra elements for manifests that do not rotate",
             matches: |e| {
-                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not equal EXACTLY"))
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("beyond the"))
             },
         },
     });
@@ -1697,6 +1701,77 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             },
         },
     });
+
+    // --- key-statement 4b(K) validation (I-D §7.5.1 4b(K)): three ways a `key` statement's
+    // own form can fail, each replacing the genuine entry-9 hop with a freshly signed one so
+    // the rejection is phase 2, never phase 1 (I-D §7.5.1: "Type-specific validation MUST NOT
+    // run on material whose signature has not verified").
+    let m1 = statement_id(&corpus.envelopes[0]).expect("well-formed genesis envelope");
+    out.push(Vector {
+        file: "governance-key-statement-wrong-key-id-must-fail.ahl",
+        receipt: key_statement_case(
+            &governance_state_valid,
+            &m1,
+            &json!({
+                "key_id": keys.producer_1.key_id(),
+                "pubkey": keys.producer_2.pubkey(),
+                "valid_from": T0,
+            }),
+            keys,
+            "MUST FAIL. The `key` statement at entry index 9 carries `key.key_id` from \
+             producer-1 alongside `key.pubkey` from producer-2 — a genuinely mismatched pair, \
+             each individually well-formed. I-D §7.5.1 4b(K) requires `key_id` to be \
+             RECOMPUTED from `pubkey` and equal the carried value before the statement's \
+             effect ever touches K.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4b(K) — key.key_id must be sha256:-of-key.pubkey",
+            matches: |e| {
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not equal `sha256:`-of-`key.pubkey`"))
+            },
+        },
+    });
+    out.push(Vector {
+        file: "governance-key-statement-missing-valid-from-must-fail.ahl",
+        receipt: key_statement_case(
+            &governance_state_valid,
+            &m1,
+            &json!({ "key_id": keys.producer_2.key_id(), "pubkey": keys.producer_2.pubkey() }),
+            keys,
+            "MUST FAIL. The `key` statement at entry index 9 carries no `key.valid_from` at \
+             all. I-D §7.5.1 4b(K): `valid_from` is REQUIRED and well-formed RFC 3339 — \
+             informative for ordering, but required regardless.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4b(K) — key.valid_from is REQUIRED",
+            matches: |e| {
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("carries no `key.valid_from`"))
+            },
+        },
+    });
+    out.push(Vector {
+        file: "governance-key-statement-short-pubkey-must-fail.ahl",
+        receipt: key_statement_case(
+            &governance_state_valid,
+            &m1,
+            &json!({
+                "key_id": keys.producer_2.key_id(),
+                "pubkey": base64(&[0u8; 16]),
+                "valid_from": T0,
+            }),
+            keys,
+            "MUST FAIL. The `key` statement at entry index 9 carries `key.pubkey` that \
+             decodes to 16 octets, not 32. I-D §7.5.1 4b(K): `pubkey` MUST decode to exactly \
+             32 octets.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4b(K) — key.pubkey must decode to exactly 32 octets",
+            matches: |e| {
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail) if detail.contains("does not decode to exactly 32 octets"))
+            },
+        },
+    });
+
     out.push(Vector {
         file: "governance-state-not-current-must-fail.ahl",
         receipt: Spec {
@@ -1815,6 +1890,33 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
 fn rotation_proof_case(base: &Value, mutate: impl FnOnce(&mut Value), note: &str) -> Value {
     let mut bad = base.clone();
     mutate(&mut bad["governance"]["rotation_proofs"]);
+    bad["claim"]["note"] = json!(note);
+    bad
+}
+
+/// Replace `base`'s entry-9 `key` statement hop (`governance.chain[1]`) with a FRESH envelope
+/// carrying `key_extra`, genuinely signed by `keys.producer_1` — the legitimate phase-1 signer
+/// at that entry index (I-D §7.5.1: phase 1 verifies "against K as established so far", and
+/// producer-1 is already in K by entry 9). This is deliberate: a mutation with no re-signing
+/// would fail phase 1 (`EnvelopeSignatureInvalid`) before phase 2's 4b(K) checks are ever
+/// reached, which is the wrong rule for these vectors to exercise.
+///
+/// The replaced hop's `inclusion_path` is left untouched, and is never checked: `read_chain`
+/// rejects a malformed `key` statement inside its own per-hop walk, strictly before
+/// `verify_checkpoint` or the `governance.chain[]` inclusion-proof loop (receipt §5 step 4)
+/// ever runs — the same short-circuit the manifest-schema tests below rely on for the genesis
+/// hop (`reject_by_manifest_schema` in `tests/vectors.rs`), generalized to a later hop.
+fn key_statement_case(
+    base: &Value,
+    manifest_id: &str,
+    key_extra: &Value,
+    keys: &Keys,
+    note: &str,
+) -> Value {
+    let mut bad = base.clone();
+    let fresh =
+        signed("key", manifest_id, json!({ "action": "add", "key": key_extra }), &keys.producer_1);
+    bad["governance"]["chain"][1]["envelope"] = fresh;
     bad["claim"]["note"] = json!(note);
     bad
 }
