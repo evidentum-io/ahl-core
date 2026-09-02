@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use crate::corpus::{Anchor, Corpus};
 use crate::scenario::{
     signed, write_jcs, write_json, Keys, ADAPTOR_ID, CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, T0,
+    WITNESS_1,
 };
 
 /// What a receipt vector asserts about its own verification outcome.
@@ -262,6 +263,27 @@ impl Spec<'_> {
         // member at all.
         if self.chain.contains(&25) {
             receipt["governance"]["rotation_proofs"] = json!([corpus.rotation_proof_element(keys)]);
+            // I-D §7.1: "Every key used in verification MUST appear in `keys` with its source
+            // and its binding", and under the rotation-proof transition exception "the
+            // corresponding `keys.log[]` and `keys.witness[]` entries carry `manifest-chain`
+            // bindings naming that predecessor version". This corpus's one rotation is manifest
+            // v2 at entry 25, whose predecessor is the genesis manifest at entry 0, so a
+            // receipt carrying that rotation lists the OUTGOING log key and the OUTGOING
+            // witness bound at 0 — alongside the entries for its own checkpoint, which bind to
+            // manifest v2. The log key is physically the same key in both, listed twice under
+            // two different bindings, which is exactly the case receipt key binding tolerates.
+            if anchor.manifest_index != 0 {
+                let (outgoing_witness, outgoing_witness_id) = keys.witness_for(0);
+                receipt["keys"]["log"].as_array_mut().expect("keys.log array").push(key_entry(
+                    &keys.log_1,
+                    None,
+                    0,
+                ));
+                receipt["keys"]["witness"]
+                    .as_array_mut()
+                    .expect("keys.witness array")
+                    .push(key_entry(outgoing_witness, Some(outgoing_witness_id), 0));
+            }
         }
         receipt
     }
@@ -1705,6 +1727,59 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         },
     });
 
+    // --- the rotation proof's own keys must be LISTED (I-D §7.1: "Every key used in
+    // verification MUST appear in `keys` with its source and its binding", and under the
+    // transition exception those entries "carry `manifest-chain` bindings naming that
+    // predecessor version"). Two ways that fails: the entry is missing, or it names the
+    // INCOMING version — the very state the proof exists to establish a handover away from.
+    out.push(Vector {
+        file: "governance-key-rotation-proof-witness-key-unlisted-must-fail.ahl",
+        receipt: rotation_keys_case(
+            &governance_state_valid,
+            |keys| {
+                // Drop the outgoing witness entry (witness-1, bound at the genesis manifest),
+                // leaving only the incoming one the anchoring checkpoint uses.
+                keys["witness"]
+                    .as_array_mut()
+                    .expect("keys.witness array")
+                    .retain(|entry| field_str(entry, "witness_id").ok() != Some(WITNESS_1));
+            },
+            "MUST FAIL. The rotation proof at entry 25 is cosigned by the OUTGOING witness, \
+             witness-1, but `keys.witness[]` no longer lists that key. I-D §7.1: \"Every key \
+             used in verification MUST appear in `keys` with its source and its binding\" — a \
+             cosignature verified under a key the receipt never declared rests on material \
+             outside the container's own account of what it uses.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — a rotation proof's outgoing witness key is listed in keys.witness[]",
+            matches: |e| matches!(e, ReceiptError::KeyNotBound { .. }),
+        },
+    });
+    out.push(Vector {
+        file: "governance-key-rotation-proof-key-bound-to-incoming-must-fail.ahl",
+        receipt: rotation_keys_case(
+            &governance_state_valid,
+            |keys| {
+                // Re-bind the outgoing witness entry to the INCOMING manifest version (entry
+                // 25), the one the rotation installs.
+                for entry in keys["witness"].as_array_mut().expect("keys.witness array") {
+                    if field_str(entry, "witness_id").ok() == Some(WITNESS_1) {
+                        entry["binding"]["entry_index"] = json!(25);
+                    }
+                }
+            },
+            "MUST FAIL. The outgoing witness key is listed, but bound to manifest v2 (entry \
+             25) — the INCOMING version. I-D §7.1's transition exception fixes the binding for \
+             rotation material to \"the manifest version active IMMEDIATELY BEFORE \
+             `manifest_entry_index`\", the outgoing state; a key bound to the incoming version \
+             is not the retiring authority whose attestation the proof is for.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — a rotation proof's keys bind to the OUTGOING manifest version",
+            matches: |e| matches!(e, ReceiptError::KeyNotBound { entry_index: 25, .. }),
+        },
+    });
+
     // --- key-statement 4b(K) validation (I-D §7.5.1 4b(K)): three ways a `key` statement's
     // own form can fail, each replacing the genuine entry-9 hop with a freshly signed one so
     // the rejection is phase 2, never phase 1 (I-D §7.5.1: "Type-specific validation MUST NOT
@@ -1939,6 +2014,18 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
 /// Mutate a valid receipt's `governance.rotation_proofs[0]` and set an informative note,
 /// leaving everything else — including the chain, so the mutation is the ONLY thing that can
 /// make the receipt fail — byte-identical to `base`.
+/// A variant of `base` with its `keys` BLOCK edited rather than its rotation-proof element.
+///
+/// A rotation proof's log and witness keys are resolved through the receipt's own `keys` block
+/// (I-D §7.1), bound to the outgoing manifest version, so removing or re-binding one of those
+/// entries is a defect of the container even though the proof element itself is untouched.
+fn rotation_keys_case(base: &Value, mutate: impl FnOnce(&mut Value), note: &str) -> Value {
+    let mut bad = base.clone();
+    mutate(&mut bad["keys"]);
+    bad["claim"]["note"] = json!(note);
+    bad
+}
+
 fn rotation_proof_case(base: &Value, mutate: impl FnOnce(&mut Value), note: &str) -> Value {
     let mut bad = base.clone();
     mutate(&mut bad["governance"]["rotation_proofs"]);
