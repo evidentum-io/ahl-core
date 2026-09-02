@@ -2323,6 +2323,82 @@ fn a_key_object_carries_no_member_beyond_the_closed_set() {
     );
 }
 
+/// I-D §7.3 gives every assurance member a closed domain, and §7.6 ties two of them to what
+/// the claim type's own §7.2 material can carry: "`assurance.competing_triggers` is
+/// `enumerated` only where the range required by Section 7.2 is present", and
+/// "`assurance.content_binding` other than `none` occurs only with the content evidence the
+/// claim type requires; a combination the type cannot satisfy is `invalid` rather than
+/// downgraded."
+///
+/// Both are checked where the block is read, not where some path happens to consult them —
+/// which is the whole point. A `statement-anchored` receipt's verification looks at neither
+/// member, so before this it could assert either freely and be accepted.
+#[test]
+fn assurance_members_are_held_to_their_domain_and_to_the_claim_type() {
+    for unknown in ["checked", "Enumerated", ""] {
+        assert_rejects(
+            "statement-anchored-valid.ahl",
+            move |r| r["claim"]["assurance"]["competing_triggers"] = json!(unknown),
+            |e| matches!(e, ReceiptError::AssuranceMismatch { field: "competing_triggers" }),
+            "I-D §7.3 — competing_triggers is not-checked or enumerated",
+        );
+    }
+    for unknown in ["verified", "None", ""] {
+        assert_rejects(
+            "statement-anchored-valid.ahl",
+            move |r| r["claim"]["assurance"]["content_binding"] = json!(unknown),
+            |e| matches!(e, ReceiptError::AssuranceMismatch { field: "content_binding" }),
+            "I-D §7.3 — content_binding is none, plain-verified or keyed-authorized",
+        );
+    }
+    // A non-STRING is a schema failure rather than an overstatement: there is no token to
+    // compare against a domain.
+    for member in ["governance", "competing_triggers", "content_binding"] {
+        assert_rejects(
+            "statement-anchored-valid.ahl",
+            move |r| r["claim"]["assurance"][member] = json!(true),
+            move |e| matches!(e, ReceiptError::Malformed(ref detail) if detail.contains(member)),
+            "I-D §7.3 — an assurance token is a string",
+        );
+    }
+
+    // `enumerated` on a claim type that carries no competing range in any of its material.
+    // Nothing in `statement-anchored` verification reads the member, so nothing else would
+    // ever refuse this.
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| r["claim"]["assurance"]["competing_triggers"] = json!("enumerated"),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "competing_triggers" }),
+        "I-D §7.6 — enumerated only where the §7.2 range is present",
+    );
+    // And `trigger-effective` may not drop it: §7.2 REQUIRES the value of that type.
+    assert_rejects(
+        "trigger-effective-valid.ahl",
+        |r| r["claim"]["assurance"]["competing_triggers"] = json!("not-checked"),
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "competing_triggers" }),
+        "I-D §7.2 — trigger-effective REQUIRES competing_triggers enumerated",
+    );
+
+    // A content binding on a claim type whose §7.2 material carries no record bytes at all.
+    // The namespace member travels with it, so both are set — otherwise the §7.3 presence rule
+    // fires and the claim-type rule is never reached.
+    for (base, binding) in [
+        ("statement-anchored-valid.ahl", "plain-verified"),
+        ("trigger-declared-valid.ahl", "keyed-authorized"),
+        ("governance-state-valid.ahl", "plain-verified"),
+    ] {
+        assert_rejects(
+            base,
+            move |r| {
+                r["claim"]["assurance"]["content_binding"] = json!(binding);
+                r["claim"]["assurance"]["canonicalization_namespace"] = json!("public");
+            },
+            |e| matches!(e, ReceiptError::AssuranceMismatch { field: "content_binding" }),
+            "I-D §7.6 — a content binding only where the type carries content evidence",
+        );
+    }
+}
+
 /// I-D §7.3: `canonicalization_namespace` is "REQUIRED where `content_binding` is not `none`,
 /// and absent otherwise. `private-use`, where the carried descriptor's `canonicalization`
 /// identifier begins `x-`, so that the binding holds only for a verifier configured for this
@@ -3224,8 +3300,10 @@ fn cross_field_consistency_rules_reject() {
             r["claim"]["assurance"]["governance"] = json!("assumed");
             r["governance"]["currency"]["mode"] = json!("assumed");
         },
-        |e| matches!(e, ReceiptError::Malformed(_)),
-        "§4 — governance mode is declared or enumerated",
+        // I-D §7.3 closes the domain at the assurance block, so an unknown token is caught
+        // there — ahead of the currency mode it has to equal.
+        |e| matches!(e, ReceiptError::AssuranceMismatch { field: "governance" }),
+        "I-D §7.3 — governance is declared or enumerated",
     );
     assert_rejects(
         "trigger-declared-valid.ahl",
