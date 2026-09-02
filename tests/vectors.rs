@@ -2510,3 +2510,69 @@ fn the_generator_is_deterministic_across_runs() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// I-D revision 0.4 §7.5 step 1 / §2.2 / §7.6: version-first ordering and manifest binding
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_foreign_version_subject_is_unverifiable_even_with_a_corrupted_id() {
+    // I-D §7.5 step 1 / §2.2: "A verifier MUST likewise check each carried statement's
+    // ahl_version before validating that statement. Any value other than 0.4 yields
+    // unverifiable." Before the fix, id recomputation ran first, so a foreign-version subject
+    // whose copied id also happened to be wrong came out `invalid` instead.
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| {
+            r["envelope"]["payload"]["ahl_version"] = json!("0.3");
+            corrupt(&mut r["subject"]["statement_id"]);
+        },
+        |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
+        "§7.5 step 1 / §2.2 — ahl_version is checked before id recomputation",
+    );
+}
+
+#[test]
+fn a_foreign_version_enumerated_envelope_is_unverifiable() {
+    // The same rule applied to every enumerated envelope — governance currency, competing
+    // triggers, and propagation prefixes alike — not only the subject and the governance
+    // chain. `governance-state-valid.ahl` carries enumerated governance currency material.
+    assert_rejects(
+        "governance-state-valid.ahl",
+        |r| {
+            r["governance"]["currency"]["material"]["entries"][0]["envelope"]["payload"]
+                ["ahl_version"] = json!("0.3");
+        },
+        |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
+        "§7.5 step 1 / §2.2 — every enumerated envelope's ahl_version is checked",
+    );
+}
+
+#[test]
+fn subject_manifest_must_equal_the_payloads_own_copy() {
+    // I-D §7.6: "subject.manifest equals the subject envelope's payload.manifest... this
+    // equality is the only thing that authenticates the copy." Corrupting only the receipt's
+    // OWN (unsigned) copy — never touching the signed envelope — isolates exactly this rule.
+    assert_rejects(
+        "record-ingested-valid.ahl",
+        |r| corrupt(&mut r["subject"]["manifest"]),
+        |e| matches!(e, ReceiptError::SubjectManifestBindingInvalid(_)),
+        "I-D §7.6 — subject.manifest equals the subject envelope's own payload.manifest",
+    );
+
+    // MINOR, undertested by construction: I-D §7.6 also requires the manifest version named by
+    // `subject.manifest` to have `entry_index` STRICTLY SMALLER than `subject.entry_index` — a
+    // "future manifest" binding must be `invalid`. Every genuinely anchored, genuinely signed
+    // statement in this corpus already satisfies that bound by construction, and satisfying it
+    // WRONGLY end to end would require a statement whose payload names a later manifest, signed
+    // and genuinely included in the log tree at its stated index — a generator-level fixture
+    // (a fresh, deliberately-malformed anchored entry, plus a rebuilt inclusion proof), not
+    // something an existing envelope's `manifest` field can be mutated into: any change to a
+    // signed envelope's payload changes its JCS bytes and so its leaf hash, invalidating the
+    // very inclusion path (I-D §7.5 step 3) that must pass before this cross-field check is
+    // ever reached — the same structural wall documented for `media_type` presence above and
+    // for key-array reordering in `receipt::tests::key_set_comparison_is_order_independent`.
+    // The "entry_index strictly smaller" half of `SubjectManifestBindingInvalid` is therefore
+    // exercised by code inspection and by the equality half's sibling branch, not by a vector
+    // here.
+}
