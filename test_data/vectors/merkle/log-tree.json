@@ -240,6 +240,11 @@
       "tree_size": 25
     },
     {
+      "name": "cp26",
+      "root": "sha256:af34ac3bd67b49531c4ab29b2c8866f576e811834953434c981228add1f43df5",
+      "tree_size": 26
+    },
+    {
       "name": "cp28",
       "root": "sha256:c90f7e4b57885d18e9d592e1b327c25c0d140588cf6c4c0711c57eb5668a8838",
       "tree_size": 28

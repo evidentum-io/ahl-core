@@ -50,34 +50,16 @@ implements it as a clean break, not a superset.
 This crate's `verify_receipt` does not yet implement every rule revision 0.4 states, and refuses
 rather than silently mis-verifying wherever the gap could otherwise be mistaken for a pass:
 
-*   **`governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1).** A manifest whose log
-    checkpoint-signing key objects or whose witness key objects differ from its predecessor's is
-    a GOVERNANCE-KEY ROTATION, and the I-D requires a rotation-anchoring proof under the
-    outgoing key state. This crate cannot check such a proof — present, absent, or malformed —
-    so ANY receipt whose carried governance chain rotates either key set is refused outright
-    under `ReceiptError::GovernanceKeyRotationUnsupported`, never silently accepted and never
-    reported as a definite schema defect it has not actually established. The corpus's own
-    manifest version 2 (entry 25) rotates the witness key set, so no vector in this corpus can
-    positively exercise material anchored under it: `governance-state-valid.ahl` and
-    `governance-state-short-range-must-fail.ahl` were rewritten to stay inside the genesis
-    manifest's era instead, and
-    `propagation-complete-rotation-unsupported-must-fail.ahl`,
-    `trigger-effective-co-signed-rotation-unsupported-must-fail.ahl` and
-    `trigger-effective-non-verifying-signature-rotation-unsupported-must-fail.ahl` are vectors
-    that used to be POSITIVE and now demonstrate the refusal instead — along with three existing
-    negative vectors (`statement-anchored-dropped-producer-key-must-fail.ahl`,
-    `trigger-effective-unverified-authority-signature-must-fail.ahl`,
-    `propagation-complete-past-declared-checkpoint-must-fail.ahl`) whose ORIGINAL rule is now
-    shadowed by this earlier-firing refusal. Each names both rules in its generator source
-    comment and its `note`.
-*   **The full three-valued verification-result model (I-D §7.7: `valid` / `invalid` /
-    `unverifiable`).** `verify_receipt` remains the binary `Result<Verdict, ReceiptError>` it
-    always was. A handful of `ReceiptError` variants represent the I-D's `unverifiable` outcome
-    rather than `invalid` — `UnsupportedVersion` (I-D §7.1 "Revision and rule selection"),
-    `CanonicalizationUnsupported` (I-D §6.3), and `GovernanceKeyRotationUnsupported` above — and
+*   **The full three-valued verification-result model (I-D §7.7: `verified` / `invalid` /
+    `unverifiable`, reduced from per-assertion findings).** `verify_receipt` remains the binary
+    `Result<Verdict, ReceiptError>` it always was, rather than a completed-run outcome carrying
+    a scalar result plus a findings list. A handful of `ReceiptError` variants represent the
+    I-D's `unverifiable` outcome rather than `invalid` — `UnsupportedVersion` (I-D §7.1
+    "Revision and rule selection") and `CanonicalizationUnsupported` (I-D §6.3) among them — and
     each says so on its own doc comment, but a caller that needs to DISTINGUISH `invalid` from
-    `unverifiable` must match on the specific variant; there is no separate return type or
-    finding enum carrying that distinction structurally.
+    `unverifiable` must match on the specific variant, and a capability gap on one assertion
+    still aborts the whole run rather than being isolated to its own finding while independent
+    assertions continue to be checked.
 *   **Canonicalization procedures beyond `jcs` and `exact-bytes` (I-D §2.6).** These are the
     only two the I-D itself defines, and the only two this crate implements. A dataset declaring
     any other `canonicalization` identifier — a registered one this crate has not implemented,
@@ -85,6 +67,15 @@ rather than silently mis-verifying wherever the gap could otherwise be mistaken 
     (`ReceiptError::CanonicalizationUnsupported`), never `invalid` and never rehabilitated to
     `content_binding: "none"`, exactly as I-D §6.3's conformance table requires. No vector in
     this corpus currently exercises an unimplemented identifier end to end.
+
+`governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1) IS implemented: a manifest whose
+log or witness key objects, compared as sets, differ from its predecessor's is a GOVERNANCE-KEY
+ROTATION, and its rotation-proof element is verified under the OUTGOING key state — the
+checkpoint signature under the outgoing log key, the manifest's inclusion under that checkpoint,
+and, AT L3, a cosignature under the outgoing witness set. The corpus's manifest version 2 (entry
+25) rotates the witness key set, and every vector whose chain carries it now carries a genuine
+`governance.rotation_proofs[]` element proving that transition; `governance-key-rotation-proof-\
+*-must-fail.ahl` cover four ways such an element can fail.
 
 ## Layout
 

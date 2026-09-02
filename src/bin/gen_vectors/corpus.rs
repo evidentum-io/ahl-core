@@ -706,6 +706,16 @@ impl Corpus {
             (20, 0),
             (24, 0),
             (25, 0),
+            // cp26: manifest_index 0 is deliberate, not the checkpoint's true active manifest
+            // (v2, entry 25) — this is the I-D §7.1 rotation-anchoring EXCEPTION's own
+            // checkpoint, which binds to the manifest version active IMMEDIATELY BEFORE the
+            // rotating manifest's entry index (the OUTGOING state), never to the version the
+            // rotation installs. Operationally it is "an ordinary artifact of the rotation": the
+            // log operator anchored manifest v2 at entry 25 and kept signing checkpoints
+            // cosigned by the OUTGOING witness (witness-1) for a few more entries before cutting
+            // over to witness-2, which is exactly what I-D §7.1 says makes such a checkpoint
+            // realizable against a real log rather than something an operator must manufacture.
+            (26, 0),
             (28, 25),
             (29, 25),
             (30, 25),
@@ -724,6 +734,7 @@ impl Corpus {
                     20 => "cp20",
                     24 => "cp24",
                     25 => "cp25",
+                    26 => "cp26",
                     28 => "cp28",
                     29 => "cp29",
                     30 => "cp30",
@@ -787,6 +798,21 @@ impl Corpus {
         let proof = inclusion_proof(&leaves[..at(tree_size)], index)
             .expect("entry index within the checkpoint");
         proof_path_hex(&proof)
+    }
+
+    /// The `governance.rotation_proofs[]` element for manifest v2's rotation at entry 25 (I-D
+    /// §7.1): `cp26` — signed by the log key (unchanged across the rotation in this corpus) and
+    /// cosigned by the OUTGOING witness, witness-1 — proves the rotating manifest's own
+    /// anchoring under the state it retires. This corpus has exactly one governance-key
+    /// rotation, so one element suffices for every vector whose chain carries manifest v2.
+    pub fn rotation_proof_element(&self, keys: &Keys) -> Value {
+        let cp26 = self.anchor("cp26");
+        json!({
+            "manifest_entry_index": 25,
+            "checkpoint": cp26.checkpoint,
+            "inclusion_path": self.log_path(25, cp26.tree_size()),
+            "witnesses": [ cp26.witness_entry(keys) ],
+        })
     }
 
     /// Inclusion path of leaf `index` in a committed record-sorted tree.
