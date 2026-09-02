@@ -1177,13 +1177,29 @@ const TEST_ADAPTOR_PROFILE_ID: &str = "ahl-test-log-v1";
 /// a silent fallback to a form this crate cannot yet vouch for end to end (see
 /// [`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment).
 fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> Result<Vec<u8>> {
-    match profile_id {
-        TEST_ADAPTOR_PROFILE_ID => Ok(crate::checkpoint_signing_bytes(checkpoint)?),
-        other => Err(ReceiptError::AdaptorCapabilityUnsupported {
-            id: other.to_owned(),
-            capability: "a checkpoint signing-bytes procedure",
-        }),
+    check_profile_supported(profile_id)?;
+    Ok(crate::checkpoint_signing_bytes(checkpoint)?)
+}
+
+/// Refuse a profile id this verifier has no checkpoint procedure for, at the point I-D §7.5
+/// step 2 resolves the profile — after the recomputed-hash comparison and before any carried
+/// material is verified.
+///
+/// The refusal is a capability outcome about the receipt's own pinned profile, so it is
+/// decidable from the id alone and nothing in the receipt can change it. Deciding it here,
+/// rather than where the signing bytes are first needed, is what keeps an unsupported-profile
+/// receipt from being walked through the governance induction — verifying signatures, resolving
+/// keys, checking manifest schemas — on its way to a refusal that was certain from step 2.
+/// Ordering that work ahead of a decided refusal would let material this verifier has already
+/// declined to interpret drive it.
+fn check_profile_supported(profile_id: &str) -> Result<()> {
+    if profile_id == TEST_ADAPTOR_PROFILE_ID {
+        return Ok(());
     }
+    Err(ReceiptError::AdaptorCapabilityUnsupported {
+        id: profile_id.to_owned(),
+        capability: "a checkpoint signing-bytes procedure",
+    })
 }
 
 /// Reject a receipt-borne checkpoint's optional `raw` framing (I-D §7.1, §7.5 step 2: "WHERE
@@ -3076,6 +3092,10 @@ fn verify_nested(
     if profile.hash() != text(adaptor, "hash")? {
         return Err(ReceiptError::AdaptorHashMismatch { id: adaptor_id.to_owned() });
     }
+    // The held document is the one the receipt names; whether this build can INTERPRET a
+    // receipt under that profile is the next question, and it is answered from the id alone
+    // (see [`check_profile_supported`]) — before the governance induction, never after it.
+    check_profile_supported(adaptor_id)?;
     // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values" — a
     // capability boolean is not itself reconciliation. This build wires NO profile's `raw`
     // parser into the verifier ([`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment), so a policy

@@ -1581,7 +1581,12 @@ fn ahl_adaptor_atl_v1_receipts_are_refused_as_a_profile_limitation() {
     // unit-tested (`ahl_core::checkpoint_signing_bytes_for`, `lib.rs`). A receipt naming it —
     // even under a policy that HOLDS the profile — is refused as
     // `AdaptorCapabilityUnsupported`, never accepted.
-    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+    // A receipt carrying SIGNED, non-genesis governance hops (entry 9's `key` statement and
+    // entry 25's manifest v2): repinning the genesis manifest below breaks their lineage, so
+    // if the refusal were deferred until the signing bytes are first needed, the induction
+    // would report a broken chain instead — material this verifier has declined to interpret
+    // deciding what it reports. The refusal at §7.5 step 2 is what keeps that from happening.
+    let (_, mut receipt) = read_receipt("governance-state-valid.ahl");
     let mut policy = trust_policy();
     let document = policy.adaptor_profiles["ahl-test-log-v1"].document.clone();
     let atl_profile = AdaptorProfile {
@@ -2381,10 +2386,33 @@ fn anchoring_adaptor_must_match_the_active_manifests_own_pin() {
         .insert("a-second-profile-local-policy-also-holds".to_owned(), other_profile);
     let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
     receipt["anchoring"]["adaptor"]["id"] = json!("a-second-profile-local-policy-also-holds");
-    receipt["anchoring"]["adaptor"]["hash"] = json!(other_hash);
+    receipt["anchoring"]["adaptor"]["hash"] = json!(&other_hash);
+    // This build interprets exactly ONE profile id, so naming another is refused at §7.5
+    // step 2 as a profile limitation — before the receipt's own material is read at all, which
+    // is a stronger refusal than the binding disagreement, not a weaker one.
     assert!(
         matches!(
             verify_receipt(&receipt, &policy),
+            Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. })
+                if id == "a-second-profile-local-policy-also-holds"
+        ),
+        "`anchoring.adaptor` naming a profile this build cannot interpret must be refused"
+    );
+
+    // The same disagreement in the other direction, where the profile IS one this build
+    // interprets: the receipt names `ahl-test-log-v1` while the active manifest pins the other
+    // profile. That is the §3.2 binding failure, and nothing about it is a capability gap.
+    let (_, mut mismatched) = read_receipt("statement-anchored-valid.ahl");
+    mismatched["governance"]["chain"][0]["envelope"]["payload"]["log"]["adaptor"] = json!({
+        "id": "a-second-profile-local-policy-also-holds",
+        "hash": other_hash,
+    });
+    let anchor = entry_id(&mismatched["governance"]["chain"][0]["envelope"]);
+    mismatched["governance"]["genesis_entry_id"] = json!(&anchor);
+    let repinned = TrustPolicy { genesis_entry_id: anchor, ..policy };
+    assert!(
+        matches!(
+            verify_receipt(&mismatched, &repinned),
             Err(ReceiptError::AdaptorBindingInvalid { .. })
         ),
         "`anchoring.adaptor` naming a profile the manifest itself does not pin must be rejected"
