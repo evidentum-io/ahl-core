@@ -48,6 +48,14 @@ rather than silently mis-verifying wherever the gap could otherwise be mistaken 
     `reconcile_atl_checkpoint_raw`, `atl_checkpoint_time`/`atl_checkpoint_time_nanos` — and is
     unit-tested there over a synthetic checkpoint, for a client integrating ATL directly.
 
+Also not yet in the corpus: no vector carries a witness key sourced `local-policy` (I-D §7.1).
+The corpus trust policy holds no trusted witness key at all, so every witness key in every
+vector is `manifest-chain`, bound by `(witness_id, key_id, pubkey)` to the manifest version
+active for the checkpoint being cosigned. The `local-policy` branch — admissible only for
+witness keys the verifier ALREADY TRUSTS, matched on both `key_id` and `pubkey` against local
+configuration — is covered by `tests/vectors.rs` instead, since what decides it is the
+verifier's own configuration rather than anything a portable vector can carry.
+
 Also not yet in the corpus: this corpus's ONE governance-key rotation (manifest v2, entry 25)
 rotates the WITNESS set only — the log checkpoint-signing key never itself rotates anywhere in
 this corpus. `governance-key-rotation-proof-incoming-key-must-fail.ahl` therefore substitutes a

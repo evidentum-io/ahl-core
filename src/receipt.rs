@@ -3101,10 +3101,13 @@ fn verify_enumeration(
 
 /// Verify an Evidence Receipt against locally configured policy.
 ///
-/// Implements the receipt format's §5 algorithm in order: parse and versions and §3.1 limits;
-/// adaptor-profile resolution; checkpoint, key binding, witness cosignatures and inclusion;
-/// governance chain from the configured genesis anchor; the §3 claim-material schema; the §2.3
-/// cross-field consistency rules; and finally the rendered boundary.
+/// Implements I-D §7.5's algorithm in the order it fixes: step 1, versions before anything
+/// else, then parsing, the §7.8 limits and identifier recomputation; step 2, adaptor-profile
+/// resolution; step 3, the key-independent structural and path checks over the whole carried
+/// document, no signature among them; step 4, the governance bootstrap of §7.5.1 as an
+/// induction from the configured genesis anchor, with the authenticated checkpoint validation
+/// of 4f; step 5, the claim-material requirements of §7.2; step 6, the cross-field rules of
+/// §7.6; and step 7, the rendered boundary, never stronger than what was proven.
 ///
 /// # Errors
 ///
@@ -3120,8 +3123,8 @@ pub fn verify_receipt(receipt: &Value, policy: &TrustPolicy) -> Result<Verdict> 
 }
 
 /// Verify a receipt at nesting `depth`, sharing the whole tree's resource budget.
-// The §5 algorithm is a fixed ordered sequence of steps; splitting it into helpers that each
-// take the growing set of intermediate results would obscure the order the format mandates.
+// The §7.5 algorithm is a fixed ordered sequence of steps; splitting it into helpers that each
+// take the growing set of intermediate results would obscure the order the I-D mandates.
 #[allow(clippy::too_many_lines)]
 fn verify_nested(
     receipt: &Value,
@@ -3131,7 +3134,7 @@ fn verify_nested(
 ) -> Result<Verdict> {
     budget.enter(depth)?;
 
-    // --- §5 step 1: versions, identifiers -------------------------------------------
+    // --- §7.5 step 1: versions, identifiers -----------------------------------------
     for (field, expected) in
         [("ahl_receipt_version", RECEIPT_VERSION), ("spec_version", SPEC_VERSION)]
     {
@@ -3164,7 +3167,7 @@ fn verify_nested(
     let subject_index = number(subject, "entry_index")?;
     let subject_type = statement_type(payload)?.to_owned();
 
-    // --- §5 step 2: adaptor profile -------------------------------------------------
+    // --- §7.5 step 2: adaptor profile ---------------------------------------------
     // I-D §3.2, §7.5 step 2: "MUST recompute the digest over the artifact rather than trusting
     // any value carried with it, and MUST reject a receipt whose pinned digest does not match
     // the artifact held." Two DIFFERENT facts, two DIFFERENT outcomes: the profile id itself
@@ -3374,7 +3377,7 @@ fn verify_nested(
     }
     let record_subject = check_record_subject(claim, payload, &claim_type, &subject_type)?;
 
-    // --- §5 step 5: the §3 claim-material schema ------------------------------------
+    // --- §7.5 step 5: the §7.2 claim-material requirements --------------------------
     let ctx = ClaimCtx {
         receipt,
         policy,
