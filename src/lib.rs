@@ -412,6 +412,93 @@ pub fn checkpoint_signing_bytes(cp: &Value) -> AhlResult<Vec<u8>> {
     Ok(jcs(&Value::Object(object)))
 }
 
+/// Render a Unix nanosecond timestamp in the exact form adaptor profile `ahl-adaptor-atl-v1`
+/// §6.3 requires: UTC, exactly nine fractional-second digits, `Z` suffix.
+///
+/// # Panics
+///
+/// Never for any `nanos` value representable as a valid Unix instant within this crate's
+/// supported date range; `time::OffsetDateTime` covers many millennia either side of 1970,
+/// far beyond what this crate's corpora need.
+#[must_use]
+pub fn atl_checkpoint_time(nanos: u64) -> String {
+    let whole = i64::try_from(nanos / 1_000_000_000).unwrap_or(i64::MAX);
+    let sub = u32::try_from(nanos % 1_000_000_000).unwrap_or(0);
+    let instant = time::OffsetDateTime::from_unix_timestamp(whole)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        + time::Duration::nanoseconds(i64::from(sub));
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
+        instant.year(),
+        u8::from(instant.month()),
+        instant.day(),
+        instant.hour(),
+        instant.minute(),
+        instant.second(),
+        instant.nanosecond()
+    )
+}
+
+/// Assemble adaptor profile `ahl-adaptor-atl-v1` §6.1's fixed 98-byte checkpoint blob.
+///
+/// Built from its plain components — the byte layout a producer signs (§6.1, §6.5) and a
+/// verifier both parses `raw` against and reconstructs to check a signature (§6.2, §6.4, §6.5).
+///
+/// | offset | size | field |
+/// | --- | --- | --- |
+/// | 0 | 18 | magic `ATL-Protocol-v1-CP` |
+/// | 18 | 32 | Origin ID (raw SHA-256 of the log id's hex payload) |
+/// | 50 | 8 | tree size, u64 little-endian |
+/// | 58 | 8 | timestamp, u64 little-endian Unix nanoseconds |
+/// | 66 | 32 | root hash (raw SHA-256) |
+#[must_use]
+pub fn atl_checkpoint_blob(
+    origin: &[u8; 32],
+    tree_size: u64,
+    timestamp_ns: u64,
+    root: &[u8; 32],
+) -> [u8; 98] {
+    let mut blob = [0u8; 98];
+    blob[0..18].copy_from_slice(b"ATL-Protocol-v1-CP");
+    blob[18..50].copy_from_slice(origin);
+    blob[50..58].copy_from_slice(&tree_size.to_le_bytes());
+    blob[58..66].copy_from_slice(&timestamp_ns.to_le_bytes());
+    blob[66..98].copy_from_slice(root);
+    blob
+}
+
+/// Build a signed checkpoint under adaptor profile `ahl-adaptor-atl-v1`.
+///
+/// The Ed25519 signature is over the 98-byte blob of [`atl_checkpoint_blob`] (§6.1, §6.5), not
+/// `JCS(cp minus "signature")` — the form [`checkpoint`] builds, which is `ahl-test-log-v1`'s
+/// own (its §5).
+///
+/// # Errors
+///
+/// Returns [`AhlError::Hex`]/[`AhlError::BadLength`] if `log_id` or `root_hash` are not
+/// `sha256:<hex>` family strings over exactly 32 octets.
+pub fn atl_checkpoint(
+    log_id: &str,
+    tree_size: u64,
+    root_hash: &str,
+    timestamp_ns: u64,
+    key: &TestKey,
+) -> AhlResult<Value> {
+    let origin = parse_hash_hex(log_id)?;
+    let root = parse_hash_hex(root_hash)?;
+    let blob = atl_checkpoint_blob(&origin, tree_size, timestamp_ns, &root);
+    let checkpoint_time = atl_checkpoint_time(timestamp_ns);
+    let signature = key.sign(&blob);
+    Ok(json!({
+        "log_id": log_id,
+        "tree_size": tree_size,
+        "root_hash": root_hash,
+        "checkpoint_time": checkpoint_time,
+        "key_id": key.key_id(),
+        "signature": signature,
+    }))
+}
+
 /// The bytes a witness cosigns: `JCS({"checkpoint": <signed cp>, "witness_id": <id>})`.
 #[must_use]
 pub fn cosignature_bytes(signed_checkpoint: &Value, witness_id: &str) -> Vec<u8> {
