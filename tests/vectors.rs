@@ -2136,6 +2136,35 @@ fn a_present_cosignature_member_of_the_wrong_type_is_invalid() {
     );
 }
 
+/// I-D §7.1: a `governance.rotation_proofs[]` element's `witnesses` is "an array in the shape
+/// of `anchoring.witnesses[]`", and at L3 at least one of its cosignatures must verify "under a
+/// witness key of the OUTGOING state".
+///
+/// Those keys are resolved straight out of the outgoing manifest by `(witness_id, key_id)`, so
+/// the identity binding of `anchoring.witnesses[]` holds here by construction: a cosignature
+/// naming an identity the outgoing manifest does not declare for that key resolves to no key
+/// at all, and at L3 that leaves the rotation unattested.
+#[test]
+fn a_rotation_proof_cosignature_binds_to_the_outgoing_manifests_identity() {
+    assert_rejects(
+        "governance-state-valid.ahl",
+        // The outgoing state declares this key under `witness-1`; `witness-2` is the identity
+        // the rotation INSTALLS, and naming it here attests nothing about the handover.
+        |r| {
+            r["governance"]["rotation_proofs"][0]["witnesses"][0]["witness_id"] =
+                json!("witness-2");
+        },
+        |e| {
+            matches!(
+                e,
+                ReceiptError::RotationProofInvalid { manifest_entry_index: 25, ref detail }
+                    if detail.contains("OUTGOING")
+            )
+        },
+        "I-D §7.1 — a rotation proof cosigns under the outgoing manifest's own witness identity",
+    );
+}
+
 /// I-D §7.1: "`source` is exactly one of `\"manifest-chain\"` or `\"local-policy\"`."
 ///
 /// There is no third token and no default. An unrecognized one is a schema failure over the
