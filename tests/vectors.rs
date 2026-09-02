@@ -1017,7 +1017,7 @@ fn trust_policy() -> TrustPolicy {
             .expect("committed dataset key");
     TrustPolicy {
         genesis_entry_id: field_str(policy, "genesis_entry_id").expect("genesis anchor").to_owned(),
-        genesis_key_ids: strings(&policy["genesis_key_ids"]).into_iter().collect(),
+        genesis_key_ids: Some(strings(&policy["genesis_key_ids"]).into_iter().collect()),
         adaptor_profiles: policy["adaptor_profiles"]
             .as_object()
             .expect("adaptor profiles")
@@ -1193,14 +1193,25 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         | "governance-key-rotation-proof-missing-witness-must-fail.ahl" => {
             matches!(error, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, .. })
         }
-        "governance-key-rotation-proof-missing-must-fail.ahl"
-        | "governance-key-rotation-proof-wrong-index-must-fail.ahl"
-        | "governance-key-rotation-proof-duplicate-must-fail.ahl"
+        "governance-key-rotation-proof-missing-must-fail.ahl" => {
+            matches!(
+                error,
+                ReceiptError::RotationProofInvalid { manifest_entry_index: 25, detail }
+                    if detail.contains("carries no (further) element")
+            )
+        }
+        "governance-key-rotation-proof-wrong-index-must-fail.ahl" => {
+            matches!(
+                error,
+                ReceiptError::RotationProofInvalid { manifest_entry_index: 25, detail }
+                    if detail.contains("carries `manifest_entry_index` 24, not 25")
+            )
+        }
+        "governance-key-rotation-proof-duplicate-must-fail.ahl"
         | "governance-key-rotation-proof-extra-must-fail.ahl" => {
             matches!(
                 error,
-                ReceiptError::GovernanceChainInvalid(detail)
-                    if detail.contains("does not equal EXACTLY")
+                ReceiptError::GovernanceChainInvalid(detail) if detail.contains("beyond the")
             )
         }
         "governance-key-rotation-proof-empty-on-non-rotating-must-fail.ahl" => {
@@ -1214,6 +1225,27 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         }
         "governance-key-rotation-proof-malformed-witness-entry-must-fail.ahl" => {
             matches!(error, ReceiptError::Malformed(detail) if detail.contains("cosigned_at"))
+        }
+        "governance-key-statement-wrong-key-id-must-fail.ahl" => {
+            matches!(
+                error,
+                ReceiptError::GovernanceChainInvalid(detail)
+                    if detail.contains("does not equal `sha256:`-of-`key.pubkey`")
+            )
+        }
+        "governance-key-statement-missing-valid-from-must-fail.ahl" => {
+            matches!(
+                error,
+                ReceiptError::GovernanceChainInvalid(detail)
+                    if detail.contains("carries no `key.valid_from`")
+            )
+        }
+        "governance-key-statement-short-pubkey-must-fail.ahl" => {
+            matches!(
+                error,
+                ReceiptError::GovernanceChainInvalid(detail)
+                    if detail.contains("does not decode to exactly 32 octets")
+            )
         }
         "record-ingested-stale-manifest-must-fail.ahl" => {
             matches!(error, ReceiptError::SubjectManifestBindingInvalid(_))
@@ -1259,6 +1291,32 @@ fn a_receipt_carrying_the_wrong_genesis_anchor_is_rejected() {
         matches!(verify_receipt(&receipt, &policy), Err(ReceiptError::GenesisAnchorMismatch)),
         "a self-supplied genesis anchor must be compared against configured policy"
     );
+}
+
+#[test]
+fn a_receipt_carrying_the_wrong_genesis_key_fingerprints_is_rejected() {
+    // WHERE local policy HOLDS fingerprints (this test's policy does, via `trust_policy()`),
+    // a mismatch is rejected exactly like a mismatched entry id (I-D §7.5.1 4a).
+    let mut policy = trust_policy();
+    policy.genesis_key_ids = Some(BTreeSet::from([sha256_hex(b"not the genesis producer key")]));
+    let (_, receipt) = read_receipt("statement-anchored-valid.ahl");
+    assert!(
+        matches!(verify_receipt(&receipt, &policy), Err(ReceiptError::GenesisAnchorMismatch)),
+        "a configured fingerprint set, once held, must be compared and enforced"
+    );
+}
+
+#[test]
+fn genesis_key_fingerprints_are_optional_local_policy() {
+    // I-D §7.5.1 4a: "WHERE LOCAL POLICY HOLDS initial key fingerprints... which is optional...
+    // where it holds none, this comparison does not arise and its absence is not a defect." A
+    // verifier configured with `genesis_key_ids: None` — entry-id-only policy — must still
+    // accept a receipt whose genesis entry id matches, never demanding fingerprints it was
+    // never configured to hold.
+    let policy = TrustPolicy { genesis_key_ids: None, ..trust_policy() };
+    let (_, receipt) = read_receipt("statement-anchored-valid.ahl");
+    verify_receipt(&receipt, &policy)
+        .expect("an entry-id-only policy must accept a receipt it never asked for fingerprints on");
 }
 
 #[test]
@@ -1403,6 +1461,19 @@ fn adaptor_capability_gaps_are_reported_as_profile_limitations() {
     with_raw["anchoring"]["checkpoint"]["raw"] = Value::String("base64:AAAA".to_owned());
     assert!(matches!(
         verify_receipt(&with_raw, &policy),
+        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
+    ));
+
+    // I-D §7.1: a rotation-proof element's `checkpoint` is "in the receipt-borne form defined
+    // above" — the SAME strict shape as `anchoring.checkpoint`, `raw` included, so the SAME
+    // profile-capability gate applies to it. `governance-state-valid.ahl` carries a genuine
+    // `governance.rotation_proofs[0]`, and this profile defines no binary framing either.
+    let (_, governance_state) = read_receipt("governance-state-valid.ahl");
+    let mut rotation_with_raw = governance_state;
+    rotation_with_raw["governance"]["rotation_proofs"][0]["checkpoint"]["raw"] =
+        Value::String("base64:AAAA".to_owned());
+    assert!(matches!(
+        verify_receipt(&rotation_with_raw, &policy),
         Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
     ));
 
@@ -1864,13 +1935,25 @@ fn the_manifest_log_object_value_grammars_are_enforced() {
     reject_by_log_schema(|log| log["keys"][0]["valid_from_index"] = json!(1.5), "fractional index");
     reject_by_log_schema(|log| log["keys"][0]["key_id"] = json!("sha256:zz"), "key_id not hex");
 
-    // The same key-object shape governs the producer and witness arrays (§7.2, "same form").
+    // I-D §6.2: a PRODUCER key object is `{key_id, pubkey}` ONLY — no `valid_from_index` at
+    // all, unlike log/witness key objects (checked next) which require it. So a producer key
+    // object that DOES carry `valid_from_index` is the schema failure here, not one that
+    // lacks it.
     reject_by_manifest_schema(
         |payload| {
-            payload["keys"][0].as_object_mut().expect("key object").remove("valid_from_index");
+            payload["keys"][0]["valid_from_index"] = json!(0);
         },
-        "producer key object without valid_from_index",
+        "producer key object carrying valid_from_index",
     );
+    reject_by_manifest_schema(
+        |payload| {
+            payload["keys"][0]["extra"] = json!("unexpected");
+        },
+        "producer key object carrying an unknown member",
+    );
+
+    // The log/witness key-object shape DOES require `valid_from_index` (§7.2/§7.3, "same
+    // form" as one another, but distinct from the producer shape above).
     reject_by_manifest_schema(
         |payload| {
             payload["witnesses"][0]["keys"][0]
