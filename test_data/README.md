@@ -27,15 +27,7 @@ rather than silently mis-verifying wherever the gap could otherwise be mistaken 
     each says so on its own doc comment, but a caller that needs to DISTINGUISH `invalid` from
     `unverifiable` must match on the specific variant, and a capability gap on one assertion
     still aborts the whole run rather than being isolated to its own finding while independent
-    assertions continue to be checked. One conflation worth naming precisely: I-D §7.5 step 2
-    distinguishes a profile local policy simply does not HOLD (`unverifiable`) from one it
-    holds AT A DIFFERENT HASH than the receipt pins (`invalid` — the receipt names a document
-    policy can prove is not the one it trusts, a stronger and different claim than "unknown to
-    me"). `ReceiptError::AdaptorUnknown` currently maps both cases to the SAME variant, losing
-    that distinction; a caller cannot yet tell "I have never heard of this profile" apart from
-    "I hold this profile id at a hash that disagrees with what was carried" without inspecting
-    policy state itself. This is part of the same three-valued-result gap above, not a separate
-    one — call sites can approximate the difference from local policy alone for now.
+    assertions continue to be checked.
 *   **Canonicalization procedures beyond `jcs` and `exact-bytes` (I-D §2.6).** These are the
     only two the I-D itself defines, and the only two this crate implements. A dataset declaring
     any other `canonicalization` identifier — a registered one this crate has not implemented,
@@ -43,6 +35,18 @@ rather than silently mis-verifying wherever the gap could otherwise be mistaken 
     (`ReceiptError::CanonicalizationUnsupported`), never `invalid` and never rehabilitated to
     `content_binding: "none"`, exactly as I-D §6.3's conformance table requires. No vector in
     this corpus currently exercises an unimplemented identifier end to end.
+*   **ATL adaptor profile support in the receipt verifier.** Leaf construction (adaptor
+    `ahl-adaptor-atl-v1` §4.2: `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`),
+    origin-derived `log_id` (§7.1: `sha256(Origin ID)`, Origin ID the SHA-256 of a 16-byte Data
+    Tree UUID), and profile release (§14: "Until this document is released as an immutable,
+    openly published artifact… no manifest may pin it") are pending — none is dispatched
+    anywhere in this crate today, so a receipt naming that profile is refused as
+    `ReceiptError::AdaptorCapabilityUnsupported`, never accepted. The checkpoint-level
+    mechanism (§6.1-§6.5: assembling and signing the 98-byte blob, and reconciling a carried
+    `raw` byte-for-byte against it) exists as `pub` helpers in `lib.rs` —
+    `checkpoint_signing_bytes_for`, `atl_checkpoint_blob`/`atl_checkpoint_blob_from_json`,
+    `reconcile_atl_checkpoint_raw`, `atl_checkpoint_time`/`atl_checkpoint_time_nanos` — and is
+    unit-tested there over a synthetic checkpoint, for a client integrating ATL directly.
 
 Also not yet in the corpus: this corpus's ONE governance-key rotation (manifest v2, entry 25)
 rotates the WITNESS set only — the log checkpoint-signing key never itself rotates anywhere in
@@ -114,7 +118,12 @@ The corpus is 33 anchored entries carrying these interlocking scenarios:
    would be void.
 7. **Continued history.** A consistency proof from cp20 to cp24 backs
    `assurance.continued_history` on a receipt, and a proof generated for a different pair of
-   sizes — genuine, correctly built, about the wrong fact — is rejected. A third vector pairs
+   sizes — genuine, correctly built, about the wrong fact — is rejected. `anchoring.checkpoint`
+   and `anchoring.later_checkpoint` each carry their OWN witness cosignatures — the primary
+   one's in the sibling `anchoring.witnesses[]`, cp24's own in `anchoring.later_witnesses[]`
+   (I-D §7.1: present if and only if `later_checkpoint` is carried; at L3, at least one element
+   MUST verify, cosigning `later_checkpoint` itself rather than `anchoring.checkpoint`). A third
+   vector pairs
    enumerated governance currency with a later checkpoint: every piece of it is individually
    valid, and it is still refused, because receipt format §2.1 wants governance coverage through
    the later checkpoint's tree size while §4 fixes enumerated material at the anchoring
