@@ -32,9 +32,9 @@ use crate::descriptor::CanonicalizationDescriptor;
 use crate::range_proof;
 use crate::tree::ValidatedLeafSet;
 use crate::{
-    checkpoint_signing_bytes, commit_keyed, commit_plain, cosignature_bytes, decode_pubkey,
-    descriptor, entry_id, hash_hex, jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id,
-    tree_root, verify_signature, AhlError, B64,
+    commit_keyed, commit_plain, cosignature_bytes, decode_pubkey, descriptor, entry_id, hash_hex,
+    jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id, tree_root, verify_signature,
+    AhlError, B64,
 };
 
 /// Receipt container version this verifier implements (I-D §7.1: `ahl_receipt_version`).
@@ -217,6 +217,25 @@ pub enum ReceiptError {
         id: String,
     },
 
+    /// `anchoring.adaptor` names a different profile than the active manifest's own
+    /// `log.adaptor` pins for the checkpoint being verified (I-D §3.2: "the profile id and
+    /// hash are pinned in the manifest and carried in every Evidence Receipt" — the two
+    /// carriers of the SAME fact, which MUST agree).
+    ///
+    /// Checked BEFORE any profile-specific parsing or signature rule: a receipt naming one
+    /// profile in `anchoring.adaptor` while its governance chain pins another must never reach
+    /// that OTHER profile's capabilities merely because local policy happens to recognize it.
+    #[error(
+        "`anchoring.adaptor` names `{carried}`, but the manifest active for this checkpoint \
+         pins `{pinned}` (I-D §3.2)"
+    )]
+    AdaptorBindingInvalid {
+        /// What the active manifest's `log.adaptor` pins, as `id (hash)`.
+        pinned: String,
+        /// What `anchoring.adaptor` carries, as `id (hash)`.
+        carried: String,
+    },
+
     /// The receipt carries material the pinned adaptor profile does not define.
     ///
     /// This is a limitation of the profile, not of the container format: another profile that
@@ -315,6 +334,21 @@ pub enum ReceiptError {
     WitnessCosignatureInvalid {
         /// The witness whose cosignature failed.
         witness_id: String,
+    },
+
+    /// AT L3, a checkpoint carries no verifying witness cosignature at all (I-D §3.3, §7.5:
+    /// "At L3 a verifier accepts a checkpoint C only with a valid witness cosignature").
+    ///
+    /// Distinct from [`Self::WitnessCosignatureInvalid`], which names a cosignature that WAS
+    /// carried and failed to verify: this is what fires when none verified — zero carried, or
+    /// every carried entry failed — under a manifest version that requires one.
+    #[error(
+        "AT L3, a checkpoint of tree_size {tree_size} carries no verifying witness \
+         cosignature under the manifest version active for it"
+    )]
+    CheckpointUnwitnessed {
+        /// The unwitnessed checkpoint's tree size.
+        tree_size: u64,
     },
 
     /// `subject.entry_index` is not committed by the checkpoint (§5 step 3).
@@ -1030,14 +1064,22 @@ fn checkpoint_object(value: &Value) -> Result<&Value> {
     Ok(value)
 }
 
-/// The only adaptor profile this build carries a `checkpoint.raw` wire-format parser for.
+/// The only adaptor profile this build carries a dedicated wire-format procedure for beyond
+/// the corpus's own test profile: `ahl-adaptor-atl-v1`.
 ///
-/// I-D §7.1 leaves the `raw` framing profile-defined; this crate implements exactly one, the
-/// pinned companion profile `ahl-adaptor-atl-v1` (its §6.1 "ATL binary form"). Any other
-/// profile id reaching [`reconcile_checkpoint_raw`] — including the corpus's own minimal
-/// `ahl-test-log-v1`, which §6.4 of that profile note explicitly defines no framing for at
-/// all — has no parser here, by construction.
+/// I-D §3.2 leaves the checkpoint's signing form, and the `raw` framing, both profile-defined;
+/// this crate implements exactly two profiles' procedures — the corpus's own minimal
+/// `ahl-test-log-v1` (§5 of its document: `JCS(checkpoint minus "signature")`,
+/// [`crate::checkpoint_signing_bytes`]) and the pinned companion profile `ahl-adaptor-atl-v1`
+/// (its §6.1 "ATL binary form", below). Any OTHER profile id has no procedure here, by
+/// construction, and reaching one is the profile-limitation outcome
+/// ([`ReceiptError::AdaptorCapabilityUnsupported`]) — never a silent fallback to either
+/// documented form by default.
 const ATL_ADAPTOR_PROFILE_ID: &str = "ahl-adaptor-atl-v1";
+
+/// The corpus's own minimal test profile — the ONE other profile this build has a checkpoint
+/// signing-bytes procedure for.
+const TEST_ADAPTOR_PROFILE_ID: &str = "ahl-test-log-v1";
 
 /// Parse an `ahl-adaptor-atl-v1` §6.3 `checkpoint_time` rendering into its exact Unix
 /// nanosecond count.
@@ -1074,6 +1116,89 @@ fn atl_checkpoint_time_nanos(value: &str) -> Result<u64> {
     let seconds = u64::try_from(parsed.unix_timestamp()).map_err(|_| invalid())?;
     let nanos = u64::from(parsed.nanosecond());
     seconds.checked_mul(1_000_000_000).and_then(|s| s.checked_add(nanos)).ok_or_else(invalid)
+}
+
+/// Assemble the `ahl-adaptor-atl-v1` §6.1 98-byte blob FROM a receipt-borne checkpoint's own
+/// JSON members — `log_id`, `tree_size`, `checkpoint_time`, `root_hash` — under the §6.2
+/// mapping table. This is the exact reverse of parsing `raw`: the same layout, built from the
+/// JSON side rather than read from the wire side, so [`reconcile_atl_checkpoint_raw`] (compare
+/// a carried `raw` against it) and [`atl_checkpoint_signing_bytes`] (the bytes the log actually
+/// signs, §6.5 steps 1-2) share one assembler rather than two hand-written copies of the same
+/// layout.
+fn atl_checkpoint_blob(checkpoint: &Value) -> Result<[u8; 98]> {
+    let invalid = |detail: String| ReceiptError::Malformed(format!("checkpoint: {detail}"));
+
+    let log_id = checkpoint
+        .get("log_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`log_id` is REQUIRED".to_owned()))?;
+    let origin = hex::decode(log_id.strip_prefix("sha256:").unwrap_or(log_id))
+        .ok()
+        .filter(|bytes| bytes.len() == 32)
+        .ok_or_else(|| {
+            invalid(
+                "`log_id` is not a `sha256:` family string in lowercase hex (adaptor profile \
+                 `ahl-adaptor-atl-v1` §6.2)"
+                    .to_owned(),
+            )
+        })?;
+    let tree_size = checkpoint
+        .get("tree_size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("`tree_size` is REQUIRED, an entry count".to_owned()))?;
+    let checkpoint_time = checkpoint
+        .get("checkpoint_time")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`checkpoint_time` is REQUIRED".to_owned()))?;
+    let timestamp_ns = atl_checkpoint_time_nanos(checkpoint_time)?;
+    let root_hash = checkpoint
+        .get("root_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`root_hash` is REQUIRED".to_owned()))?;
+    let root = hex::decode(root_hash.strip_prefix("sha256:").unwrap_or(root_hash))
+        .ok()
+        .filter(|bytes| bytes.len() == 32)
+        .ok_or_else(|| {
+            invalid(
+                "`root_hash` is not a `sha256:` family string in lowercase hex (adaptor \
+                 profile `ahl-adaptor-atl-v1` §6.2)"
+                    .to_owned(),
+            )
+        })?;
+
+    let mut blob = [0u8; 98];
+    blob[0..18].copy_from_slice(b"ATL-Protocol-v1-CP");
+    blob[18..50].copy_from_slice(&origin);
+    blob[50..58].copy_from_slice(&tree_size.to_le_bytes());
+    blob[58..66].copy_from_slice(&timestamp_ns.to_le_bytes());
+    blob[66..98].copy_from_slice(&root);
+    Ok(blob)
+}
+
+/// The bytes the log signs under `ahl-adaptor-atl-v1` (§6.1: "The Ed25519 signature is over
+/// these 98 bytes"; §6.5 steps 1-2: "Assemble the 98-byte blob... in the layout of §6.1").
+fn atl_checkpoint_signing_bytes(checkpoint: &Value) -> Result<Vec<u8>> {
+    Ok(atl_checkpoint_blob(checkpoint)?.to_vec())
+}
+
+/// The bytes a checkpoint's OWN log signature is verified over, dispatched on the resolved
+/// adaptor profile (I-D §3.2: the checkpoint's signing form is profile-defined).
+///
+/// `ahl-test-log-v1` signs `JCS(checkpoint minus "signature")` (its own §5);
+/// `ahl-adaptor-atl-v1` signs the 98-byte blob assembled by [`atl_checkpoint_blob`] (its §6.1,
+/// §6.5). Any OTHER profile has no procedure here — the crate does not know how that profile
+/// serializes a checkpoint for signing — so this returns the profile-limitation outcome rather
+/// than falling back to either documented form by default; a policy is never trusted to imply
+/// a signing procedure it did not itself resolve to one of these two ids.
+fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> Result<Vec<u8>> {
+    match profile_id {
+        TEST_ADAPTOR_PROFILE_ID => Ok(crate::checkpoint_signing_bytes(checkpoint)?),
+        ATL_ADAPTOR_PROFILE_ID => atl_checkpoint_signing_bytes(checkpoint),
+        other => Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: other.to_owned(),
+            capability: "a checkpoint signing-bytes procedure",
+        }),
+    }
 }
 
 /// Reconcile a receipt-borne checkpoint's optional `raw` framing against its own JSON members,
@@ -1116,11 +1241,12 @@ fn reconcile_checkpoint_raw(
     reconcile_atl_checkpoint_raw(checkpoint, raw)
 }
 
-/// The actual `ahl-adaptor-atl-v1` §6.1/§6.2 parse-and-compare: decode the 98-byte blob and
-/// require EVERY mapped field to equal the JSON checkpoint's own member.
+/// The actual `ahl-adaptor-atl-v1` §6.4/§6.5 reconciliation: decode `raw`, assemble the blob
+/// its JSON sibling members imply ([`atl_checkpoint_blob`]), and require the two to be
+/// byte-for-byte IDENTICAL (§6.5 step 3: "compare it byte for byte with the assembled blob; a
+/// mismatch is a rejection") — not a looser field-by-field comparison that could accept a
+/// `raw` differing only in, say, unused padding no such blob has.
 fn reconcile_atl_checkpoint_raw(checkpoint: &Value, raw: &str) -> Result<()> {
-    const MAGIC: &[u8; 18] = b"ATL-Protocol-v1-CP";
-
     let invalid = |detail: String| ReceiptError::Malformed(format!("checkpoint raw: {detail}"));
 
     let encoded = raw.strip_prefix("base64:").ok_or_else(|| {
@@ -1131,68 +1257,27 @@ fn reconcile_atl_checkpoint_raw(checkpoint: &Value, raw: &str) -> Result<()> {
     let bytes = B64
         .decode(encoded)
         .map_err(|source| invalid(format!("`raw` does not decode as base64: {source}")))?;
-    let Ok(blob): core::result::Result<[u8; 98], _> = bytes.try_into() else {
+    let Ok(carried): core::result::Result<[u8; 98], _> = bytes.try_into() else {
         return Err(invalid(
             "`raw` MUST decode to exactly 98 octets (adaptor profile `ahl-adaptor-atl-v1` §6.1)"
                 .to_owned(),
         ));
     };
-    if blob[0..18] != *MAGIC {
+    if carried[0..18] != *b"ATL-Protocol-v1-CP" {
         return Err(invalid(
             "`raw`'s magic is not `ATL-Protocol-v1-CP` (adaptor profile `ahl-adaptor-atl-v1` \
              §6.1)"
                 .to_owned(),
         ));
     }
-
-    let origin_hex = format!("sha256:{}", hex::encode(&blob[18..50]));
-    if Some(origin_hex.as_str()) != checkpoint.get("log_id").and_then(Value::as_str) {
+    let assembled = atl_checkpoint_blob(checkpoint)?;
+    if carried != assembled {
         return Err(invalid(
-            "`raw`'s Origin ID does not match `log_id` (adaptor profile `ahl-adaptor-atl-v1` \
-             §6.2)"
+            "`raw` does not equal the blob assembled from the JSON checkpoint members — the \
+             JSON members govern (adaptor profile `ahl-adaptor-atl-v1` §6.2, §6.4, §6.5)"
                 .to_owned(),
         ));
     }
-
-    let raw_tree_size = u64::from_le_bytes(blob[50..58].try_into().unwrap_or_default());
-    if Some(raw_tree_size) != checkpoint.get("tree_size").and_then(Value::as_u64) {
-        return Err(invalid(
-            "`raw`'s tree size does not match `tree_size` (adaptor profile \
-             `ahl-adaptor-atl-v1` §6.2)"
-                .to_owned(),
-        ));
-    }
-
-    let raw_ts_ns = u64::from_le_bytes(blob[58..66].try_into().unwrap_or_default());
-    let json_ts_ns = checkpoint
-        .get("checkpoint_time")
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid("`checkpoint_time` is REQUIRED".to_owned()))
-        .and_then(|value| {
-            atl_checkpoint_time_nanos(value).map_err(|_| {
-                invalid(format!(
-                    "`checkpoint_time` (`{value}`) is not the ATL adaptor's required rendering \
-             (adaptor profile `ahl-adaptor-atl-v1` §6.3)"
-                ))
-            })
-        })?;
-    if raw_ts_ns != json_ts_ns {
-        return Err(invalid(
-            "`raw`'s timestamp does not match `checkpoint_time` (adaptor profile \
-             `ahl-adaptor-atl-v1` §6.2, §6.3)"
-                .to_owned(),
-        ));
-    }
-
-    let root_hex = format!("sha256:{}", hex::encode(&blob[66..98]));
-    if Some(root_hex.as_str()) != checkpoint.get("root_hash").and_then(Value::as_str) {
-        return Err(invalid(
-            "`raw`'s root hash does not match `root_hash` (adaptor profile \
-             `ahl-adaptor-atl-v1` §6.2)"
-                .to_owned(),
-        ));
-    }
-
     Ok(())
 }
 
@@ -1395,6 +1480,35 @@ fn log_object(manifest: &Value) -> Result<&Value> {
     Ok(log)
 }
 
+/// I-D §3.2: "the profile id and hash are pinned in the manifest and carried in every Evidence
+/// Receipt" — `anchoring.adaptor` (already resolved into `profile_id`/`profile` by
+/// `verify_nested`, since policy resolution requires an exact hash match) MUST equal the
+/// active manifest's own `log.adaptor` for the checkpoint being verified.
+///
+/// Checked BEFORE any profile-specific parsing or signature rule, so a receipt cannot borrow a
+/// policy-held profile's capabilities merely by NAMING it in `anchoring.adaptor` while the
+/// governance chain it actually carries pins a different one.
+///
+/// `active_log` is the already schema-validated `log` object of the manifest active for this
+/// checkpoint ([`log_object`]'s return), so `adaptor.id`/`adaptor.hash` are known present and
+/// well typed.
+fn check_adaptor_binding(
+    active_log: &Value,
+    profile_id: &str,
+    profile: &AdaptorProfile,
+) -> Result<()> {
+    let adaptor = obj(active_log, "adaptor")?;
+    let pinned_id = text(adaptor, "id")?;
+    let pinned_hash = text(adaptor, "hash")?;
+    if pinned_id != profile_id || pinned_hash != profile.hash {
+        return Err(ReceiptError::AdaptorBindingInvalid {
+            pinned: format!("{pinned_id} ({pinned_hash})"),
+            carried: format!("{profile_id} ({})", profile.hash),
+        });
+    }
+    Ok(())
+}
+
 /// Read manifest LOG or WITNESS key objects (`log.keys`, `witnesses[].keys`): the shared shape
 /// `{key_id, pubkey, valid_from_index}` (I-D §6.2). `key_id` is a family string and
 /// `valid_from_index` is an entry index, which is an unsigned integer: a negative or
@@ -1554,17 +1668,17 @@ fn manifest_scope_fields(manifest: &Value) -> Result<()> {
     };
 
     // `windows.*` and `retention.*` are durations in name and by example ("PT24H", "P30D",
-    // "P10Y"), but — unlike `log.checkpoint_cadence`/`log.witness_grace_period` — §6.2 states
-    // NO restricted grammar for them; §7.3's `Y`/date-part-`M` prohibition is stated for those
-    // two log-timing fields specifically, not for every duration a manifest carries, and a
-    // 10-year retention period is an ordinary value this crate must not invent a reason to
-    // reject. So this checks only that the value is duration-SHAPED — non-empty and
-    // `P`-prefixed — not the full restricted grammar [`duration_nanos`] enforces elsewhere.
+    // "P10Y"), but — unlike `log.checkpoint_cadence`/`log.witness_grace_period` — §6.2 gives
+    // NO grammar for them at all, `P`-prefix included; §7.3's restricted grammar (and its
+    // `Y`/date-part-`M` prohibition) is stated for those two log-timing fields specifically,
+    // not for every duration a manifest carries. Inventing a `P`-prefix requirement §6.2 does
+    // not state would reject values the I-D itself leaves unconstrained, so this checks only
+    // presence and non-emptiness.
     let duration_shaped = |member: &str, value: &str| -> Result<()> {
-        if value.starts_with('P') && value.len() > 1 {
-            Ok(())
+        if value.is_empty() {
+            Err(invalid(member, "MUST be a non-empty string (I-D §6.2)"))
         } else {
-            Err(invalid(member, "MUST be an ISO 8601 duration, `P`-prefixed (I-D §6.2)"))
+            Ok(())
         }
     };
 
@@ -1683,30 +1797,85 @@ fn log_key_set(payload: &Value) -> BTreeSet<(String, String, u64)> {
         .collect()
 }
 
+/// `(witness_id, key_id, pubkey, valid_from_index)` — one witness key object, normalized for
+/// set comparison.
+type WitnessKeySet = BTreeSet<(String, String, String, u64)>;
+
 /// The SET of a manifest's witness key objects, normalized the same way, with `witness_id`
 /// carried alongside each key object since it is part of the object's identity (I-D §7.1: "A
 /// witness key object additionally carries `witness_id`, the identity under which the manifest
 /// declares that witness").
-fn witness_key_set(payload: &Value) -> BTreeSet<(String, String, String, u64)> {
-    payload
-        .get("witnesses")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|witness| {
-            let witness_id = witness.get("witness_id")?.as_str()?.to_owned();
-            let keys = witness.get("keys")?.as_array()?;
-            Some(keys.iter().filter_map(move |object| {
-                Some((
-                    witness_id.clone(),
-                    object.get("key_id")?.as_str()?.to_owned(),
-                    object.get("pubkey")?.as_str()?.to_owned(),
-                    object.get("valid_from_index")?.as_u64()?,
-                ))
-            }))
-        })
-        .flatten()
-        .collect()
+///
+/// Unlike [`log_key_set`] — always reachable only after the UNCONDITIONAL [`log_object`] check
+/// — `witnesses` is conditionally required (I-D §6.2: mandatory only AT L3), so this rejects a
+/// witness object missing `witness_id` or a malformed `keys` array rather than silently
+/// dropping it: a governance-key-rotation comparison must never treat a schema-invalid witness
+/// as simply absent from the set.
+///
+/// # Errors
+///
+/// Returns [`ReceiptError::ManifestSchemaInvalid`] if `witnesses`, where present, is not an
+/// array, or if any entry's `witness_id` or `keys` shape is malformed.
+fn witness_key_set(payload: &Value) -> Result<WitnessKeySet> {
+    let Some(witnesses) = payload.get("witnesses") else {
+        return Ok(BTreeSet::new());
+    };
+    let witnesses = witnesses.as_array().ok_or_else(|| ReceiptError::ManifestSchemaInvalid {
+        object: "witnesses".to_owned(),
+        detail: "MUST be an array where present (I-D §6.2)".to_owned(),
+    })?;
+    let mut set = BTreeSet::new();
+    for (index, witness) in witnesses.iter().enumerate() {
+        let witness_id = witness.get("witness_id").and_then(Value::as_str).ok_or_else(|| {
+            ReceiptError::ManifestSchemaInvalid {
+                object: format!("witnesses[{index}].witness_id"),
+                detail: "the member is REQUIRED (I-D §7.1: \"A witness key object \
+                         additionally carries `witness_id`\")"
+                    .to_owned(),
+            }
+        })?;
+        key_objects(witness)?;
+        for object in array(witness, "keys")? {
+            set.insert((
+                witness_id.to_owned(),
+                text(object, "key_id")?.to_owned(),
+                text(object, "pubkey")?.to_owned(),
+                number(object, "valid_from_index")?,
+            ));
+        }
+    }
+    Ok(set)
+}
+
+/// Validate the manifest `witnesses` member (I-D §6.2: "Witnesses: at L3, witness ids with key
+/// objects in the same form"). AT L3 the array is REQUIRED and MUST be non-empty — a schema
+/// failure otherwise; below L3 it remains OPTIONAL, present or not.
+///
+/// Every witness object present, at ANY level, MUST carry `witness_id` (I-D §7.1) and a
+/// well-formed `keys` array (the shared log/witness shape, [`key_objects`]) — checked here,
+/// once per manifest, the same convention [`log_object`] and [`datasets_object`] set, rather
+/// than left to whichever comparison first happens to read a witness object.
+///
+/// Called only after [`manifest_scope_fields`] has already validated `level` is exactly one of
+/// `L1`/`L2`/`L3`.
+fn witnesses_object(manifest: &Value) -> Result<()> {
+    let level = manifest.get("level").and_then(Value::as_str).unwrap_or_default();
+    let witnesses = manifest.get("witnesses");
+    if level == "L3" {
+        let non_empty = witnesses.and_then(Value::as_array).is_some_and(|list| !list.is_empty());
+        if !non_empty {
+            return Err(ReceiptError::ManifestSchemaInvalid {
+                object: "witnesses".to_owned(),
+                detail: "AT L3, the array is REQUIRED and MUST be non-empty (I-D §6.2)".to_owned(),
+            });
+        }
+    }
+    // `witness_key_set` already validates shape (including `witness_id`) for every witness
+    // present; called here too so a manifest whose ONLY defect is a malformed witness object
+    // fails at schema time even where nothing ever compares it against a predecessor (a
+    // genesis manifest, for instance, has none to compare against).
+    witness_key_set(manifest)?;
+    Ok(())
 }
 
 /// Verify this manifest's `governance.rotation_proofs[]` element (I-D §7.1; §7.5.1 4b(M) "The
@@ -1742,6 +1911,10 @@ fn verify_rotation_proof(
     // I-D §7.1: the element's `checkpoint` is "in the receipt-borne form defined above" — the
     // same strict shape `anchoring.checkpoint` takes, not a looser one.
     let checkpoint = checkpoint_object(obj(element, "checkpoint")?)?;
+    // I-D §3.2: the same adaptor-binding check every other checkpoint gets — under the
+    // OUTGOING manifest here, since that is the state this proof's checkpoint is signed and
+    // cosigned under, never the incoming one.
+    check_adaptor_binding(log_object(outgoing_manifest)?, profile_id, profile)?;
     // "WHERE `raw` is present, the verifier MUST check that it parses to the same values" —
     // the same reconciliation `verify_checkpoint` applies to `anchoring.checkpoint.raw`
     // applies here, identically (I-D §7.1).
@@ -1772,7 +1945,7 @@ fn verify_rotation_proof(
     budget.spend(1)?;
     if !verify_signature(
         &decode_pubkey(&signer_pubkey)?,
-        &checkpoint_signing_bytes(checkpoint)?,
+        &checkpoint_signing_bytes_for(checkpoint, profile_id)?,
         text(checkpoint, "signature")?,
     )? {
         return Err(invalid(
@@ -1818,7 +1991,7 @@ fn verify_rotation_proof(
     // declared `level` to decide whether L3 applies going forward. Below L3, `witnesses` was
     // already shape-checked above where present, but no cosignature is required from it.
     if rotating_manifest.get("level").and_then(Value::as_str) == Some("L3") {
-        let outgoing_witnesses = witness_key_set(outgoing_manifest);
+        let outgoing_witnesses = witness_key_set(outgoing_manifest)?;
         let mut cosigned = false;
         for witness in &witness_candidates {
             let witness_id = text(witness, "witness_id")?.to_owned();
@@ -1909,12 +2082,15 @@ fn read_chain<'a>(
     }
     let genesis_envelope = obj(&chain[0], "envelope")?;
     let genesis_payload = payload_of(genesis_envelope)?;
+    // §2.2's version-first rule runs before anything else, typed content included — an
+    // unsupported `ahl_version` is `unverifiable`, decided from the bytes alone, before any
+    // trust decision (anchor equality included) is even attempted.
     check_ahl_version(genesis_payload)?;
-    if statement_type(genesis_payload)? != "manifest" {
-        return Err(ReceiptError::GovernanceChainInvalid(
-            "the chain must start at the genesis manifest".to_owned(),
-        ));
-    }
+    // I-D §7.5.1 4a: entry-id equality "authenticates the genesis envelope IN FULL" — and
+    // typed checks, `type == "manifest"` among them, FOLLOW that anchor comparison, never
+    // precede it. Reading `type` (or anything else typed) before the anchor is verified would
+    // let unauthenticated content decide what gets rejected and how, the same ordering fault
+    // the induction's phase 1/phase 2 split exists to rule out for every later hop.
     let carried_anchor = text(obj(receipt, "governance")?, "genesis_entry_id")?;
     if carried_anchor != entry_id(genesis_envelope) {
         return Err(ReceiptError::GovernanceChainInvalid(
@@ -1927,13 +2103,18 @@ fn read_chain<'a>(
     // I-D §7.5.1 4a: the fingerprint comparison is optional local policy — WHERE `policy`
     // holds no configured set, the comparison does not arise at all, and that absence is not
     // itself a defect. WHERE it holds one, the genesis manifest's producer key ids MUST match
-    // it exactly.
+    // it exactly. Still part of anchor authentication, so still ahead of the `type` check.
     if let Some(configured) = &policy.genesis_key_ids {
         let genesis_key_ids: BTreeSet<String> =
             producer_key_objects(genesis_payload)?.into_iter().map(|(id, _)| id).collect();
         if &genesis_key_ids != configured {
             return Err(ReceiptError::GenesisAnchorMismatch);
         }
+    }
+    if statement_type(genesis_payload)? != "manifest" {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "the chain must start at the genesis manifest".to_owned(),
+        ));
     }
 
     // "The genesis manifest is INSIDE the typed checks, not outside them... It earns exactly
@@ -1950,11 +2131,7 @@ fn read_chain<'a>(
     log_object(genesis_payload)?;
     datasets_object(genesis_payload)?;
     manifest_scope_fields(genesis_payload)?;
-    if let Some(witnesses) = genesis_payload.get("witnesses").and_then(Value::as_array) {
-        for witness in witnesses {
-            key_objects(witness)?;
-        }
-    }
+    witnesses_object(genesis_payload)?;
 
     // "Only after ALL of those pass... let K be the key state the genesis manifest declares."
     let mut manifests: Vec<(u64, &Value)> = vec![(0, genesis_payload)];
@@ -2037,11 +2214,7 @@ fn read_chain<'a>(
                 // reads `level` to decide whether L3 applies (an absent or malformed `level`
                 // must fail HERE, in schema, never be silently read as "not L3").
                 manifest_scope_fields(payload)?;
-                if let Some(witnesses) = payload.get("witnesses").and_then(Value::as_array) {
-                    for witness in witnesses {
-                        key_objects(witness)?;
-                    }
-                }
+                witnesses_object(payload)?;
                 // I-D §7.1 / §7.5.1: a manifest whose log or witness key objects DIFFER, as
                 // SETS, from its predecessor's in the chain is a GOVERNANCE-KEY ROTATION (I-D
                 // §6.2: "Each manifest version's log and witness key objects replace the prior
@@ -2049,7 +2222,7 @@ fn read_chain<'a>(
                 // rotation) and requires its `governance.rotation_proofs[]` element to verify
                 // under the outgoing key state (`verify_rotation_proof`).
                 let rotated = log_key_set(payload) != log_key_set(previous_manifest_payload)
-                    || witness_key_set(payload) != witness_key_set(previous_manifest_payload);
+                    || witness_key_set(payload)? != witness_key_set(previous_manifest_payload)?;
                 if rotated {
                     saw_rotation = true;
                     // "The NEXT unconsumed `rotation_proofs[]` element must have
@@ -2311,6 +2484,49 @@ fn check_key_id(entry: &Value) -> Result<()> {
 /// index its first failing entry actually carried.
 type BoundAndAttempted = (BTreeMap<String, String>, BTreeMap<String, u64>);
 
+/// Bind every `keys.{group}[]` entry against `active_index`, tolerantly per entry.
+///
+/// A `keys.log`/`keys.witness` entry that fails to bind at `active_index` is not necessarily
+/// wrong: a `propagation-complete` receipt legitimately carries entries for TWO checkpoints (A
+/// and D, each authenticated separately, format §2.2) that can be active under different
+/// manifest versions, so the same physical key may appear twice under different bindings.
+/// Binding is therefore tolerant per entry rather than all-or-nothing for the whole array: any
+/// entry that binds successfully is usable; an entry that doesn't is simply not usable FOR THIS
+/// CHECKPOINT, and only becomes an error if no entry for that `key_id` ever bound — in which
+/// case the error still names that entry's own (wrong) binding index, not `active_index`, so a
+/// genuinely mis-bound single entry is reported precisely.
+///
+/// Shared by [`verify_checkpoint`] (the primary `anchoring.checkpoint`) and
+/// [`authenticate_checkpoint`] (`later_checkpoint` and propagation's own declared D) — every
+/// receipt-borne checkpoint this crate authenticates resolves its keys the same way.
+fn bind_keys_by_group(
+    receipt: &Value,
+    governance: &Governance<'_>,
+    active_index: u64,
+    group: &str,
+) -> Result<BoundAndAttempted> {
+    let keys = obj(receipt, "keys")?;
+    let mut bound = BTreeMap::new();
+    let mut attempted_index = BTreeMap::new();
+    for entry in array(keys, group)? {
+        check_key_id(entry)?;
+        let key_id = text(entry, "key_id")?.to_owned();
+        match bind_log_or_witness_key(governance, entry, group, active_index) {
+            Ok(pubkey) => {
+                bound.insert(key_id, pubkey);
+            }
+            Err(_) if !bound.contains_key(&key_id) => {
+                let index = obj(entry, "binding")
+                    .and_then(|b| number(b, "entry_index"))
+                    .unwrap_or(active_index);
+                attempted_index.entry(key_id).or_insert(index);
+            }
+            Err(_) => {}
+        }
+    }
+    Ok((bound, attempted_index))
+}
+
 fn verify_checkpoint(
     receipt: &Value,
     governance: &Governance<'_>,
@@ -2320,56 +2536,33 @@ fn verify_checkpoint(
 ) -> Result<Anchoring> {
     let anchoring = obj(receipt, "anchoring")?;
     let checkpoint = checkpoint_object(obj(anchoring, "checkpoint")?)?;
+    let tree_size = number(checkpoint, "tree_size")?;
+    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
+    let (active_index, active_manifest) = governance.active_for(tree_size)?;
+    let active_log = log_object(active_manifest)?;
+
+    // I-D §3.2: `anchoring.adaptor` must name the SAME profile the active manifest's own
+    // `log.adaptor` pins — checked before ANYTHING profile-specific, `raw` reconciliation and
+    // signature verification both included.
+    check_adaptor_binding(active_log, profile_id, profile)?;
+
+    // The log id must match the manifest version active for the checkpoint (adaptor §5).
+    if text(active_log, "log_id")? != text(checkpoint, "log_id")? {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "checkpoint `log_id` is not the log the active manifest declares".to_owned(),
+        ));
+    }
+
     // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values as the
     // JSON members." Whether `raw` is usable at all is a property of the pinned profile
     // document, not of this verifier — `ahl-test-log-v1` defines no framing, so receipts under
     // it may carry none — but WHERE it is usable, this actually parses and compares it rather
     // than merely gating on the capability flag.
     reconcile_checkpoint_raw(checkpoint, profile, profile_id)?;
-    let tree_size = number(checkpoint, "tree_size")?;
-    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
-    let (active_index, active_manifest) = governance.active_for(tree_size)?;
 
-    // The log id must match the manifest version active for the checkpoint (adaptor §5).
-    if text(log_object(active_manifest)?, "log_id")? != text(checkpoint, "log_id")? {
-        return Err(ReceiptError::GovernanceChainInvalid(
-            "checkpoint `log_id` is not the log the active manifest declares".to_owned(),
-        ));
-    }
-
-    // A `keys.log`/`keys.witness` entry that fails to bind at `active_index` is not necessarily
-    // wrong: a `propagation-complete` receipt legitimately carries entries for TWO checkpoints
-    // (A here, and D — authenticated separately, spec §2.2) that can be active under different
-    // manifest versions, so the same physical key may appear twice under different bindings.
-    // Binding is therefore tolerant per entry rather than all-or-nothing for the whole array:
-    // any entry that binds successfully is usable; an entry that doesn't is simply not usable
-    // FOR THIS CHECKPOINT, and only becomes an error if no entry for that `key_id` ever bound —
-    // in which case the error still names that entry's own (wrong) binding index, not
-    // `active_index`, so a genuinely mis-bound single entry is reported precisely.
-    let keys = obj(receipt, "keys")?;
-    let bind_all = |group: &str| -> Result<BoundAndAttempted> {
-        let mut bound = BTreeMap::new();
-        let mut attempted_index = BTreeMap::new();
-        for entry in array(keys, group)? {
-            check_key_id(entry)?;
-            let key_id = text(entry, "key_id")?.to_owned();
-            match bind_log_or_witness_key(governance, entry, group, active_index) {
-                Ok(pubkey) => {
-                    bound.insert(key_id, pubkey);
-                }
-                Err(_) if !bound.contains_key(&key_id) => {
-                    let index = obj(entry, "binding")
-                        .and_then(|b| number(b, "entry_index"))
-                        .unwrap_or(active_index);
-                    attempted_index.entry(key_id).or_insert(index);
-                }
-                Err(_) => {}
-            }
-        }
-        Ok((bound, attempted_index))
-    };
-    let (log_keys, log_attempted) = bind_all("log")?;
-    let (witness_keys, witness_attempted) = bind_all("witness")?;
+    let (log_keys, log_attempted) = bind_keys_by_group(receipt, governance, active_index, "log")?;
+    let (witness_keys, witness_attempted) =
+        bind_keys_by_group(receipt, governance, active_index, "witness")?;
 
     let signing_key = log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| {
         let key_id = text(checkpoint, "key_id").unwrap_or_default().to_owned();
@@ -2379,7 +2572,7 @@ fn verify_checkpoint(
     budget.spend(1)?;
     if !verify_signature(
         &decode_pubkey(signing_key)?,
-        &checkpoint_signing_bytes(checkpoint)?,
+        &checkpoint_signing_bytes_for(checkpoint, profile_id)?,
         text(checkpoint, "signature")?,
     )? {
         return Err(ReceiptError::CheckpointSignatureInvalid);
@@ -2403,6 +2596,13 @@ fn verify_checkpoint(
             return Err(ReceiptError::WitnessCosignatureInvalid { witness_id });
         }
         witnessed = true;
+    }
+    // I-D §3.3, §7.5: "At L3 a verifier accepts a checkpoint C only with a valid witness
+    // cosignature" — `active_manifest`'s `level` is already known to be exactly one of
+    // `L1`/`L2`/`L3` ([`manifest_scope_fields`] ran during `read_chain`), so this reads it
+    // rather than re-deriving anything.
+    if active_manifest.get("level").and_then(Value::as_str) == Some("L3") && !witnessed {
+        return Err(ReceiptError::CheckpointUnwitnessed { tree_size });
     }
 
     // `continued_history` requires a later checkpoint plus a verifying consistency proof.
@@ -2485,7 +2685,15 @@ fn verify_continued_history(
         // continued history; it is the size regression a witness refuses to cosign over.
         return Err(ReceiptError::ConsistencyPathInvalid);
     }
-    authenticate_checkpoint(receipt, governance, later, profile, profile_id, budget)?;
+    authenticate_checkpoint(
+        receipt,
+        governance,
+        later,
+        anchoring.get("later_checkpoint_witnesses"),
+        profile,
+        profile_id,
+        budget,
+    )?;
 
     let to_root = parse_hash_hex(text(later, "root_hash")?)?;
     let path = path_strings(anchoring, "consistency_path")?;
@@ -3747,69 +3955,107 @@ fn authenticate_checkpoint(
     receipt: &Value,
     governance: &Governance<'_>,
     declared: &Value,
+    witness_cosignatures: Option<&Value>,
     profile: &AdaptorProfile,
     profile_id: &str,
     budget: &mut Budget,
 ) -> Result<()> {
-    // I-D §7.1, §7.5 step 2: the same `raw` reconciliation every other receipt-borne
-    // checkpoint gets, applied identically here — `declared` is `anchoring.later_checkpoint`
-    // or `propagation-complete`'s own declared checkpoint D, both receipt-borne checkpoints in
-    // the same form.
-    reconcile_checkpoint_raw(declared, profile, profile_id)?;
     let key_id = text(declared, "key_id")?;
     let tree_size = number(declared, "tree_size")?;
     let (active_index, active_manifest) = governance.active_for(tree_size)?;
+    let active_log = log_object(active_manifest)?;
+
+    // I-D §3.2: the same adaptor-binding check every other checkpoint gets, applied here
+    // under THIS checkpoint's own active manifest — a manifest anchored between the primary
+    // checkpoint and this one could in principle pin a different adaptor.
+    check_adaptor_binding(active_log, profile_id, profile)?;
 
     // The log id must match the manifest version active for this checkpoint, exactly as it must
     // for the anchoring one (adaptor §5) — no relaxed check for the second checkpoint.
-    if text(log_object(active_manifest)?, "log_id")? != text(declared, "log_id")? {
+    if text(active_log, "log_id")? != text(declared, "log_id")? {
         return Err(ReceiptError::GovernanceChainInvalid(
             "checkpoint `log_id` is not the log the active manifest declares".to_owned(),
         ));
     }
 
+    // I-D §7.1, §7.5 step 2: the same `raw` reconciliation every other receipt-borne
+    // checkpoint gets, applied identically here — `declared` is `anchoring.later_checkpoint`
+    // or `propagation-complete`'s own declared checkpoint D, both receipt-borne checkpoints in
+    // the same form.
+    reconcile_checkpoint_raw(declared, profile, profile_id)?;
+
     // The log key resolves against the manifest active for this checkpoint's *own* tree size,
     // and its `keys.log` entry binds to that same manifest version (format §2.2) — the normal
     // source/binding contract, not a byte-equality shortcut. `active_index` can differ from the
     // anchoring checkpoint's: a manifest anchored between them rotates the log key set, and a
-    // checkpoint issued under one state must be validated by that state's key.
-    // The same `key_id` may appear more than once in `keys.log` — a receipt authenticating two
+    // checkpoint issued under one state must be validated by that state's key. The same
+    // `key_id` may appear more than once in `keys.log` — a receipt authenticating two
     // checkpoints can legitimately carry the same physical log key bound to each checkpoint's
-    // own active manifest. Take whichever entry actually binds at this checkpoint's
-    // `active_index`, not merely the first entry with a matching `key_id` (that could be the
-    // one meant for the other checkpoint).
-    let mut last_error = None;
-    let mut pubkey = None;
-    for entry in array(obj(receipt, "keys")?, "log")? {
-        if text(entry, "key_id").ok() != Some(key_id) {
-            continue;
-        }
-        check_key_id(entry)?;
-        match bind_log_or_witness_key(governance, entry, "log", active_index) {
-            Ok(bound) => {
-                pubkey = Some(bound);
-                break;
-            }
-            Err(e) => last_error = Some(e),
-        }
-    }
-    let pubkey = pubkey.ok_or_else(|| {
-        last_error.unwrap_or(ReceiptError::KeyNotBound {
-            key_id: key_id.to_owned(),
-            entry_index: active_index,
-        })
+    // own active manifest — so this resolves against THIS checkpoint's own `active_index`,
+    // exactly as [`verify_checkpoint`] does for the primary checkpoint.
+    let (log_keys, log_attempted) = bind_keys_by_group(receipt, governance, active_index, "log")?;
+    let signing_key = log_keys.get(key_id).ok_or_else(|| {
+        let entry_index = log_attempted.get(key_id).copied().unwrap_or(active_index);
+        ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
     })?;
 
     budget.spend(1)?;
-    if verify_signature(
-        &decode_pubkey(&pubkey)?,
-        &checkpoint_signing_bytes(declared)?,
+    if !verify_signature(
+        &decode_pubkey(signing_key)?,
+        &checkpoint_signing_bytes_for(declared, profile_id)?,
         text(declared, "signature")?,
     )? {
-        Ok(())
-    } else {
-        Err(ReceiptError::CheckpointSignatureInvalid)
+        return Err(ReceiptError::CheckpointSignatureInvalid);
     }
+
+    // I-D §3.3, §7.5: "At L3 a verifier accepts a checkpoint C only with a valid witness
+    // cosignature" — a rule about accepting ANY checkpoint C at L3, not merely the primary
+    // one, so it applies identically here: `declared` is `anchoring.later_checkpoint` or
+    // propagation's own declared D, and either one, where the manifest active for ITS OWN
+    // tree size is L3, needs a verifying cosignature the same way. The cosignatures travel in
+    // `witnesses`, a SIBLING to `declared` (`anchoring.later_checkpoint_witnesses` /
+    // `claim_material.corpus_checkpoint_witnesses`) rather than nested inside it: the log
+    // signs `declared` itself (`checkpoint_signing_bytes_for`, above), and a witness cosigns
+    // that SAME signed object verbatim (adaptor §6/§11: "the signed checkpoint object,
+    // INCLUDING its signature member") — nesting the cosignatures INTO `declared` would
+    // change the very bytes both the log's signature and each cosignature's own preimage are
+    // computed over.
+    if active_manifest.get("level").and_then(Value::as_str) == Some("L3") {
+        let (witness_keys, witness_attempted) =
+            bind_keys_by_group(receipt, governance, active_index, "witness")?;
+        let candidates = match witness_cosignatures {
+            None => &[][..],
+            Some(value) => value.as_array().ok_or_else(|| {
+                ReceiptError::Malformed(
+                    "checkpoint witnesses, where present, MUST be an array".to_owned(),
+                )
+            })?,
+        };
+        let mut witnessed = false;
+        for cosignature in candidates {
+            let cosignature = witness_cosignature_object(cosignature)?;
+            let witness_id = text(cosignature, "witness_id")?.to_owned();
+            let key_id = text(cosignature, "key_id")?;
+            let pubkey = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
+                key_id: key_id.to_owned(),
+                entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
+            })?;
+            budget.spend(1)?;
+            if !verify_signature(
+                &decode_pubkey(pubkey)?,
+                &cosignature_bytes(declared, &witness_id),
+                text(cosignature, "cosignature")?,
+            )? {
+                return Err(ReceiptError::WitnessCosignatureInvalid { witness_id });
+            }
+            witnessed = true;
+        }
+        if !witnessed {
+            return Err(ReceiptError::CheckpointUnwitnessed { tree_size });
+        }
+    }
+
+    Ok(())
 }
 
 /// `propagation-complete` (§3): the anchored affected set equals the recomputable closure.
@@ -3851,6 +4097,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
         ctx.receipt,
         ctx.governance,
         carried_d,
+        material.get("corpus_checkpoint_witnesses"),
         ctx.profile,
         ctx.profile_id,
         budget,
@@ -4108,8 +4355,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        log_key_set, verify_rotation_proof, witness_key_set, AdaptorProfile, Budget, Limits,
-        ReceiptError,
+        log_key_set, verify_rotation_proof, witness_key_set, AdaptorCapabilities, AdaptorProfile,
+        Budget, Limits, ReceiptError, TEST_ADAPTOR_PROFILE_ID,
     };
     use crate::{
         checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, tree_root, TestKey,
@@ -4126,31 +4373,35 @@ mod tests {
     /// `tests/vectors.rs`.
     #[test]
     fn key_set_comparison_is_order_independent() {
+        let aa = format!("sha256:{}", "aa".repeat(32));
+        let bb = format!("sha256:{}", "bb".repeat(32));
+        let cc = format!("sha256:{}", "cc".repeat(32));
+        let dd = format!("sha256:{}", "dd".repeat(32));
         let forward = json!({
             "log": { "keys": [
-                { "key_id": "sha256:aa", "pubkey": "base64:AA==", "valid_from_index": 0 },
-                { "key_id": "sha256:bb", "pubkey": "base64:BB==", "valid_from_index": 0 },
+                { "key_id": aa, "pubkey": "base64:AA==", "valid_from_index": 0 },
+                { "key_id": bb, "pubkey": "base64:BB==", "valid_from_index": 0 },
             ] },
             "witnesses": [
                 { "witness_id": "witness-1", "keys": [
-                    { "key_id": "sha256:cc", "pubkey": "base64:CC==", "valid_from_index": 0 },
+                    { "key_id": cc, "pubkey": "base64:CC==", "valid_from_index": 0 },
                 ] },
                 { "witness_id": "witness-2", "keys": [
-                    { "key_id": "sha256:dd", "pubkey": "base64:DD==", "valid_from_index": 0 },
+                    { "key_id": dd, "pubkey": "base64:DD==", "valid_from_index": 0 },
                 ] },
             ],
         });
         let reordered = json!({
             "log": { "keys": [
-                { "key_id": "sha256:bb", "pubkey": "base64:BB==", "valid_from_index": 0 },
-                { "key_id": "sha256:aa", "pubkey": "base64:AA==", "valid_from_index": 0 },
+                { "key_id": bb, "pubkey": "base64:BB==", "valid_from_index": 0 },
+                { "key_id": aa, "pubkey": "base64:AA==", "valid_from_index": 0 },
             ] },
             "witnesses": [
                 { "witness_id": "witness-2", "keys": [
-                    { "key_id": "sha256:dd", "pubkey": "base64:DD==", "valid_from_index": 0 },
+                    { "key_id": dd, "pubkey": "base64:DD==", "valid_from_index": 0 },
                 ] },
                 { "witness_id": "witness-1", "keys": [
-                    { "key_id": "sha256:cc", "pubkey": "base64:CC==", "valid_from_index": 0 },
+                    { "key_id": cc, "pubkey": "base64:CC==", "valid_from_index": 0 },
                 ] },
             ],
         });
@@ -4161,20 +4412,44 @@ mod tests {
             "reordering `log.keys` must not look like a rotation"
         );
         assert_eq!(
-            witness_key_set(&forward),
-            witness_key_set(&reordered),
+            witness_key_set(&forward).expect("well-formed witnesses"),
+            witness_key_set(&reordered).expect("well-formed witnesses"),
             "reordering `witnesses[]`, or the `keys` within one witness, must not look like a \
              rotation"
         );
 
         let genuinely_different = json!({
             "log": { "keys": [
-                { "key_id": "sha256:aa", "pubkey": "base64:AA==", "valid_from_index": 0 },
+                { "key_id": aa, "pubkey": "base64:AA==", "valid_from_index": 0 },
             ] },
             "witnesses": [],
         });
         assert_ne!(log_key_set(&forward), log_key_set(&genuinely_different));
-        assert_ne!(witness_key_set(&forward), witness_key_set(&genuinely_different));
+        assert_ne!(
+            witness_key_set(&forward).expect("well-formed witnesses"),
+            witness_key_set(&genuinely_different).expect("well-formed witnesses")
+        );
+    }
+
+    /// I-D §7.1 / §6.2: a witness object missing `witness_id` is a schema failure, never
+    /// silently dropped from the set — a governance-key-rotation comparison must not treat a
+    /// malformed witness as simply absent.
+    #[test]
+    fn witness_key_set_rejects_a_witness_missing_witness_id() {
+        let cc = format!("sha256:{}", "cc".repeat(32));
+        let payload = json!({
+            "witnesses": [
+                { "keys": [
+                    { "key_id": cc, "pubkey": "base64:CC==", "valid_from_index": 0 },
+                ] },
+            ],
+        });
+        let result = witness_key_set(&payload);
+        assert!(
+            matches!(result, Err(ReceiptError::ManifestSchemaInvalid { ref object, .. }) if object.contains("witness_id")),
+            "a witness object missing `witness_id` must be rejected, not silently dropped: \
+             {result:?}"
+        );
     }
 
     /// I-D §7.1: `governance.rotation_proofs[].witnesses[]` is "an array in the shape of
@@ -4192,10 +4467,19 @@ mod tests {
         let log_key = TestKey::from_seed_hex("log-1", &"11".repeat(32)).expect("test key");
         let witness_key = TestKey::from_seed_hex("witness-1", &"22".repeat(32)).expect("test key");
 
+        let profile_hash = format!("sha256:{}", "cc".repeat(32));
         let outgoing_manifest = json!({
-            "log": { "keys": [
-                { "key_id": log_key.key_id(), "pubkey": log_key.pubkey(), "valid_from_index": 0 },
-            ] },
+            "log": {
+                "log_id": format!("sha256:{}", "dd".repeat(32)),
+                "operator": "log-operator-1",
+                "adaptor": { "id": TEST_ADAPTOR_PROFILE_ID, "hash": profile_hash },
+                "checkpoint_cadence": "PT1H",
+                "cadence_epoch": "2026-08-16T11:30:00Z",
+                "witness_grace_period": "PT15M",
+                "keys": [
+                    { "key_id": log_key.key_id(), "pubkey": log_key.pubkey(), "valid_from_index": 0 },
+                ],
+            },
             "witnesses": [
                 { "witness_id": "witness-1", "keys": [
                     {
@@ -4233,7 +4517,8 @@ mod tests {
             ],
         });
 
-        let profile = AdaptorProfile::default();
+        let profile =
+            AdaptorProfile { hash: profile_hash, capabilities: AdaptorCapabilities::default() };
         let mut budget = Budget::new(Limits::default());
         let result = verify_rotation_proof(
             &element,
@@ -4242,7 +4527,7 @@ mod tests {
             &rotating_manifest,
             &outgoing_manifest,
             &profile,
-            "test-profile",
+            TEST_ADAPTOR_PROFILE_ID,
             &mut budget,
         );
         assert!(
