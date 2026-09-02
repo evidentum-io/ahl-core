@@ -73,11 +73,16 @@ ROTATION, and its rotation-proof element is verified under the OUTGOING key stat
 checkpoint signature under the outgoing log key, the manifest's inclusion under that checkpoint,
 and, AT L3, a cosignature under the outgoing witness set. The corpus's manifest version 2 (entry
 25) rotates the witness key set, and every vector whose chain carries it now carries a genuine
-`governance.rotation_proofs[]` element proving that transition; the nine
+`governance.rotation_proofs[]` element proving that transition; the eleven
 `governance-key-rotation-proof-*-must-fail.ahl` vectors cover the collection-level rules (I-D
 §7.1: required iff a rotation is present, one element per rotation, ascending order, no
 duplicates, no extras) and the per-element ones (checkpoint and witness shape, the outgoing-key
-requirement).
+requirement, and — since "every key used in verification MUST appear in `keys` with its source
+and its binding" — that the element's log and witness keys are LISTED in `keys.log[]` and
+`keys.witness[]` bound to the OUTGOING manifest version, per §7.1's transition exception).
+Every receipt whose chain carries the rotation therefore lists the outgoing log key and the
+outgoing witness alongside the keys its own checkpoint uses: the log key appears twice, under
+two different bindings, which is the case receipt key binding is tolerant for.
 
 ## Layout
 

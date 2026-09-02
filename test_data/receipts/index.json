@@ -308,6 +308,20 @@
     {
       "claim_type": "governance-state",
       "expect": "reject",
+      "file": "governance-key-rotation-proof-witness-key-unlisted-must-fail.ahl",
+      "reason": "key `sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79` is not bound to a manifest key object at entry index 0",
+      "rule": "I-D §7.1 — a rotation proof's outgoing witness key is listed in keys.witness[]"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-key-rotation-proof-key-bound-to-incoming-must-fail.ahl",
+      "reason": "key `sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79` is not bound to a manifest key object at entry index 25",
+      "rule": "I-D §7.1 — a rotation proof's keys bind to the OUTGOING manifest version"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
       "file": "governance-key-statement-wrong-key-id-must-fail.ahl",
       "reason": "governance chain invalid: key statement at entry index 9 carries `key.key_id` (`sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e`) that does not equal `sha256:`-of-`key.pubkey` (`sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827`) (I-D §7.5.1 4b(K))",
       "rule": "I-D §7.5.1 4b(K) — key.key_id must be sha256:-of-key.pubkey"
