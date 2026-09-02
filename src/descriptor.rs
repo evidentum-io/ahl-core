@@ -240,6 +240,23 @@ pub fn validate_media_type_production(raw: &str) -> AhlResult<String> {
     Ok(normalized)
 }
 
+/// Whether an identifier's own procedure requires `media_type` to be present.
+///
+/// I-D §2.6: "`media_type` is present if and only if the descriptor requires it, which is a
+/// property of the identifier: `exact-bytes` requires it, `jcs` does not". Returns `None` for
+/// an identifier this crate does not implement: for such an identifier the presence rule is
+/// undecidable here, not merely inapplicable — I-D §6.3 makes an unimplemented identifier's
+/// content-binding finding `unverifiable`, never a verdict against a presence rule this
+/// verifier has no way to resolve.
+#[must_use]
+pub fn media_type_required(identifier: &str) -> Option<bool> {
+    match identifier {
+        "jcs" => Some(false),
+        "exact-bytes" => Some(true),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The canonicalization descriptor and its digest (I-D §2.6 rule 2)
 // ---------------------------------------------------------------------------

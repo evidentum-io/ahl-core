@@ -1,9 +1,11 @@
 //! `ahl-core` — reference primitives and the canonical test-vector corpus for the
 //! **AHL Protocol** (Anchored History Log).
 //!
-//! This crate implements exactly the pieces the AHL Core Specification v0.3-draft and the
-//! Evidence Receipt format 1-draft r3 need in order to *produce and re-verify deterministic
-//! test vectors*:
+//! This crate implements exactly the pieces the AHL Internet-Draft draft-zatona-ahl-00
+//! revision 0.4 (statements, commitments, tree rules, conformance, and — since revision 0.4 —
+//! Evidence Receipts in its own §7) need in order to *produce and re-verify deterministic
+//! test vectors*. This document defines revision 0.4 alone: it verifies no material issued
+//! under an earlier revision (I-D §2.2, §7.1).
 //!
 //! * RFC 8785 (JCS) canonicalization and the two AHL identifiers — statement id and entry id
 //!   (spec §2.1);
@@ -67,8 +69,10 @@ use sha2::{Digest as _, Sha256};
 pub use atl_core::core::merkle::{ConsistencyProof, Hash, InclusionProof};
 pub use error::{AhlError, AhlResult};
 
-/// The AHL core specification version these vectors are generated against.
-pub const AHL_VERSION: &str = "0.3";
+/// The AHL Internet-Draft revision these vectors are generated against (I-D §2.2, §7.1).
+///
+/// This document defines revision 0.4 alone; no verification of earlier-revision material.
+pub const AHL_VERSION: &str = "0.4";
 
 /// Leaf domain-separation prefix for every AHL tree (spec §2.5).
 pub const LEAF_PREFIX: u8 = 0x00;

@@ -37,11 +37,11 @@ use crate::{
     tree_root, verify_signature, AhlError, B64,
 };
 
-/// Receipt container version this verifier implements.
-pub const RECEIPT_VERSION: &str = "1";
+/// Receipt container version this verifier implements (I-D §7.1: `ahl_receipt_version`).
+pub const RECEIPT_VERSION: &str = "2";
 
-/// Core specification version this verifier implements.
-pub const SPEC_VERSION: &str = "0.3.0";
+/// Core specification version this verifier implements (I-D §7.1: `spec_version`).
+pub const SPEC_VERSION: &str = "0.4.0";
 
 // ---------------------------------------------------------------------------
 // Policy and limits
@@ -178,10 +178,17 @@ pub enum ReceiptError {
     #[error("malformed receipt: {0}")]
     Malformed(String),
 
-    /// `ahl_receipt_version` or `spec_version` is not one this verifier implements (§5 step 1).
-    #[error("unsupported {field}: expected `{expected}`, got `{got}`")]
+    /// `ahl_receipt_version`, `spec_version` or a carried statement's `ahl_version` is not one
+    /// this verifier implements (I-D §7.1, §7.5 step 1, §2.2).
+    ///
+    /// This is the I-D's `unverifiable` outcome, not `invalid`: an artifact issued under
+    /// earlier rules is not a defective artifact, and this document establishes nothing about
+    /// whether it verifies under the rules that produced it (I-D §7.1 "Revision and rule
+    /// selection"). `ahl_receipt_version` is read and acted on before any other check,
+    /// including schema validation (I-D §7.5 step 1, "Version first, then parse").
+    #[error("unsupported {field}: expected `{expected}`, got `{got}` (unverifiable, not invalid)")]
     UnsupportedVersion {
-        /// The version field.
+        /// The version field: `ahl_receipt_version`, `spec_version`, or `ahl_version`.
         field: &'static str,
         /// The version this verifier implements.
         expected: &'static str,
@@ -331,6 +338,110 @@ pub enum ReceiptError {
         object: String,
         /// Which rule it breaks.
         detail: String,
+    },
+
+    /// A carried governance chain rotates a log or witness key set (I-D §7.1 "governance-key
+    /// rotation": a manifest whose log checkpoint-signing key objects or whose witness key
+    /// objects differ from its predecessor's), and this build does not implement
+    /// `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1 "the rotation-anchoring
+    /// rule").
+    ///
+    /// The I-D's own rule for this case is `invalid` when the proof is absent or fails
+    /// (I-D §7.1: "A receipt that omits `governance.rotation_proofs[]` where the carried chain
+    /// rotates either governance key set, or that carries an element failing any requirement
+    /// above, is `invalid`"). This build cannot distinguish an absent proof from one it simply
+    /// cannot check, so it refuses BOTH cases outright under this distinct variant rather than
+    /// silently reporting either as verified, or misreporting a possibly-valid rotation as a
+    /// definite schema defect.
+    #[error(
+        "governance-key rotation at manifest entry index {manifest_entry_index} is not \
+         supported by this build: `governance.rotation_proofs[]` verification (I-D §7.1, \
+         §7.5.1) is not yet implemented, so a receipt whose carried chain rotates a log or \
+         witness key set is refused rather than silently accepted or misreported"
+    )]
+    GovernanceKeyRotationUnsupported {
+        /// Entry index of the rotating manifest.
+        manifest_entry_index: u64,
+    },
+
+    /// This build does not implement the canonicalization procedure a dataset's descriptor
+    /// names (I-D §2.6): only `jcs` and `exact-bytes` are implemented.
+    ///
+    /// Per I-D §6.3's conformance table, an identifier this verifier does not implement makes
+    /// only THAT dataset's content-binding finding `unverifiable` — never `invalid`, and never
+    /// rehabilitated to `content_binding: "none"`.
+    #[error(
+        "canonicalization identifier `{identifier}` names a procedure this build does not \
+         implement; dataset `{dataset}`'s content-binding finding is unverifiable, not invalid \
+         (I-D §6.3)"
+    )]
+    CanonicalizationUnsupported {
+        /// The dataset whose content-binding finding is affected.
+        dataset: String,
+        /// The unimplemented `canonicalization` identifier.
+        identifier: String,
+    },
+
+    /// Carried record/output bytes did not canonicalize under the dataset's declared procedure
+    /// (I-D §2.6, §7.2: the verifier canonicalizes the record AS RECEIVED before recomputing
+    /// the commitment).
+    ///
+    /// Unlike [`Self::CanonicalizationUnsupported`], this is `invalid`: the procedure IS
+    /// implemented, and the carried bytes simply fail it (for `jcs`, do not parse as JSON).
+    #[error(
+        "dataset `{dataset}`: carried bytes do not canonicalize under `{identifier}`: {detail}"
+    )]
+    CanonicalizationFailed {
+        /// The dataset whose content binding failed.
+        dataset: String,
+        /// The `canonicalization` identifier the bytes failed to satisfy.
+        identifier: String,
+        /// Why.
+        detail: String,
+    },
+
+    /// A dataset's declared `media_type` PRESENCE violates the identifier's own rule (I-D
+    /// §2.6): `jcs` MUST NOT carry `media_type` (it never reads the media type), `exact-bytes`
+    /// MUST carry it (the canonical input is qualified by it).
+    ///
+    /// Presence is "a producer duty and is never a syntactic matter" (I-D §2.6), so wrong
+    /// presence never rejects the manifest — only this dataset's content-binding finding is
+    /// `invalid`, and only where this verifier implements the procedure well enough to know the
+    /// rule; for an identifier it does not implement at all, that dataset's finding is
+    /// [`Self::CanonicalizationUnsupported`], not this variant.
+    #[error(
+        "dataset `{dataset}` (canonicalization `{identifier}`) has an invalid `media_type` \
+         presence: {detail}"
+    )]
+    MediaTypePresenceInvalid {
+        /// The dataset whose content-binding finding is affected.
+        dataset: String,
+        /// The dataset's `canonicalization` identifier.
+        identifier: String,
+        /// Which rule it breaks.
+        detail: &'static str,
+    },
+
+    /// `claim_material`'s descriptor for a dataset does not equal (I-D §2.6 descriptor
+    /// equality: identical NORMALIZED forms) the descriptor declared by the manifest version
+    /// NAMED BY THE SUBJECT STATEMENT'S `manifest` binding (I-D §2.2, §6.3) — the manifest
+    /// statement whose STATEMENT id (I-D §2.4.5) that binding carries, not merely the manifest
+    /// active at the subject's entry index.
+    #[error(
+        "claim material's descriptor for dataset `{dataset}` (`{claimed}`) does not equal the \
+         manifest's declared descriptor (`{declared}`) at manifest version \
+         `{manifest_version_id}` (I-D §2.6, §6.3)"
+    )]
+    ClaimDescriptorMismatch {
+        /// The dataset the mismatch concerns.
+        dataset: String,
+        /// The descriptor's normalized form as carried in `claim_material`.
+        claimed: String,
+        /// The descriptor's normalized form as declared in the governing manifest.
+        declared: String,
+        /// The governing manifest's version id (I-D §2.4.5: the manifest statement's own
+        /// statement id).
+        manifest_version_id: String,
     },
 
     /// The receipt asks for a combination the frozen container format cannot evidence.
@@ -560,6 +671,25 @@ fn statement_type(payload: &Value) -> Result<&str> {
     text(payload, "type")
 }
 
+/// Check a carried statement's `ahl_version` before validating anything else about it
+/// (I-D §2.2, §7.1, §7.5 step 1).
+///
+/// An absent `ahl_version` is a schema failure, decidable from the bytes alone, and is
+/// `invalid` (`ReceiptError::Malformed`). A present value other than [`crate::AHL_VERSION`] is
+/// `unverifiable` — not `invalid` — because this document establishes nothing about whether an
+/// earlier-revision artifact verifies under rules it was never issued under.
+fn check_ahl_version(payload: &Value) -> Result<()> {
+    match payload.get("ahl_version").and_then(Value::as_str) {
+        None => Err(ReceiptError::Malformed("statement payload missing `ahl_version`".to_owned())),
+        Some(got) if got == crate::AHL_VERSION => Ok(()),
+        Some(got) => Err(ReceiptError::UnsupportedVersion {
+            field: "ahl_version",
+            expected: crate::AHL_VERSION,
+            got: got.to_owned(),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Budget
 // ---------------------------------------------------------------------------
@@ -623,6 +753,17 @@ struct Governance<'a> {
     manifests: Vec<(u64, &'a Value)>,
     /// Producer key transitions, ascending by entry index.
     events: Vec<KeyEvent>,
+    /// Manifest payloads keyed by their MANIFEST VERSION ID — the manifest statement's own
+    /// `statement_id` (I-D §2.4.5), which is what a subject statement's `manifest` field
+    /// references (I-D §2.2). Distinct from `entry_id`, which `predecessor` references.
+    manifest_by_version_id: BTreeMap<String, &'a Value>,
+}
+
+impl<'a> Governance<'a> {
+    /// The manifest payload named by a statement's `manifest` field (I-D §2.2, §2.4.5).
+    fn manifest_by_version_id(&self, version_id: &str) -> Option<&'a Value> {
+        self.manifest_by_version_id.get(version_id).copied()
+    }
 }
 
 /// One producer key in force at some entry index, with the governance statement that put it
@@ -922,36 +1063,68 @@ fn key_objects(container: &Value) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
-/// Validate the manifest `datasets` object's dataset id syntax (I-D revision 0.4 §2.6, §6.3).
+/// Validate the manifest `datasets` object: its own required presence (I-D §6.2), every
+/// declared dataset id's syntax, and every declared descriptor's syntax (I-D §2.6, §6.3).
 ///
-/// §6.3's conformance table makes a syntactically invalid dataset declaration — among other
-/// things, "a dataset id violating the dataset id syntax or containing a control octet" — reject
+/// §6.2 lists `datasets` among what the manifest payload "contains at minimum", so its absence
+/// — or a non-object value — is a schema failure exactly like a missing `log` object.
+///
+/// §6.3's conformance table makes a SYNTACTICALLY INVALID dataset declaration — a dataset id
+/// violating the dataset id syntax or containing a control octet; a `canonicalization`
+/// identifier that is missing, not a string, or violating the identifier syntax; a `media_type`
+/// that is present but not a string or that does not match the descriptor media-type production
+/// (duplicate lowercased parameter names and quoted-string parameter values included) — reject
 /// the WHOLE manifest, not merely the affected dataset's claims: "A dataset's canonicalization
 /// descriptor is a required manifest member (§6.2), and statements derive their governance from
-/// that manifest (§2.2)". This checks exactly that member, key by key, the same way
-/// [`log_object`] and [`key_objects`] check the members they are responsible for.
+/// that manifest (§2.2)". This checks every declared dataset, key by key, regardless of whether
+/// any claim in the receipt ever binds content against it — the same way [`log_object`] and
+/// [`key_objects`] check the members they are responsible for, once per manifest, not lazily
+/// where a claim happens to need them.
 ///
-/// The declared `canonicalization` identifier and `media_type` are not validated here: nothing
-/// in this crate needs their descriptor to commit-check a dataset that no claim in the receipt
-/// ever binds content against, and [`verify_content_binding`] already validates them — via
-/// [`CanonicalizationDescriptor::new`] — the moment a claim actually needs the descriptor to
-/// recompute a commitment.
+/// [`verify_content_binding`] independently reconstructs the descriptor it actually uses, via
+/// [`CanonicalizationDescriptor::new`], the moment a claim needs it to recompute a commitment;
+/// that is a defensive re-check, not this rule's only enforcement point.
 fn datasets_object(manifest: &Value) -> Result<()> {
-    let Some(datasets) = manifest.get("datasets").and_then(Value::as_object) else {
-        return Ok(());
-    };
-    for dataset_id in datasets.keys() {
-        descriptor::validate_dataset_id(dataset_id).map_err(|source| {
-            ReceiptError::ManifestSchemaInvalid {
-                object: "datasets".to_owned(),
-                detail: source.to_string(),
+    let datasets = manifest.get("datasets").and_then(Value::as_object).ok_or_else(|| {
+        ReceiptError::ManifestSchemaInvalid {
+            object: "datasets".to_owned(),
+            detail: "the member is REQUIRED and MUST be an object (I-D §6.2)".to_owned(),
+        }
+    })?;
+    for (dataset_id, declared) in datasets {
+        let invalid = |detail: String| ReceiptError::ManifestSchemaInvalid {
+            object: format!("datasets.{dataset_id}"),
+            detail,
+        };
+        descriptor::validate_dataset_id(dataset_id)
+            .map_err(|source| invalid(source.to_string()))?;
+
+        let declared = declared
+            .as_object()
+            .ok_or_else(|| invalid("the dataset's declaration MUST be an object".to_owned()))?;
+        let canonicalization =
+            declared.get("canonicalization").and_then(Value::as_str).ok_or_else(|| {
+                invalid("`canonicalization` is REQUIRED and MUST be a string (I-D §2.6)".to_owned())
+            })?;
+        let media_type = match declared.get("media_type") {
+            None => None,
+            Some(Value::String(value)) => Some(value.clone()),
+            Some(_) => {
+                return Err(invalid(
+                    "`media_type`, where present, MUST be a string (I-D §2.6)".to_owned(),
+                ))
             }
-        })?;
+        };
+        CanonicalizationDescriptor::new(canonicalization, media_type)
+            .map_err(|source| invalid(source.to_string()))?;
     }
     Ok(())
 }
 
 /// Build and structurally validate the governance chain (spec §2.3.5).
+// The governance-key-rotation check (I-D §7.1, §7.5.1) folds naturally into this same
+// per-manifest walk rather than a second pass over the same material.
+#[allow(clippy::too_many_lines)]
 fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance<'a>> {
     let chain = array(obj(receipt, "governance")?, "chain")?;
     if chain.is_empty() {
@@ -962,6 +1135,8 @@ fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance
     let mut events = Vec::new();
     let mut previous_index: Option<u64> = None;
     let mut previous_manifest_entry_id: Option<String> = None;
+    let mut previous_manifest_payload: Option<&Value> = None;
+    let mut manifest_by_version_id: BTreeMap<String, &Value> = BTreeMap::new();
 
     for hop in chain {
         let index = number(hop, "entry_index")?;
@@ -974,6 +1149,7 @@ fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance
 
         let envelope = obj(hop, "envelope")?;
         let payload = payload_of(envelope)?;
+        check_ahl_version(payload)?;
         match statement_type(payload)? {
             "manifest" => {
                 let predecessor = payload.get("predecessor").and_then(Value::as_str);
@@ -1018,6 +1194,34 @@ fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance
                         key_objects(witness)?;
                     }
                 }
+                // I-D §7.1 / §7.5.1: a manifest whose log or witness key objects differ from
+                // its predecessor's in the chain is a GOVERNANCE-KEY ROTATION and requires a
+                // `governance.rotation_proofs[]` element this build does not implement checking
+                // (`GovernanceKeyRotationUnsupported`).
+                //
+                // AMBIGUITY (I-D §7.1 "governance-key rotation" definition): the I-D says a
+                // rotating manifest's key objects "differ from those of its predecessor",
+                // without stating whether an array of key objects is compared as an ORDERED
+                // SEQUENCE or as a SET — a manifest that re-lists the same key objects in a
+                // different order is a case the text does not resolve either way. This
+                // implementation takes the minimal (stricter) reading — whole-array inequality,
+                // order-sensitive — rather than guessing at a set-membership diff: it can flag
+                // a harmless reordering as a rotation, but never the reverse, which is the safe
+                // direction for a check whose only job is to refuse rather than silently accept
+                // an unproven rotation. No vector in this corpus exercises reordering-without-
+                // change, so this reading is untested against that specific case.
+                if let Some(previous) = previous_manifest_payload {
+                    let log_rotated = payload.get("log").and_then(|log| log.get("keys"))
+                        != previous.get("log").and_then(|log| log.get("keys"));
+                    let witnesses_rotated = payload.get("witnesses") != previous.get("witnesses");
+                    if log_rotated || witnesses_rotated {
+                        return Err(ReceiptError::GovernanceKeyRotationUnsupported {
+                            manifest_entry_index: index,
+                        });
+                    }
+                }
+                previous_manifest_payload = Some(payload);
+                manifest_by_version_id.insert(statement_id(envelope)?, payload);
                 manifests.push((index, payload));
             }
             "key" => {
@@ -1069,7 +1273,7 @@ fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance
         return Err(ReceiptError::GenesisAnchorMismatch);
     }
 
-    Ok(Governance { manifests, events })
+    Ok(Governance { manifests, events, manifest_by_version_id })
 }
 
 // ---------------------------------------------------------------------------
@@ -1520,6 +1724,9 @@ fn verify_nested(
     }
     let subject_index = number(subject, "entry_index")?;
     let payload = payload_of(envelope)?;
+    // I-D §2.2 / §7.1: every carried statement's `ahl_version` is checked before validating
+    // that statement, the subject's own envelope included.
+    check_ahl_version(payload)?;
     let subject_type = statement_type(payload)?.to_owned();
 
     // --- §5 step 2: adaptor profile -------------------------------------------------
@@ -1856,6 +2063,31 @@ fn verify_record_ingested(ctx: &ClaimCtx<'_>) -> Result<()> {
 
 /// Recompute a commitment from carried canonical bytes per the dataset's declared mode
 /// (§2.1, spec §2.4). `content_binding: "none"` requires the evidence fields to be absent.
+///
+/// Everything past the `"none"` case is I-D revision 0.4, §2.6 and §6.3:
+///
+/// 1.  The governing manifest is the one NAMED BY THE SUBJECT STATEMENT's own `manifest`
+///     binding (I-D §2.2) — the manifest statement's STATEMENT id (I-D §2.4.5), not its entry
+///     id, and not merely whichever manifest happens to be active at the subject's entry
+///     index.
+/// 2.  `claim_material`'s own `canonicalization`/`media_type` MUST equal (I-D §2.6 descriptor
+///     equality — identical normalized forms) that manifest's declared descriptor; a mismatch,
+///     or a missing `claim_material.canonicalization`, is `invalid`.
+/// 3.  For an identifier this build implements, wrong `media_type` presence is `invalid` for
+///     this dataset's binding (I-D §2.6 "Presence is a producer duty and is never a syntactic
+///     matter"); for one it does not implement, the finding is `unverifiable`
+///     ([`ReceiptError::CanonicalizationUnsupported`]), never `invalid`, and never
+///     rehabilitated to `content_binding: "none"`.
+/// 4.  The carried bytes are the record AS RECEIVED; this verifier APPLIES the canonicalization
+///     procedure (`jcs`: parse then re-serialize through [`crate::jcs`]; `exact-bytes`: the
+///     octets unchanged) before recomputing the commitment. Bytes that fail the procedure make
+///     this dataset's finding `invalid` ([`ReceiptError::CanonicalizationFailed`]), not a panic
+///     and not a run-aborting error unrelated to this binding.
+// I-D §2.6/§6.3 fold four checks into one recomputation — descriptor resolution, descriptor
+// equality, media-type presence, and the canonicalization procedure — and splitting them into
+// helpers each carrying the growing set of intermediate values would obscure the order the I-D
+// itself fixes for them.
+#[allow(clippy::too_many_lines)]
 fn verify_content_binding(
     ctx: &ClaimCtx<'_>,
     dataset: &str,
@@ -1871,22 +2103,89 @@ fn verify_content_binding(
         };
     }
 
-    let (_, manifest) = ctx.governance.active_for(ctx.subject_index + 1)?;
+    let manifest_version_id = text(ctx.payload, "manifest")?;
+    let manifest = ctx.governance.manifest_by_version_id(manifest_version_id).ok_or_else(|| {
+        ReceiptError::GovernanceChainInvalid(format!(
+            "manifest version `{manifest_version_id}` named by the subject statement's              `manifest` binding is not in the carried governance chain"
+        ))
+    })?;
     let declared = obj(obj(manifest, "datasets")?, dataset)?;
     let declared_mode = text(declared, "commitment_mode")?.to_owned();
-    // I-D §2.6: the descriptor is bound into every commitment through its digest `ddig`, so
-    // recomputation needs the dataset's declared descriptor, not merely its commitment mode.
-    // `CanonicalizationDescriptor::new` validates the identifier syntax and, where present, the
-    // media-type production — the moment this dataset's descriptor is actually needed to
-    // recompute a commitment, rather than eagerly for every dataset a manifest declares
-    // (`datasets_object` at manifest-schema time validates only the dataset id).
+    // `datasets_object` already validated this manifest's descriptor syntax at manifest-schema
+    // time (I-D §6.3 row 1); this reconstruction is what actually computes `ddig`.
     let canonicalization = text(declared, "canonicalization")?.to_owned();
     let media_type = declared.get("media_type").and_then(Value::as_str).map(str::to_owned);
-    let ddig = CanonicalizationDescriptor::new(canonicalization, media_type)?.ddig();
+    let descriptor = CanonicalizationDescriptor::new(canonicalization, media_type)?;
+
+    // I-D §6.3: claim_material's descriptor MUST equal the manifest's declared one, under the
+    // descriptor equality of §2.6 (identical normalized forms — comparing normalized members,
+    // never raw declared bytes).
+    let claimed_canonicalization = material
+        .get("canonicalization")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ctx.missing("canonicalization"))?
+        .to_owned();
+    let claimed_media_type = material.get("media_type").and_then(Value::as_str).map(str::to_owned);
+    let claimed_descriptor =
+        CanonicalizationDescriptor::new(claimed_canonicalization, claimed_media_type)?;
+    if claimed_descriptor.canonicalization() != descriptor.canonicalization()
+        || claimed_descriptor.media_type() != descriptor.media_type()
+    {
+        return Err(ReceiptError::ClaimDescriptorMismatch {
+            dataset: dataset.to_owned(),
+            claimed: describe_descriptor(&claimed_descriptor),
+            declared: describe_descriptor(&descriptor),
+            manifest_version_id: manifest_version_id.to_owned(),
+        });
+    }
+
+    // I-D §2.6: presence is capability-gated — `descriptor::media_type_required` returns
+    // `None` for an identifier this build does not implement, and that case falls through to
+    // the canonicalization step below, which reports it as unverifiable rather than as a
+    // presence defect this verifier has no grounds to assert.
+    match descriptor::media_type_required(descriptor.canonicalization()) {
+        Some(required) if required != descriptor.media_type().is_some() => {
+            let detail = if required {
+                "MUST carry `media_type` (I-D §2.6)"
+            } else {
+                "MUST NOT carry `media_type` (I-D §2.6)"
+            };
+            return Err(ReceiptError::MediaTypePresenceInvalid {
+                dataset: dataset.to_owned(),
+                identifier: descriptor.canonicalization().to_owned(),
+                detail,
+            });
+        }
+        _ => {}
+    }
+
+    let ddig = descriptor.ddig();
     let encoded = material.get(field).and_then(Value::as_str).ok_or_else(|| ctx.missing(field))?;
-    let bytes = B64
+    let received = B64
         .decode(crate::strip_prefix(encoded, "base64:")?)
         .map_err(|source| ReceiptError::Ahl(AhlError::Base64(source)))?;
+
+    // I-D §2.6 / §7.2: `received` is the record AS RECEIVED; the verifier canonicalizes it
+    // before recomputing the commitment.
+    let bytes = match descriptor.canonicalization() {
+        "jcs" => {
+            let value: Value = serde_json::from_slice(&received).map_err(|source| {
+                ReceiptError::CanonicalizationFailed {
+                    dataset: dataset.to_owned(),
+                    identifier: "jcs".to_owned(),
+                    detail: source.to_string(),
+                }
+            })?;
+            jcs(&value)
+        }
+        "exact-bytes" => received,
+        other => {
+            return Err(ReceiptError::CanonicalizationUnsupported {
+                dataset: dataset.to_owned(),
+                identifier: other.to_owned(),
+            })
+        }
+    };
 
     let recomputed = match ctx.assurance.content_binding.as_str() {
         "plain-verified" if declared_mode == "plain" => commit_plain(dataset, &ddig, &bytes)?,
@@ -1918,6 +2217,19 @@ fn verify_content_binding(
             claimed: record.to_owned(),
         })
     }
+}
+
+/// Render a descriptor's normalized form for an error message (I-D §2.6 descriptor equality).
+fn describe_descriptor(descriptor: &CanonicalizationDescriptor) -> String {
+    descriptor.media_type().map_or_else(
+        || format!("{{canonicalization: {}}}", descriptor.canonicalization()),
+        |media_type| {
+            format!(
+                "{{canonicalization: {}, media_type: {media_type}}}",
+                descriptor.canonicalization()
+            )
+        },
+    )
 }
 
 /// `record-derived` (§3): one output record's derivation, unbatched or through the batch tree.
