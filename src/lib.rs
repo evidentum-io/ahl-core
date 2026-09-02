@@ -267,13 +267,26 @@ impl TestKey {
         format!("{BASE64_PREFIX}{}", B64.encode(self.signing.sign(msg).to_bytes()))
     }
 
-    /// A manifest key object `{key_id, pubkey, valid_from_index}` (spec §7.2).
+    /// A manifest LOG or WITNESS key object `{key_id, pubkey, valid_from_index}` (I-D §6.2).
     #[must_use]
     pub fn key_object(&self, valid_from_index: u64) -> Value {
         json!({
             "key_id": self.key_id(),
             "pubkey": self.pubkey(),
             "valid_from_index": valid_from_index,
+        })
+    }
+
+    /// A manifest PRODUCER key object `{key_id, pubkey}` (I-D §6.2: "Each entry is a producer
+    /// key object `{key_id, pubkey}`... A producer key object carrying any member beyond those
+    /// two is a schema failure" — deliberately NOT the log/witness shape `key_object` builds:
+    /// the producer array IS the key state at the manifest's entry index, with no per-key
+    /// `valid_from_index` of its own).
+    #[must_use]
+    pub fn producer_key_object(&self) -> Value {
+        json!({
+            "key_id": self.key_id(),
+            "pubkey": self.pubkey(),
         })
     }
 }
