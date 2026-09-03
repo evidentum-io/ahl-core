@@ -1981,6 +1981,48 @@ fn an_unauthenticated_rotation_applies_no_effect_to_the_key_state() {
     }
 }
 
+/// A `manifest-chain` key entry is judged against the manifest its binding names, used or not.
+///
+/// I-D §7.1: "A `manifest-chain` key that matches no object in the manifest version its binding
+/// names, or that differs from the matching object in any compared member, is `invalid`." The
+/// rule is about the ENTRY, so an entry no cosignature ever selects is as much a defect as a
+/// selected one — unlike a `local-policy` entry, whose obligation §7.1 makes conditional on use
+/// because what it depends on is the verifier's own configuration rather than the receipt's own
+/// material.
+///
+/// The finding is `witnesses` because the entry sits in `keys.witness[]`, which is scanned
+/// while the witness half of 4f resolves its keys; the same defect in a `keys.log[]` entry is
+/// `checkpoint-authentication`, scanned while the checkpoint signature's key is resolved.
+#[test]
+fn an_unused_manifest_chain_key_entry_is_validated_anyway() {
+    let policy = trust_policy();
+    let impostor = TestKey::from_seed_hex("impostor", &"ee".repeat(32)).expect("32-byte seed");
+    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+    // Well formed, correctly self-consistent (`key_id` is `sha256:`-of-`pubkey`), bound to the
+    // genesis manifest — and matching no witness object that manifest declares. No cosignature
+    // names it.
+    receipt["keys"]["witness"].as_array_mut().expect("witness keys").push(json!({
+        "witness_id": "witness-1",
+        "key_id": impostor.key_id(),
+        "pubkey": impostor.pubkey(),
+        "source": "manifest-chain",
+        "binding": { "entry_index": 0 },
+    }));
+
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid, "{:#?}", report.findings);
+    let finding = report.finding(Assertion::Witnesses).expect("witnesses finding");
+    assert_eq!(finding.outcome, Outcome::Invalid);
+    assert!(matches!(
+        verify_receipt(&receipt, &policy),
+        Err(ReceiptError::KeyNotBound { ref key_id, entry_index: 0 }) if key_id == &impostor.key_id()
+    ));
+
+    // The receipt without that entry is the accepted vector it was built from.
+    let (_, clean) = read_receipt("statement-anchored-valid.ahl");
+    assert!(verify_receipt(&clean, &policy).is_ok());
+}
+
 /// §7.6's `subject.manifest` rules hold whether or not the induction stopped.
 ///
 /// §7.6: "Each of the following is a disagreement among fields the receipt itself carries,

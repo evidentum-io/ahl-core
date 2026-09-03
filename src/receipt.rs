@@ -2120,6 +2120,17 @@ impl Governance<'_> {
         }
     }
 
+    /// The scope one `keys[]` scan resolves against for a checkpoint whose active manifest
+    /// version sits at `active_index`: the complete walk, and where it stopped.
+    fn scope_at(&self, active_index: u64) -> KeyScope<'_> {
+        KeyScope {
+            manifests: &self.manifests,
+            active_index,
+            unestablished_from: self.unestablished_from,
+            complete: true,
+        }
+    }
+
     /// Whether K is established for the manifest version active for a checkpoint of this size.
     ///
     /// A checkpoint of `tree_size` commits entries `[0, tree_size)`, so the manifest version
@@ -3211,8 +3222,19 @@ fn verify_rotation_proof(
     // receipt's own `keys` block, bound at the outgoing manifest's entry index, rather than
     // lifted out of the manifest behind the block's back. Where the receipt is well formed the
     // two agree; where they do not, it is verifying under a key it never declared.
-    let (outgoing_log_keys, outgoing_log_attempted, _) =
-        bind_keys_by_group(receipt, policy, manifests, outgoing_index, "log")?;
+    let (outgoing_log_keys, outgoing_log_attempted, _) = bind_keys_by_group(
+        receipt,
+        policy,
+        // Inside 4b(M): `manifests` is the prefix walked so far, so a binding naming a
+        // version the walk has not reached is not yet decidable.
+        &KeyScope {
+            manifests,
+            active_index: outgoing_index,
+            unestablished_from: None,
+            complete: false,
+        },
+        "log",
+    )?;
     let signer = outgoing_log_keys.get(checkpoint_key_id).ok_or_else(|| {
         let entry_index =
             outgoing_log_attempted.get(checkpoint_key_id).copied().unwrap_or(outgoing_index);
@@ -3916,6 +3938,47 @@ struct ResolvedKey {
 /// trusts: the entry's `key_id` AND `pubkey` must both be what [`TrustPolicy`] holds. Nothing
 /// carried in the receipt contributes to that decision, which is the whole point — a policy
 /// holding no trusted witness key accepts no `local-policy` witness key at all.
+/// One `manifest-chain` entry against the manifest version its BINDING names (I-D §7.1).
+///
+/// "A `manifest-chain` key that matches no object in the manifest version its binding names, or
+/// that differs from the matching object in any compared member, is `invalid`." The rule is
+/// about the entry, not about the checkpoint being verified, so it holds whether or not this
+/// checkpoint ever selects the key — an unused entry that matches nothing is as much a defect
+/// as a used one.
+///
+/// I-D §7.1, keys block: the manifest object is `{key_id, pubkey, valid_from_index}`, "a witness
+/// object additionally carrying `witness_id`; the receipt-side entry carries `key_id`, `pubkey`,
+/// and for a witness `witness_id`, but not `valid_from_index`, which is a property of the
+/// manifest declaration and is read from the manifest object alone. The match is therefore
+/// equality of every member the two objects share" (§6.2 fixes the manifest side of that pair).
+/// Which is what this compares — the shared members, all of them.
+fn match_manifest_key_object(entry: &Value, group: &str, manifest: &Value) -> Result<ResolvedKey> {
+    let key_id = text(entry, "key_id")?.to_owned();
+    let pubkey = text(entry, "pubkey")?.to_owned();
+    let binding_index = number(obj(entry, "binding")?, "entry_index")?;
+    let not_bound =
+        || ReceiptError::KeyNotBound { key_id: key_id.clone(), entry_index: binding_index };
+    if group == "log" {
+        key_objects(log_object(manifest)?)?
+            .into_iter()
+            .find(|(id, key)| id == &key_id && key == &pubkey)
+            .map(|(_, key)| ResolvedKey { pubkey: key, witness_id: None })
+            .ok_or_else(not_bound)
+    } else {
+        let witness_id = text(entry, "witness_id")?.to_owned();
+        witness_key_set(manifest)?
+            .into_iter()
+            .find(|(declared_id, id, key, _)| {
+                declared_id == &witness_id && id == &key_id && key == &pubkey
+            })
+            .map(|(declared_id, _, key, _)| ResolvedKey {
+                pubkey: key,
+                witness_id: Some(declared_id),
+            })
+            .ok_or_else(not_bound)
+    }
+}
+
 fn bind_log_or_witness_key(
     policy: &TrustPolicy,
     manifests: &[(u64, &Value)],
@@ -3953,40 +4016,12 @@ fn bind_log_or_witness_key(
             if binding_index != active_index {
                 return Err(ReceiptError::KeyNotBound { key_id, entry_index: binding_index });
             }
-            let not_bound =
-                || ReceiptError::KeyNotBound { key_id: key_id.clone(), entry_index: binding_index };
             let (_, manifest) = manifests
                 .iter()
                 .find(|(index, _)| *index == binding_index)
                 .copied()
-                .ok_or_else(not_bound)?;
-
-            // I-D §7.1, keys block: the manifest object is `{key_id, pubkey,
-            // valid_from_index}`, "a witness object additionally carrying `witness_id`; the
-            // receipt-side entry carries `key_id`, `pubkey`, and for a witness `witness_id`,
-            // but not `valid_from_index`, which is a property of the manifest declaration and
-            // is read from the manifest object alone. The match is therefore equality of every
-            // member the two objects share" (§6.2 fixes the manifest side of that pair). Which
-            // is what this compares — the shared members, all of them.
-            if group == "log" {
-                key_objects(log_object(manifest)?)?
-                    .into_iter()
-                    .find(|(id, key)| id == &key_id && key == &pubkey)
-                    .map(|(_, key)| ResolvedKey { pubkey: key, witness_id: None })
-                    .ok_or_else(not_bound)
-            } else {
-                let witness_id = text(entry, "witness_id")?.to_owned();
-                witness_key_set(manifest)?
-                    .into_iter()
-                    .find(|(declared_id, id, key, _)| {
-                        declared_id == &witness_id && id == &key_id && key == &pubkey
-                    })
-                    .map(|(declared_id, _, key, _)| ResolvedKey {
-                        pubkey: key,
-                        witness_id: Some(declared_id),
-                    })
-                    .ok_or_else(not_bound)
-            }
+                .ok_or(ReceiptError::KeyNotBound { key_id, entry_index: binding_index })?;
+            match_manifest_key_object(entry, group, manifest)
         }
         // Unreachable in a receipt that reached this point — [`check_keys_block`] admits only
         // the two tokens above, and runs over the whole `keys` block first — but stated rather
@@ -4468,6 +4503,21 @@ fn check_keys_block(receipt: &Value) -> Result<()> {
 /// `key_id -> ` [`ResolvedKey`] for `keys.log`/`keys.witness` entries that bound successfully
 /// at some checkpoint's active manifest index, plus, for every `key_id` that never did, the
 /// binding index its first failing entry actually carried.
+/// What one `keys.{group}[]` scan resolves against.
+struct KeyScope<'a> {
+    /// The manifest versions the induction has walked — the complete chain after it, a prefix
+    /// inside it.
+    manifests: &'a [(u64, &'a Value)],
+    /// The manifest version active for the checkpoint whose keys are being resolved, and
+    /// therefore the binding index an entry must name to be SELECTED here.
+    active_index: u64,
+    /// Where the induction stopped, if it did ([`Governance::unestablished_from`]).
+    unestablished_from: Option<u64>,
+    /// Whether `manifests` is the complete walk. Inside 4b(M) it is a prefix, so a binding the
+    /// walk has not reached yet says nothing about the entry.
+    complete: bool,
+}
+
 /// What binding one `keys.{group}[]` array produced: the keys that bound, the binding index
 /// each unbound one asked for, and the key ids that could not be resolved for want of LOCAL
 /// POLICY rather than for anything the receipt carries.
@@ -4491,10 +4541,10 @@ type BoundKeys = (BTreeMap<String, ResolvedKey>, BTreeMap<String, u64>, BTreeSet
 fn bind_keys_by_group(
     receipt: &Value,
     policy: &TrustPolicy,
-    manifests: &[(u64, &Value)],
-    active_index: u64,
+    scope: &KeyScope<'_>,
     group: &str,
 ) -> Result<BoundKeys> {
+    let &KeyScope { manifests, active_index, unestablished_from, complete } = scope;
     let keys = obj(receipt, "keys")?;
     let mut bound = BTreeMap::new();
     let mut attempted_index = BTreeMap::new();
@@ -4502,6 +4552,34 @@ fn bind_keys_by_group(
     for entry in array(keys, group)? {
         check_key_id(entry)?;
         let key_id = text(entry, "key_id")?.to_owned();
+        // I-D §7.1 judges a `manifest-chain` entry against the manifest version ITS BINDING
+        // names, not against the checkpoint being verified: "A `manifest-chain` key that matches
+        // no object in the manifest version its binding names, or that differs from the matching
+        // object in any compared member, is `invalid`." So every such entry is validated here,
+        // whether or not this checkpoint goes on to select it — an unused entry that matches
+        // nothing is as much a defect as a used one, and only the SELECTION below is conditional.
+        //
+        // Two cases are not defects. The named version may be one the walk has not reached yet
+        // (inside 4b(M), where `manifests` is a prefix), or one it stopped short of; neither is
+        // decidable here, so the entry is left unvalidated and unselected, and the assertion
+        // that would have used it already rests on `governance`.
+        if text(entry, "source")? == "manifest-chain" {
+            let binding_index = number(obj(entry, "binding")?, "entry_index")?;
+            match manifests.iter().find(|(index, _)| *index == binding_index).copied() {
+                Some((_, manifest)) => {
+                    match_manifest_key_object(entry, group, manifest)?;
+                }
+                None if complete
+                    && unestablished_from.is_none_or(|stopped| binding_index < stopped) =>
+                {
+                    return Err(ReceiptError::KeyNotBound { key_id, entry_index: binding_index });
+                }
+                None => {
+                    attempted_index.entry(key_id.clone()).or_insert(binding_index);
+                    continue;
+                }
+            }
+        }
         match bind_log_or_witness_key(policy, manifests, entry, group, active_index) {
             Ok(resolved) => {
                 bound.insert(key_id, resolved);
@@ -4622,14 +4700,14 @@ fn verify_checkpoint(
     }
 
     let (log_keys, log_attempted, _) =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log")?;
+        bind_keys_by_group(receipt, policy, &governance.scope_at(active_index), "log")?;
     // A `local-policy` witness key the verifier does not hold is a gap in the VERIFIER's
     // configuration (I-D §7.1, §7.7): it settles the witness assertion `unverifiable` for the
     // cosignatures that name it and stops nothing else — not the checkpoint signature below,
     // which is under a log key, and not the cosignatures naming keys that did resolve.
     run.phase(Assertion::Witnesses);
     let witness_binding =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness")?;
+        bind_keys_by_group(receipt, policy, &governance.scope_at(active_index), "witness")?;
     run.phase(Assertion::CheckpointAuthentication);
 
     let signing_key = log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| {
@@ -6946,7 +7024,7 @@ fn authenticate_checkpoint(
     // own active manifest — so this resolves against THIS checkpoint's own `active_index`,
     // exactly as [`verify_checkpoint`] does for the primary checkpoint.
     let (log_keys, log_attempted, _) =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log")?;
+        bind_keys_by_group(receipt, policy, &governance.scope_at(active_index), "log")?;
     let signing_key = log_keys.get(key_id).ok_or_else(|| {
         let entry_index = log_attempted.get(key_id).copied().unwrap_or(active_index);
         ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
@@ -6998,7 +7076,7 @@ fn verify_later_witnesses(
 
     run.phase(Assertion::Witnesses);
     let binding =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness")?;
+        bind_keys_by_group(receipt, policy, &governance.scope_at(active_index), "witness")?;
     let established = verify_witness_cosignatures(
         anchoring,
         "later_witnesses",
