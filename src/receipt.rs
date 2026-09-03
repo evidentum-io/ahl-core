@@ -855,6 +855,22 @@ fn statement_type(payload: &Value) -> Result<&str> {
     text(payload, "type")
 }
 
+/// The literal `type` value of a carried statement, read without validating anything.
+///
+/// I-D §7.5.1 4b defines the induction over "the manifest statements of `governance.chain[]`,
+/// merged in entry-index order with the `key` statements the enumeration material carries", so
+/// something has to decide WHICH enumerated statements those are before any signature is
+/// verified. That decision is a selection, not the "type-specific validation" 4b's phase 2
+/// holds back: it reads one member and compares it to a literal, and it reaches no conclusion
+/// about the statement. A payload with no `type`, or a non-string one, is simply not a
+/// `manifest` and not a `key` — it takes the non-induction path, where 4d's signature runs
+/// first and the missing member is then reported by [`common_payload_fields`] in phase 2,
+/// which is the order 4b(K) fixes ("`type` is exactly `key`, and the common payload fields of
+/// Section 2.2 are present and well formed" is phase-2 work).
+fn statement_type_literal(envelope: &Value) -> Option<&str> {
+    envelope.get("payload")?.get("type")?.as_str()
+}
+
 /// Check a carried statement's `ahl_version` before validating anything else about it
 /// (I-D §2.2, §7.1, §7.5 step 1).
 ///
@@ -3625,14 +3641,18 @@ fn decode_enumeration(
             });
         }
         let envelope = obj(entry, "envelope")?;
-        // I-D §2.2 / §7.1: every carried statement's `ahl_version`, then its common payload
-        // fields, are checked before validating that statement — enumerated envelopes
-        // included. This is the one choke point every enumerated envelope (governance
-        // currency, competing-trigger, and propagation-prefix material alike) passes through
-        // before its payload is read anywhere downstream.
+        // I-D §7.5 step 1 / §7.1: "A verifier MUST likewise check each carried statement's
+        // `ahl_version` BEFORE VALIDATING THAT STATEMENT. Any value other than `0.4` yields
+        // `unverifiable`." That is a version READ, decided from the bytes alone and reaching
+        // no conclusion about the statement, and §7.1 places it ahead of everything the
+        // document defines — so it stays here, at the decode, rather than moving behind a
+        // signature. Nothing else about the payload is looked at: §2.2's common payload
+        // fields are TYPE-SPECIFIC VALIDATION, which 4b's phase discipline forbids on
+        // material whose signature has not verified, so they run in phase 2 — inside the
+        // induction for a `key` statement, and after 4d for every other enumerated envelope
+        // ([`verify_enumerated_envelopes`]).
         let entry_payload = payload_of(envelope)?;
         check_ahl_version(entry_payload)?;
-        common_payload_fields(entry_payload)?;
         envelopes.push(envelope.clone());
     }
 
@@ -3702,10 +3722,21 @@ fn verify_enumerated_envelopes(
         // walked — under enumerated mode over `[0, tree_size(C))`, a superset of every other
         // enumerated range, and before 4d runs at all. Nothing is exempted here that the
         // induction has not already verified.
-        if matches!(statement_type(payload_of(envelope)?)?, "manifest" | "key") {
+        if matches!(statement_type_literal(envelope), Some("manifest" | "key")) {
             continue;
         }
-        verify_envelope_at(envelope, governance, enumeration.from_index + offset as u64, budget)?;
+        let index = enumeration.from_index + offset as u64;
+        verify_envelope_at(envelope, governance, index, budget)?;
+        // Phase 2 for a non-induction enumerated envelope, and strictly after 4d's signature:
+        // I-D §7.5.1 4b states the three-phase order "for both types" of governance statement,
+        // and the reason it gives is general — "Type-specific validation MUST NOT run on
+        // material whose signature has not verified... Running that work first lets anyone able
+        // to hand a verifier a receipt drive it." Nothing about that argument is peculiar to
+        // governance statements, so §2.2's common payload fields are checked here rather than
+        // at the decode. This remains the one choke point all three enumerated forms pass
+        // through — governance currency, competing-trigger candidates, and the
+        // propagation-completeness prefix — before any claim-specific check reads a payload.
+        common_payload_fields(payload_of(envelope)?)?;
     }
 
     Ok(())
@@ -3946,10 +3977,8 @@ fn verify_nested(
         // state is exactly what the presented chain implies (§7.5.1 4c).
         _ => None,
     };
-    let key_statements = match &currency_enumeration {
-        Some(enumeration) => enumerated_key_statements(enumeration)?,
-        None => Vec::new(),
-    };
+    let key_statements =
+        currency_enumeration.as_ref().map_or_else(Vec::new, enumerated_key_statements);
 
     // --- §7.5 step 4: the governance bootstrap, as an induction (4a-4c) -------------
     let governance = read_chain(receipt, policy, profile, adaptor_id, &key_statements, budget)?;
@@ -4288,18 +4317,20 @@ fn decode_governance_enumeration(
 
 /// The `key` statements the enumeration carries, with their entry indexes, ascending.
 ///
-/// I-D §7.5.1 4b's second induction stream. Selecting them by `type` is not type-specific
-/// VALIDATION of unsigned material — 4b(K)'s checks still run inside phase 2, after phase 1 —
-/// it is the selection the merge is defined in terms of, over bytes the range proof has already
-/// bound to the checkpoint root.
-fn enumerated_key_statements(enumeration: &Enumeration) -> Result<Vec<(u64, &Value)>> {
+/// I-D §7.5.1 4b's second induction stream. Selecting them by the LITERAL `type` value is not
+/// type-specific VALIDATION of unsigned material — 4b(K)'s checks, §2.2's common payload fields
+/// among them, still run inside phase 2, after phase 1 — it is the selection the merge is
+/// defined in terms of, over bytes the range proof has already bound to the checkpoint root.
+/// See [`statement_type_literal`] for why an unreadable `type` is a non-selection rather than
+/// an error here.
+fn enumerated_key_statements(enumeration: &Enumeration) -> Vec<(u64, &Value)> {
     let mut out = Vec::new();
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
-        if statement_type(payload_of(envelope)?)? == "key" {
+        if statement_type_literal(envelope) == Some("key") {
             out.push((enumeration.from_index + offset as u64, envelope));
         }
     }
-    Ok(out)
+    out
 }
 
 /// I-D §7.5.1 4c under `enumerated` governance: the carried chain is the complete set of
@@ -4321,7 +4352,7 @@ fn check_manifest_completeness(
     let presented: BTreeSet<u64> = governance.manifests.iter().map(|(index, _)| *index).collect();
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
         let index = enumeration.from_index + offset as u64;
-        if statement_type(payload_of(envelope)?)? == "manifest" && !presented.contains(&index) {
+        if statement_type_literal(envelope) == Some("manifest") && !presented.contains(&index) {
             return Err(ReceiptError::GovernanceChainInvalid(format!(
                 "enumeration reveals a `manifest` statement at entry index {index} that the \
                  presented chain omits"

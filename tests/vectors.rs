@@ -1355,6 +1355,13 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "governance-key-statement-malformed-valid-time-must-fail.ahl" => {
             matches!(error, ReceiptError::Malformed(detail) if detail.contains("valid_time"))
         }
+        // The two defects on this vector's entry-9 `key` statement are independent, so the
+        // assertion has to be on the SPECIFIC variant: `Malformed(... issued_at ...)` is the
+        // outcome of the phase order I-D §7.5.1 4b forbids, and a test that accepted either
+        // would be blind to exactly the regression the vector exists to catch.
+        "governance-key-statement-unsigned-common-field-must-fail.ahl" => {
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 9 })
+        }
         "governance-key-rotation-proof-witness-key-unlisted-must-fail.ahl" => {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 0, .. })
         }

@@ -2556,6 +2556,34 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         },
     });
 
+    // --- the phase order itself (I-D §7.5.1 4b): two independent defects on one enumerated
+    // `key` statement, and which one a verifier reports is the whole observable difference
+    // between running the signature first and running the payload checks first.
+    out.push(Vector {
+        file: "governance-key-statement-unsigned-common-field-must-fail.ahl",
+        receipt: key_statement_phase_order_case(
+            corpus,
+            &governance_state_valid,
+            &m1,
+            keys,
+            "MUST FAIL, at PHASE 1. The `key` statement at entry index 9 carries TWO \
+             independent defects: `signatures[0].sig` is garbage rather than a signature \
+             `producer-1` ever produced, and the payload carries no `issued_at`. I-D §7.5.1 \
+             4b processes every governance statement in three phases, \"in this order, for \
+             both types\": signature, then type-specific validation, then effect — and \
+             \"type-specific validation MUST NOT run on material whose signature has not \
+             verified\", because running it first \"lets anyone able to hand a verifier a \
+             receipt drive it\". A verifier that validated §2.2's common payload fields while \
+             decoding the enumeration would report the missing `issued_at`; the conformant \
+             result is the signature failure at entry index 9.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4b — phase 1 (signature) precedes phase 2 (type-specific \
+                   validation) on enumerated key statements",
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 9 }),
+        },
+    });
+
     out.push(Vector {
         file: "governance-state-not-current-must-fail.ahl",
         receipt: Spec {
@@ -2748,6 +2776,43 @@ fn key_statement_common_field_case(
     );
     mutate(&mut raw_payload);
     let fresh = envelope(raw_payload, &keys.producer_1);
+    bad["claim"]["note"] = json!(note);
+    corpus.reanchor(&mut bad, &[(9, fresh)], keys);
+    bad
+}
+
+/// Like [`key_statement_common_field_case`], but the substituted entry-9 `key` statement is
+/// defective TWICE OVER and independently: its payload carries no `issued_at` (I-D §2.2), and
+/// its `sig` is replaced after signing with bytes `producer-1` never produced.
+///
+/// Neither defect causes the other — the payload is genuinely signed first, so the signature
+/// would verify were it not overwritten, and the missing member would be reported were the
+/// signature intact. That independence is the point: I-D §7.5.1 4b fixes which of the two a
+/// conformant verifier reports.
+fn key_statement_phase_order_case(
+    corpus: &Corpus,
+    base: &Value,
+    manifest_id: &str,
+    keys: &Keys,
+    note: &str,
+) -> Value {
+    let mut bad = base.clone();
+    let mut raw_payload = crate::scenario::payload(
+        "key",
+        manifest_id,
+        json!(T0),
+        json!({
+            "action": "add",
+            "key": {
+                "key_id": keys.producer_2.key_id(),
+                "pubkey": keys.producer_2.pubkey(),
+                "valid_from": T0,
+            },
+        }),
+    );
+    raw_payload.as_object_mut().expect("key statement payload").remove("issued_at");
+    let mut fresh = envelope(raw_payload, &keys.producer_1);
+    fresh["signatures"][0]["sig"] = json!(base64(&[0xAAu8; 64]));
     bad["claim"]["note"] = json!(note);
     corpus.reanchor(&mut bad, &[(9, fresh)], keys);
     bad
