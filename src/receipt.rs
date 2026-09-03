@@ -3082,8 +3082,8 @@ fn verify_rotation_proof(
     // receipt's own `keys` block, bound at the outgoing manifest's entry index, rather than
     // lifted out of the manifest behind the block's back. Where the receipt is well formed the
     // two agree; where they do not, it is verifying under a key it never declared.
-    let (outgoing_log_keys, outgoing_log_attempted) =
-        bind_keys_by_group(receipt, policy, manifests, outgoing_index, "log")?;
+    let (outgoing_log_keys, outgoing_log_attempted, _) =
+        bind_keys_by_group(receipt, policy, manifests, outgoing_index, "log", run)?;
     let signer = outgoing_log_keys.get(checkpoint_key_id).ok_or_else(|| {
         let entry_index =
             outgoing_log_attempted.get(checkpoint_key_id).copied().unwrap_or(outgoing_index);
@@ -3726,7 +3726,10 @@ struct Anchoring {
     /// resolved at all, which is the witness assertion's `unverifiable` outcome and not the
     /// same fact as "none verified" (I-D §7.1, §7.7).
     witnessed: Option<bool>,
-    continued_history: bool,
+    /// Whether the later checkpoint, its cosignatures and the consistency path are present and
+    /// verify (§7.6) — `None` on the same terms as [`Self::witnessed`]: the rule's own
+    /// evaluation was blocked by a gap, never because a check ran and failed.
+    continued_history: Option<bool>,
 }
 
 /// A `keys.log[]`/`keys.witness[]` entry resolved to the public key verification uses.
@@ -4306,7 +4309,10 @@ fn check_keys_block(receipt: &Value) -> Result<()> {
 /// `key_id -> ` [`ResolvedKey`] for `keys.log`/`keys.witness` entries that bound successfully
 /// at some checkpoint's active manifest index, plus, for every `key_id` that never did, the
 /// binding index its first failing entry actually carried.
-type BoundAndAttempted = (BTreeMap<String, ResolvedKey>, BTreeMap<String, u64>);
+/// What binding one `keys.{group}[]` array produced: the keys that bound, the binding index
+/// each unbound one asked for, and the key ids that could not be resolved for want of LOCAL
+/// POLICY rather than for anything the receipt carries.
+type BoundKeys = (BTreeMap<String, ResolvedKey>, BTreeMap<String, u64>, BTreeSet<String>);
 
 /// Bind every `keys.{group}[]` entry against `active_index`, tolerantly per entry.
 ///
@@ -4329,10 +4335,12 @@ fn bind_keys_by_group(
     manifests: &[(u64, &Value)],
     active_index: u64,
     group: &str,
-) -> Result<BoundAndAttempted> {
+    run: &mut Run,
+) -> Result<BoundKeys> {
     let keys = obj(receipt, "keys")?;
     let mut bound = BTreeMap::new();
     let mut attempted_index = BTreeMap::new();
+    let mut untrusted = BTreeSet::new();
     for entry in array(keys, group)? {
         check_key_id(entry)?;
         let key_id = text(entry, "key_id")?.to_owned();
@@ -4347,9 +4355,17 @@ fn bind_keys_by_group(
             // that kind. A `local-policy` key policy does not hold cannot bind at any active
             // index, and an unrecognized `source` is a schema failure of the entry itself;
             // tolerating either would replace a precise report with a missing-key one.
-            Err(
-                error @ (ReceiptError::WitnessKeyNotTrusted { .. } | ReceiptError::Malformed(_)),
-            ) => return Err(error),
+            // An unrecognized `source` is a schema failure of the entry itself and ends the
+            // run. A `local-policy` key policy does not hold is the other thing entirely: a gap
+            // in the VERIFIER's configuration (I-D §7.1, §7.7), recorded here and carried past,
+            // so that the cosignatures naming OTHER keys — over this checkpoint or over the
+            // later one — are still evaluated. The key is left unbound and remembered, because
+            // a cosignature naming it is unevaluated rather than bound to a missing key.
+            Err(error @ ReceiptError::WitnessKeyNotTrusted { .. }) => {
+                untrusted.insert(key_id);
+                run.tolerate::<()>(Err(error))?;
+            }
+            Err(error @ ReceiptError::Malformed(_)) => return Err(error),
             Err(_) if !bound.contains_key(&key_id) => {
                 let index = obj(entry, "binding")
                     .and_then(|b| number(b, "entry_index"))
@@ -4359,7 +4375,7 @@ fn bind_keys_by_group(
             Err(_) => {}
         }
     }
-    Ok((bound, attempted_index))
+    Ok((bound, attempted_index, untrusted))
 }
 
 /// I-D §7.5 step 2, in one place: the pinned profile is held, at the pinned hash, this build
@@ -4446,19 +4462,15 @@ fn verify_checkpoint(
         ));
     }
 
-    let (log_keys, log_attempted) =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log")?;
+    let (log_keys, log_attempted, _) =
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log", run)?;
     // A `local-policy` witness key the verifier does not hold is a gap in the VERIFIER's
-    // configuration (I-D §7.1, §7.7), so it settles the witness assertion `unverifiable` and
-    // stops nothing else: the checkpoint signature below is under a log key and is unaffected.
+    // configuration (I-D §7.1, §7.7): it settles the witness assertion `unverifiable` for the
+    // cosignatures that name it and stops nothing else — not the checkpoint signature below,
+    // which is under a log key, and not the cosignatures naming keys that did resolve.
     run.phase(Assertion::Witnesses);
-    let witness_key_binding = run.tolerate(bind_keys_by_group(
-        receipt,
-        policy,
-        &governance.manifests,
-        active_index,
-        "witness",
-    ))?;
+    let witness_binding =
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness", run)?;
     run.phase(Assertion::CheckpointAuthentication);
 
     let signing_key = log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| {
@@ -4475,25 +4487,89 @@ fn verify_checkpoint(
         return Err(ReceiptError::CheckpointSignatureInvalid);
     }
 
-    let Some((resolved_witness_keys, witness_attempted)) = witness_key_binding else {
-        // No witness key resolved, so no cosignature over this checkpoint can be evaluated and
-        // the L3 rule below cannot be decided either. Both are the witness assertion's own
-        // `unverifiable` outcome, already recorded; `None` keeps "not evaluated" apart from
-        // "none verified", which §7.6 would otherwise read as an assurance disagreement.
-        return Ok(Anchoring { witnessed: None, continued_history });
-    };
+    // No witness key resolved means no cosignature over THIS checkpoint can be evaluated and
+    // the L3 rule below cannot be decided either. Both are the witness assertion's own
+    // `unverifiable` outcome, already recorded; `None` keeps "not evaluated" apart from "none
+    // verified", which §7.6 would otherwise read as an assurance disagreement. It is not a
+    // reason to stop: the later checkpoint below is a different checkpoint, with its own log
+    // signature and its own cosignatures, and §7.6 asks a separate question about it.
+    let witnessed = verify_witness_cosignatures(
+        anchoring,
+        "witnesses",
+        &WitnessContext { checkpoint, active_manifest, active_index, tree_size },
+        witness_binding,
+        run,
+    )?;
+    run.phase(Assertion::CheckpointAuthentication);
 
+    // 4f applies to `later_checkpoint` on the same terms, against the manifest version active
+    // for ITS tree size. Its consistency path was recomputed in step 3, unauthenticated; this
+    // is what makes both roots the log's.
+    //
+    // §7.6 states `continued_history` as its own rule — "`later_checkpoint`, `later_witnesses`,
+    // and `consistency_path` are present and verify" — so it is evaluated whatever happened to
+    // the PRIMARY checkpoint's cosignatures. `None` here means only that its own evaluation was
+    // blocked by a gap (a witness key local policy does not hold, for the later checkpoint's
+    // own cosignatures); a check that RAN and failed is `invalid` and ends the run, which is
+    // what keeps a defective later checkpoint from hiding behind an unrelated gap.
+    let continued = if continued_history {
+        authenticate_continued_history(
+            receipt, policy, governance, anchoring, profile, profile_id, run,
+        )?
+        .map(|()| true)
+    } else {
+        Some(false)
+    };
+    run.phase(Assertion::CheckpointAuthentication);
+
+    Ok(Anchoring { witnessed, continued_history: continued })
+}
+
+/// The checkpoint one cosignature set is about, and the manifest version active for it.
+#[derive(Clone, Copy)]
+struct WitnessContext<'a> {
+    checkpoint: &'a Value,
+    active_manifest: &'a Value,
+    active_index: u64,
+    tree_size: u64,
+}
+
+/// The witness half of 4f over one checkpoint: every carried cosignature verifies under the key
+/// the manifest version active for that checkpoint declares, and at L3 at least one does.
+///
+/// `Ok(Some(true))` — at least one cosignature verified. `Ok(Some(false))` — every carried
+/// cosignature was evaluated and none verified, at a level that does not require one.
+/// `Ok(None)` — at least one cosignature names a key local policy does not hold, and none of
+/// the others verified, so neither §7.6's `witnessed` rule nor the L3 rule can be decided from
+/// what this verifier holds. A cosignature that RAN and failed is `invalid` and ends the run.
+fn verify_witness_cosignatures(
+    anchoring: &Value,
+    member: &'static str,
+    context: &WitnessContext<'_>,
+    binding: BoundKeys,
+    run: &mut Run,
+) -> Result<Option<bool>> {
+    let &WitnessContext { checkpoint, active_manifest, active_index, tree_size } = context;
+    let (witness_keys, witness_attempted, untrusted) = binding;
+    let what = format!("anchoring.{member}");
     run.phase(Assertion::Witnesses);
     let mut witnessed = false;
-    for cosignature in cosignature_array(anchoring, "witnesses", "anchoring.witnesses")? {
+    let mut unevaluated = false;
+    for cosignature in cosignature_array(anchoring, member, &what)? {
         let cosignature = witness_cosignature_object(cosignature)?;
         let witness_id = text(cosignature, "witness_id")?.to_owned();
         let key_id = text(cosignature, "key_id")?;
-        let resolved =
-            resolved_witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
-                key_id: key_id.to_owned(),
-                entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
-            })?;
+        // The gap was recorded when the entry failed to bind; what it means HERE is that this
+        // cosignature is unevaluated. Reporting it as a key that failed to bind would state a
+        // defect of the receipt over a key the verifier simply does not hold.
+        if untrusted.contains(key_id) {
+            unevaluated = true;
+            continue;
+        }
+        let resolved = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
+            key_id: key_id.to_owned(),
+            entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
+        })?;
         check_witness_identity(resolved, key_id, &witness_id)?;
         check_witness_declared(active_manifest, &witness_id, tree_size)?;
         run.spend(1)?;
@@ -4506,25 +4582,21 @@ fn verify_checkpoint(
         }
         witnessed = true;
     }
+    if witnessed {
+        return Ok(Some(true));
+    }
+    if unevaluated {
+        return Ok(None);
+    }
     // I-D §3.3, §7.5: "At L3 a verifier accepts a checkpoint C only with a valid witness
     // cosignature" — `active_manifest`'s `level` is already known to be exactly one of
     // `L1`/`L2`/`L3` ([`manifest_scope_fields`] ran during `read_chain`), so this reads it
-    // rather than re-deriving anything.
-    if active_manifest.get("level").and_then(Value::as_str) == Some("L3") && !witnessed {
+    // rather than re-deriving anything. Reached only where every carried cosignature WAS
+    // evaluated, since otherwise "none verified" is not a fact this verifier established.
+    if active_manifest.get("level").and_then(Value::as_str) == Some("L3") {
         return Err(ReceiptError::CheckpointUnwitnessed { tree_size });
     }
-    run.phase(Assertion::CheckpointAuthentication);
-
-    // 4f applies to `later_checkpoint` on the same terms, against the manifest version active
-    // for ITS tree size. Its consistency path was recomputed in step 3, unauthenticated; this
-    // is what makes both roots the log's.
-    if continued_history {
-        authenticate_continued_history(
-            receipt, policy, governance, anchoring, profile, profile_id, run,
-        )?;
-    }
-
-    Ok(Anchoring { witnessed: Some(witnessed), continued_history })
+    Ok(Some(false))
 }
 
 /// The key-independent half of `continued_history` (I-D §7.5 step 3: "`consistency_path`
@@ -4638,8 +4710,11 @@ fn authenticate_continued_history(
     profile: &AdaptorProfile,
     profile_id: &str,
     run: &mut Run,
-) -> Result<()> {
+) -> Result<Option<()>> {
     let later = checkpoint_object(obj(anchoring, "later_checkpoint")?)?;
+    // The later checkpoint's own log signature is checkpoint authentication and is decided
+    // whatever became of the primary checkpoint's cosignatures; a failure here is `invalid`.
+    run.phase(Assertion::CheckpointAuthentication);
     authenticate_checkpoint(receipt, policy, governance, later, profile, profile_id, run)?;
     verify_later_witnesses(receipt, policy, governance, anchoring, later, run)
 }
@@ -5203,8 +5278,10 @@ fn verify_nested(
                 return Err(ReceiptError::AssuranceMismatch { field: "witnessed" });
             }
         }
-        if assurance.continued_history != anchoring.continued_history {
-            return Err(ReceiptError::AssuranceMismatch { field: "continued_history" });
+        if let Some(continued_history) = anchoring.continued_history {
+            if assurance.continued_history != continued_history {
+                return Err(ReceiptError::AssuranceMismatch { field: "continued_history" });
+            }
         }
     }
 
@@ -6631,8 +6708,8 @@ fn authenticate_checkpoint(
     // checkpoints can legitimately carry the same physical log key bound to each checkpoint's
     // own active manifest — so this resolves against THIS checkpoint's own `active_index`,
     // exactly as [`verify_checkpoint`] does for the primary checkpoint.
-    let (log_keys, log_attempted) =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log")?;
+    let (log_keys, log_attempted, _) =
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log", run)?;
     let signing_key = log_keys.get(key_id).ok_or_else(|| {
         let entry_index = log_attempted.get(key_id).copied().unwrap_or(active_index);
         ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
@@ -6678,38 +6755,24 @@ fn verify_later_witnesses(
     anchoring: &Value,
     later_checkpoint: &Value,
     run: &mut Run,
-) -> Result<()> {
+) -> Result<Option<()>> {
     let tree_size = number(later_checkpoint, "tree_size")?;
     let (active_index, active_manifest) = governance.active_for(tree_size)?;
-    let candidates = cosignature_array(anchoring, "later_witnesses", "anchoring.later_witnesses")?;
 
-    let (witness_keys, witness_attempted) =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness")?;
-    let mut witnessed = false;
-    for cosignature in candidates {
-        let cosignature = witness_cosignature_object(cosignature)?;
-        let witness_id = text(cosignature, "witness_id")?.to_owned();
-        let key_id = text(cosignature, "key_id")?;
-        let resolved = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
-            key_id: key_id.to_owned(),
-            entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
-        })?;
-        check_witness_identity(resolved, key_id, &witness_id)?;
-        check_witness_declared(active_manifest, &witness_id, tree_size)?;
-        run.spend(1)?;
-        if !verify_signature(
-            &decode_pubkey(&resolved.pubkey)?,
-            &cosignature_bytes(later_checkpoint, &witness_id),
-            text(cosignature, "cosignature")?,
-        )? {
-            return Err(ReceiptError::WitnessCosignatureInvalid { witness_id });
-        }
-        witnessed = true;
-    }
-    if active_manifest.get("level").and_then(Value::as_str) == Some("L3") && !witnessed {
-        return Err(ReceiptError::CheckpointUnwitnessed { tree_size });
-    }
-    Ok(())
+    run.phase(Assertion::Witnesses);
+    let binding =
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness", run)?;
+    let established = verify_witness_cosignatures(
+        anchoring,
+        "later_witnesses",
+        &WitnessContext { checkpoint: later_checkpoint, active_manifest, active_index, tree_size },
+        binding,
+        run,
+    )?;
+    // §7.6 asks whether `later_witnesses` verifies, so "none verified at a level that requires
+    // none" answers it as much as "one verified" does; only a cosignature this verifier could
+    // not evaluate leaves the rule undecided.
+    Ok(established.map(|_| ()))
 }
 
 /// `propagation-complete` (§3): the anchored affected set equals the recomputable closure.

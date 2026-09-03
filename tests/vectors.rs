@@ -1890,6 +1890,83 @@ fn one_variant_is_reported_under_the_assertion_whose_phase_raised_it() {
     }
 }
 
+/// A gap on the PRIMARY checkpoint's cosignatures does not suppress the later checkpoint.
+///
+/// I-D §7.6 states `continued_history` as its own rule — "`later_checkpoint`,
+/// `later_witnesses`, and `consistency_path` are present and verify" — over a different
+/// checkpoint, with its own log signature and its own cosignatures. A verifier that stopped at
+/// the primary checkpoint's untrusted witness key would hide a defective later checkpoint
+/// behind an unrelated capability gap.
+#[test]
+fn a_primary_witness_gap_does_not_suppress_the_later_checkpoint() {
+    let policy = trust_policy();
+    let impostor = TestKey::from_seed_hex("impostor", &"ee".repeat(32)).expect("32-byte seed");
+    // Local policy holds no trusted witness key, so the primary cosignature — and only it — is
+    // under a key this verifier cannot resolve. `later_witnesses` keeps the manifest-chain key.
+    let gapped = || {
+        let (_, mut receipt) = read_receipt("statement-anchored-continued-history.ahl");
+        let entry = json!({
+            "witness_id": "witness-1",
+            "key_id": impostor.key_id(),
+            "pubkey": impostor.pubkey(),
+            "source": "local-policy",
+        });
+        receipt["keys"]["witness"].as_array_mut().expect("witness keys").push(entry);
+        receipt["anchoring"]["witnesses"] = json!([{
+            "witness_id": "witness-1",
+            "key_id": impostor.key_id(),
+            "cosignature": impostor
+                .sign(&cosignature_bytes(&receipt["anchoring"]["checkpoint"], "witness-1")),
+            "cosigned_at": "2026-08-16T12:00:00Z",
+        }]);
+        receipt
+    };
+
+    // The gap alone: `unverifiable` on the witnesses, and the later checkpoint still evaluated.
+    let report = verify_receipt_report(&gapped(), &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+    assert_eq!(
+        report.finding(Assertion::Witnesses).map(|finding| finding.outcome),
+        Some(Outcome::Unverifiable)
+    );
+    assert_eq!(
+        report.finding(Assertion::CheckpointAuthentication).map(|finding| finding.outcome),
+        Some(Outcome::Verified),
+        "the checkpoint signatures are under log keys and are unaffected"
+    );
+
+    // That the `continued_history` rule really was evaluated: falsifying the assurance member
+    // while its material verifies is a §7.6 disagreement, and it fires.
+    let mut overclaimed = gapped();
+    overclaimed["claim"]["assurance"]["continued_history"] = json!(false);
+    assert!(
+        matches!(
+            verify_receipt(&overclaimed, &policy),
+            Err(ReceiptError::AssuranceMismatch { field: "continued_history" })
+        ),
+        "the continued-history rule is evaluated despite the primary-checkpoint gap"
+    );
+
+    // And a defective later checkpoint is `invalid`, not hidden behind the gap.
+    let mut defective = gapped();
+    let signature = defective["anchoring"]["later_checkpoint"]["signature"]
+        .as_str()
+        .expect("signature")
+        .to_owned();
+    defective["anchoring"]["later_checkpoint"]["signature"] =
+        json!(format!("base64:{}", BASE64.encode([0u8; 64])));
+    assert_ne!(defective["anchoring"]["later_checkpoint"]["signature"], json!(signature));
+    let report = verify_receipt_report(&defective, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    assert!(
+        matches!(
+            verify_receipt(&defective, &policy),
+            Err(ReceiptError::CheckpointSignatureInvalid)
+        ),
+        "a later checkpoint that does not verify is a defect of the artifact"
+    );
+}
+
 /// A capability gap does not end the run, and reaches exactly the assertions that rest on it.
 ///
 /// I-D §7.5 step 2: "If the verifier possesses NO profile under that id, it lacks a capability
