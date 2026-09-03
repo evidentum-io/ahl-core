@@ -1619,14 +1619,20 @@ impl Run {
     ///
     /// I-D §7.7's reduction is over ALL required findings, so a capability gap must not end the
     /// run: `invalid` dominates `unverifiable`, and a run that stopped at the first gap could
-    /// never reach the defect that dominates it. Only an `unverifiable` outcome is tolerated
-    /// here — an `invalid` one has already decided the result, and the run ends.
+    /// never reach the defect that dominates it. An `invalid` outcome ends the run instead — it
+    /// has already decided the result — with one exception, and it is the exception §7.7 states
+    /// rather than a tolerance of this crate's own: a rejection that does not ENTER the
+    /// reduction cannot decide the result whatever its value, so it is recorded and the run
+    /// carries on. That is exactly an embedded receipt's content binding, which "is never a
+    /// required assertion of the receipt that embeds it".
     fn tolerate<T>(&mut self, result: Result<T>) -> Result<Option<T>> {
         let error = match result {
             Ok(value) => return Ok(Some(value)),
             Err(error) => error,
         };
-        if error.class() != Outcome::Unverifiable {
+        if error.class() != Outcome::Unverifiable
+            && counts_toward_result(error.assertion(), &self.path)
+        {
             return Err(error);
         }
         // Two `unverifiable` conditions end the run even so, and both are ordering rules rather
@@ -1643,7 +1649,7 @@ impl Run {
             return Err(error);
         }
         let settled = error.assertion();
-        self.record(settled, Outcome::Unverifiable, Some(error.to_string()));
+        self.record(settled, error.class(), Some(error.to_string()));
         self.deferred.push((settled, self.path.clone(), error));
         // A content binding is a leaf: I-D §7.2 rests no other assertion on it, and §7.7's own
         // example has the assertions around it reported `verified`. Every other assertion the

@@ -28,6 +28,8 @@ use ahl_core::{
     range_proof, sha256_hex, statement_id, tree_root, verify_envelope, verify_inclusion_proof,
     verify_signature, AhlError, TestKey,
 };
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde_json::{json, Value};
 
 /// The statement vectors, in entry-index order. Entry 28 re-adds `producer-2` to the producer
@@ -1791,6 +1793,80 @@ fn an_uncarried_key_transition_is_reported_as_the_prerequisite_it_is() {
             "an assertion resting on a prerequisite must name it: {finding:?}"
         );
     }
+}
+
+/// I-D §7.7's exception, and the two consequences it draws from it.
+///
+/// "for each embedded receipt, every required assertion of THAT receipt, determined by this
+/// same rule, with one exception: an embedded receipt's CONTENT BINDING is never a required
+/// assertion of the receipt that embeds it." And: "a `trigger-effective` receipt whose embedded
+/// introduction receipt has a non-`verified` finding ONLY on its own content binding has result
+/// `verified` where everything else holds: by the exception above, that finding is not among
+/// the outer receipt's required assertions and never enters the outer reduction."
+///
+/// No corpus vector embeds a content-bound receipt — every embedded receipt in the corpus is
+/// compact, asserting `content_binding: "none"` — so the case is built here from two corpus
+/// vectors that share a subject: the `record-ingested` vector over entry 1, which carries the
+/// keyed binding, spliced into the `introduction` slot of the `trigger-declared` vector, whose
+/// own introduction is over that same entry and record.
+#[test]
+fn an_embedded_content_binding_never_enters_the_outer_reduction() {
+    let policy = trust_policy();
+    let (_, trigger) = read_receipt("trigger-declared-valid.ahl");
+    let (_, bound) = read_receipt("record-ingested-valid.ahl");
+    assert_eq!(
+        bound["claim"]["record_subject"],
+        trigger["claim_material"]["introduction"]["claim"]["record_subject"],
+        "the splice is only sound while the two vectors are about one record"
+    );
+    assert_eq!(bound["claim"]["assurance"]["content_binding"], json!("keyed-authorized"));
+
+    let mut spliced = trigger;
+    spliced["claim_material"]["introduction"] = bound;
+
+    // Held key: the embedded binding is verified, and reported, like any other finding.
+    let report = verify_receipt_report(&spliced, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified);
+    assert_eq!(
+        report
+            .finding_at(&["introduction"], Assertion::ContentBinding)
+            .map(|finding| finding.outcome),
+        Some(Outcome::Verified)
+    );
+
+    // No key held: the embedded binding is `unverifiable` and the outer result is `verified`,
+    // because that finding is not one of the outer receipt's required assertions.
+    let mut unauthorized = policy.clone();
+    unauthorized.dataset_keys.clear();
+    let report = verify_receipt_report(&spliced, &unauthorized).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified);
+    let finding = report
+        .finding_at(&["introduction"], Assertion::ContentBinding)
+        .expect("the finding is still REPORTED, only excluded from the reduction");
+    assert_eq!(finding.outcome, Outcome::Unverifiable);
+    assert!(verify_receipt(&spliced, &unauthorized).is_ok());
+
+    // A DEFECT in the embedded binding is the same: `invalid` decides a result only where the
+    // finding is a required assertion of the receipt whose result it would decide.
+    let mut defective = spliced;
+    defective["claim_material"]["introduction"]["claim_material"]["record_bytes"] =
+        json!(format!("base64:{}", BASE64.encode(br#"{"a":1}"#)));
+    let report = verify_receipt_report(&defective, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified);
+    assert_eq!(
+        report
+            .finding_at(&["introduction"], Assertion::ContentBinding)
+            .map(|finding| finding.outcome),
+        Some(Outcome::Invalid)
+    );
+    // The embedded receipt verified ON ITS OWN is `invalid`: the exception is about which
+    // receipt's reduction the finding enters, never about whether the finding was reached.
+    let (_, standalone) = read_receipt("record-ingested-valid.ahl");
+    let mut standalone_defective = standalone;
+    standalone_defective["claim_material"]["record_bytes"] =
+        json!(format!("base64:{}", BASE64.encode(br#"{"a":1}"#)));
+    let report = verify_receipt_report(&standalone_defective, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
 }
 
 /// I-D §7.3: a `keyed-authorized` binding "whose evidence is present and well formed but for
@@ -4098,21 +4174,33 @@ fn dedup_keys_on_the_whole_receipt_not_the_envelope() {
 
     let mut attack = receipt;
     attack["claim_material"]["replacement_introduction"] = invalid.clone();
-    let error = verify_receipt(&attack, &policy)
-        .expect_err("the invalid embedded receipt must be verified in full, not skipped");
+    // The defect is READ, at its own path: the second receipt was verified in full rather than
+    // served from the first one's cache entry. It does not end the run — I-D §7.7 keeps an
+    // embedded receipt's content binding out of the embedding receipt's required assertions —
+    // and the finding is what shows the material was examined at all.
+    let report = verify_receipt_report(&attack, &policy).expect("the run completes");
+    let finding = report
+        .finding_at(&["replacement_introduction"], Assertion::ContentBinding)
+        .expect("the invalid receipt must be verified in full, not waved through as a duplicate");
+    assert_eq!(finding.outcome, Outcome::Invalid);
     assert!(
-        matches!(error, ReceiptError::ContentBindingMismatch { .. }),
-        "the invalid receipt must fail on its own claim material, not be waved through: {error}"
+        finding.detail.as_ref().is_some_and(|detail| detail.contains("content binding")),
+        "the finding must name the rule that fired: {finding:?}"
     );
 
-    // And the honest receipt in that slot fails only on the §2.3 record rule — proving the
-    // rejection above came from the invalid material rather than from the slot itself.
-    let mut control = attack;
+    // And the honest receipt in that slot reaches the §2.3 record rule with no content-binding
+    // finding at all — proving the finding above came from the invalid material rather than
+    // from the slot itself. Both fail on that rule, which is about the slot.
+    let mut control = attack.clone();
     control["claim_material"]["replacement_introduction"] = honest;
-    assert!(matches!(
-        verify_receipt(&control, &policy),
-        Err(ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. })
-    ));
+    let report = verify_receipt_report(&control, &policy).expect("the run completes");
+    assert!(report.finding_at(&["replacement_introduction"], Assertion::ContentBinding).is_none());
+    for receipt in [&control, &attack] {
+        assert!(matches!(
+            verify_receipt(receipt, &policy),
+            Err(ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. })
+        ));
+    }
 }
 
 /// The committed-tree material the three `record-derived-input-set-*-must-fail.ahl` vectors
