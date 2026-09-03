@@ -99,10 +99,17 @@ finding that needed its descriptor is `unverifiable` resting on `governance`, ne
 the artifact. One rule sits underneath all of this: I-D §2.1's "If duplicates nevertheless occur, the envelope
 with the smallest entry index governs and later ones are void." Every statement-id-keyed lookup
 over chain material is FIRST-WINS — the map §7.6's rules read, the map the descriptor and
-key-statement checks resolve versions through — and the induction skips a later duplicate whole:
-it applies no effect, consumes no rotation proof, and never becomes the version a
-`subject.manifest` reference resolves to, while the `predecessor` linkage of later manifests
-still runs against the governing copy. What the chain CARRIES is counted separately, void copies
+key-statement checks resolve versions through — and the induction skips a later duplicate as a
+GOVERNING statement: it applies no effect, consumes no rotation proof, and never becomes the
+version a `subject.manifest` reference resolves to, while the `predecessor` linkage of later
+manifests still runs against the governing copy. Void of effect is not void of verification —
+§7.5 step 4 says "verify EVERY CARRIED ENVELOPE", and 4d takes "every carried envelope that is
+not part of the induction" — so a void duplicate is verified under §2.1 at its own entry index
+against completed K, on the `envelope-validity` assertion, exactly like the subject's own
+envelope; past an induction stop that check does not run and rests on `governance`. The
+enumerated 4d sweep exempts the entry INDEXES the induction walked rather than the statement
+types it walks, because a void copy carries the same type — and the same statement id — as the
+copy that governs. What the chain CARRIES is counted separately, void copies
 included, because §7.5.1 4c asks whether the chain shows every manifest the enumerated range
 reveals.
 
