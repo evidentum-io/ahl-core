@@ -979,6 +979,31 @@ pub enum ReceiptError {
         key_id: String,
     },
 
+    /// The governance induction stopped at a manifest whose governance-key rotation could not
+    /// be authenticated, so the key state from that entry index onward is not established
+    /// (I-D §7.5.1 4b, 4f).
+    ///
+    /// This is the I-D's `unverifiable` outcome. 4b(M)'s rotation-anchoring rule proves the
+    /// rotating manifest's own anchoring under the OUTGOING key state, and that proof rests on
+    /// a checkpoint — which cannot be authenticated without the adaptor profile that fixes its
+    /// serialization (§7.5 step 2). 4b is explicit about what follows: "Only after phases 1 and
+    /// 2 have BOTH passed, apply the statement's effect to K", and "No effect is ever applied
+    /// to K by a statement that has not completed both earlier phases." So the induction stops
+    /// before the effect, K stays at the pre-rotation state, and every assertion needing K at
+    /// an index at or after this one is `unverifiable` rather than decided under a key set this
+    /// verifier never established — which is also what 4f requires: it "MUST NOT resolve a
+    /// checkpoint-verification or cosignature-validating key from a manifest version whose log
+    /// or witness key set was not established by the governance-key induction."
+    #[error(
+        "the governance-key rotation at entry index {entry_index} cannot be authenticated \
+         without the adaptor profile this receipt pins, so the key state from that index \
+         onward is not established (I-D §7.5.1 4b, 4f)"
+    )]
+    GovernanceRotationUnverifiable {
+        /// Entry index of the rotating manifest whose effect was not applied.
+        entry_index: u64,
+    },
+
     /// A structured assurance field does not match what verification established (§2.3).
     #[error("assurance field `{field}` overstates what the receipt proves")]
     AssuranceMismatch {
@@ -1223,7 +1248,11 @@ impl ReceiptError {
             | Self::DatasetKeyNotHeld { .. }
             // §7.4: "Such a receipt is `unverifiable` (Section 7.7), for want of material the
             // mode does not carry. It is NOT `invalid`."
-            | Self::ProducerKeyNotCarried { .. } => Outcome::Unverifiable,
+            | Self::ProducerKeyNotCarried { .. }
+            // §7.5.1 4b: no effect is applied by a statement whose phases did not both pass, so
+            // the key state past an unauthenticatable rotation is not established rather than
+            // defective.
+            | Self::GovernanceRotationUnverifiable { .. } => Outcome::Unverifiable,
 
             // Decidable from the receipt's own bytes — §7.7's first bullet.
             //
@@ -1342,6 +1371,7 @@ impl ReceiptError {
             | Self::ManifestSchemaInvalid { .. }
             | Self::RotationProofInvalid { .. }
             | Self::GovernanceRangeNotComplete { .. }
+            | Self::GovernanceRotationUnverifiable { .. }
             | Self::KeyNotBound { .. }
             // Not a §7.6 disagreement: what cannot be evidenced is the governance COVERAGE two
             // members ask for at once (§7.4's enumerated range against §2.1's coverage through
@@ -1979,6 +2009,13 @@ struct Governance<'a> {
     /// `statement_id` (I-D §2.4.5), which is what a subject statement's `manifest` field
     /// references (I-D §2.2). Distinct from `entry_id`, which `predecessor` references.
     manifest_by_version_id: BTreeMap<String, (u64, &'a Value)>,
+    /// The entry index of the governance statement whose effect the induction did NOT apply,
+    /// where it stopped early (I-D §7.5.1 4b, [`ReceiptError::GovernanceRotationUnverifiable`]).
+    ///
+    /// `None` — the induction walked the whole chain and K is established throughout. `Some(n)`
+    /// — K is the state in force immediately before entry index `n`, and is established for
+    /// indexes strictly below `n` and for nothing at or after it.
+    unestablished_from: Option<u64>,
 }
 
 /// The MANIFEST VERSION ID (I-D §2.4.5: a manifest statement's own `statement_id`) of the
@@ -1996,6 +2033,33 @@ fn active_manifest_version_id(
         .iter()
         .find(|(_, (mi, _))| *mi == active_index)
         .map(|(version_id, _)| version_id.clone())
+}
+
+impl Governance<'_> {
+    /// Whether the key state K is ESTABLISHED at `index` — that is, whether the induction
+    /// walked every governance statement up to it (I-D §7.5.1 4b).
+    ///
+    /// Where it is not, no check that resolves a key at that index may run: 4f "MUST NOT
+    /// resolve a checkpoint-verification or cosignature-validating key from a manifest version
+    /// whose log or witness key set was not established by the governance-key induction", and
+    /// the same holds for the envelope rule of §2.1, which wants a key active at the envelope's
+    /// own entry index. Such a check is skipped and its assertion reported `unverifiable`
+    /// resting on `governance`, never run against the pre-rotation state as though that state
+    /// were still in force.
+    const fn established_at(&self, index: u64) -> bool {
+        match self.unestablished_from {
+            Some(stopped_at) => index < stopped_at,
+            None => true,
+        }
+    }
+
+    /// Whether K is established for the manifest version active for a checkpoint of this size.
+    ///
+    /// A checkpoint of `tree_size` commits entries `[0, tree_size)`, so the manifest version
+    /// active for it is the one at the greatest entry index below `tree_size`.
+    const fn established_for_tree_size(&self, tree_size: u64) -> bool {
+        self.established_at(tree_size.saturating_sub(1))
+    }
 }
 
 impl<'a> Governance<'a> {
@@ -3393,6 +3457,8 @@ fn read_chain<'a>(
         })?,
     };
     let mut rotation_cursor = 0usize;
+    // Set where the induction stops early: the entry index whose effect was NOT applied.
+    let mut unestablished_from: Option<u64> = None;
     let mut saw_rotation = false;
 
     // --- I-D §7.5.1 4a. Base case: the genesis manifest is authenticated WITHOUT any key. ---
@@ -3640,28 +3706,37 @@ fn read_chain<'a>(
                     }
                     // The element's own collection rules (I-D §7.1: required iff a rotation is
                     // present, one per rotation, ascending, no extras) are governance facts and
-                    // ran above. What the element PROVES is a checkpoint under the outgoing key,
-                    // and a checkpoint cannot be authenticated without the profile that fixes
-                    // its serialization — so where the profile is not resolved, that half rests
-                    // on `adaptor-profile` and is reported through checkpoint authentication
-                    // rather than silently passed.
-                    if let Some(profile) = profile {
-                        verify_rotation_proof(
-                            element,
-                            envelope,
-                            index,
-                            payload,
-                            &RotationContext {
-                                receipt,
-                                policy,
-                                manifests: &manifests,
-                                outgoing: (previous_manifest_index, previous_manifest_payload),
-                                profile,
-                                profile_id,
-                            },
-                            run,
-                        )?;
-                    }
+                    // ran above. What the element PROVES is a checkpoint under the OUTGOING key
+                    // state, and a checkpoint cannot be authenticated without the profile that
+                    // fixes its serialization. Where the profile is not resolved, phase 2 of
+                    // this statement has not passed, and §7.5.1 4b is explicit about what may
+                    // follow: "No effect is ever applied to K by a statement that has not
+                    // completed both earlier phases." So the induction STOPS here rather than
+                    // installing a key state it could not establish — anything the receipt
+                    // rests on the rotation is `unverifiable`, and nothing is decided under a
+                    // key set this verifier never authenticated.
+                    let Some(profile) = profile else {
+                        run.tolerate::<()>(Err(ReceiptError::GovernanceRotationUnverifiable {
+                            entry_index: index,
+                        }))?;
+                        unestablished_from = Some(index);
+                        break;
+                    };
+                    verify_rotation_proof(
+                        element,
+                        envelope,
+                        index,
+                        payload,
+                        &RotationContext {
+                            receipt,
+                            policy,
+                            manifests: &manifests,
+                            outgoing: (previous_manifest_index, previous_manifest_payload),
+                            profile,
+                            profile_id,
+                        },
+                        run,
+                    )?;
                     rotation_cursor += 1;
                 }
                 // Phase 3: effect — replaces the log, witness, and producer key state in full.
@@ -3692,8 +3767,11 @@ fn read_chain<'a>(
     }
 
     // I-D §7.1: "one element per rotation" — an element the walk never had occasion to
-    // consume is an extra, exactly as invalid as a missing one.
-    if rotation_cursor < rotation_proofs.len() {
+    // consume is an extra, exactly as invalid as a missing one. Unless the walk STOPPED: an
+    // element it did not reach is not an element the receipt should not have carried, and
+    // reporting one as an extra would turn this verifier's own capability gap into a defect of
+    // the artifact.
+    if unestablished_from.is_none() && rotation_cursor < rotation_proofs.len() {
         return Err(ReceiptError::GovernanceChainInvalid(format!(
             "`governance.rotation_proofs[]` carries {} element(s) beyond the {} the chain \
              walk actually consumed — I-D §7.1: one element per rotation, no extras",
@@ -3713,7 +3791,7 @@ fn read_chain<'a>(
         ));
     }
 
-    Ok(Governance { mode, manifests, events, manifest_by_version_id })
+    Ok(Governance { mode, manifests, events, manifest_by_version_id, unestablished_from })
 }
 
 // ---------------------------------------------------------------------------
@@ -5209,8 +5287,13 @@ fn verify_nested(
     // --- §7.5 step 4: the governance bootstrap, as an induction (4a-4c) -------------
     let governance = read_chain(receipt, policy, profile, adaptor_id, &key_statements, mode, run)?;
     // 4c under enumerated governance: what the induction walked is everything the range holds.
+    // 4c compares the manifests the induction WALKED against the manifests the range reveals,
+    // so it says nothing where the induction stopped short: the omission it would report is the
+    // verifier's own stopping point, not the receipt's.
     if let Some(enumeration) = &currency_enumeration {
-        check_manifest_completeness(enumeration, &governance)?;
+        if governance.unestablished_from.is_none() {
+            check_manifest_completeness(enumeration, &governance)?;
+        }
     }
     run.pass(Assertion::Governance);
 
@@ -5218,7 +5301,13 @@ fn verify_nested(
     // Only on passing this do step 3's path results become claims about the log's state
     // rather than about carried bytes.
     run.phase(Assertion::CheckpointAuthentication);
-    let anchoring = match profile {
+    // 4f resolves the checkpoint's log key from the manifest version active for it, and "MUST
+    // NOT resolve a checkpoint-verification or cosignature-validating key from a manifest
+    // version whose log or witness key set was not established by the governance-key
+    // induction". Where the induction stopped below this checkpoint's tree size, that version
+    // is exactly such a manifest, so 4f does not run at all.
+    let established = governance.established_for_tree_size(tree_size);
+    let anchoring = match profile.filter(|_| established) {
         Some(profile) => Some(verify_checkpoint(
             receipt,
             policy,
@@ -5244,8 +5333,15 @@ fn verify_nested(
     // and carries on — the assertions after it rest on the same unresolved key and are reported
     // as resting on it, while a defect reached later still decides the result.
     run.phase(Assertion::EnvelopeValidity);
-    let envelope_outcome = verify_envelope_at(envelope, &governance, subject_index, run);
-    let envelope_valid = run.tolerate(envelope_outcome)?;
+    // §2.1 wants a key active at the envelope's own entry index, which the induction must have
+    // established for that index. Where it did not, the envelope is not checked against a key
+    // state that was never in force; the assertion rests on `governance` and says so.
+    let envelope_valid = if governance.established_at(subject_index) {
+        let envelope_outcome = verify_envelope_at(envelope, &governance, subject_index, run);
+        run.tolerate(envelope_outcome)?
+    } else {
+        None
+    };
     // I-D §2.2's common payload fields, checked only now that the subject's own signature has
     // verified — the same rule chain hops get, applied to the one carried envelope that is
     // never itself a chain hop.
@@ -5256,11 +5352,16 @@ fn verify_nested(
     // The receipt's own `keys.producer[]` listing, bound to the governance state that put each
     // key in force (I-D §7.1, §2.2) — a governance fact rather than a signature.
     run.phase(Assertion::Governance);
-    bind_producer_keys(receipt, &governance, subject_index)?;
-    if envelope_valid.is_some() {
-        run.phase(Assertion::EnvelopeValidity);
-        run.pass(Assertion::EnvelopeValidity);
+    if governance.established_at(subject_index) {
+        bind_producer_keys(receipt, &governance, subject_index)?;
     }
+    run.phase(Assertion::EnvelopeValidity);
+    // Recorded either way: where the check ran and held this is `verified`, and where it was
+    // tolerated or skipped the finding already says `unverifiable` — [`Run::record`] keeps the
+    // dominating outcome, and [`prerequisites`] settles the skipped case as resting on
+    // `governance`.
+    let _ = envelope_valid;
+    run.pass(Assertion::EnvelopeValidity);
 
     // --- §2.1 / §4: governance currency ---------------------------------------------
     run.phase(Assertion::CrossField);
@@ -5302,7 +5403,13 @@ fn verify_nested(
         }
         Some(enumeration) => {
             run.phase(Assertion::EnvelopeValidity);
-            verify_enumerated_envelopes(enumeration, &governance, run)?;
+            // Every enumerated envelope is verified under K at its own entry index, and the
+            // range reaches past the point the induction stopped at. Verifying the prefix alone
+            // would report a partial check as a complete one, so the whole assertion rests on
+            // `governance` instead.
+            if governance.unestablished_from.is_none() {
+                verify_enumerated_envelopes(enumeration, &governance, run)?;
+            }
             run.phase(Assertion::CrossField);
             Some(enumeration)
         }
@@ -5350,16 +5457,24 @@ fn verify_nested(
         // sufficient — `payload.manifest` must name exactly THAT manifest, never a stale,
         // superseded one, or content-binding descriptor resolution takes `ddig` from the wrong
         // manifest version (I-D §6.3).
-        let active = governance.active_manifest_version_id_at(subject_index).ok_or_else(|| {
-            ReceiptError::SubjectManifestBindingInvalid(format!(
+        //
+        // Which version is ACTIVE at an index is read off the induction's own walk, so where
+        // the induction stopped below that index the question has no answer here: the rule is
+        // left unevaluated and the cross-field finding says so, rather than comparing against a
+        // state that was superseded by the very statement the walk could not authenticate.
+        if governance.established_at(subject_index) {
+            let active =
+                governance.active_manifest_version_id_at(subject_index).ok_or_else(|| {
+                    ReceiptError::SubjectManifestBindingInvalid(format!(
                 "no manifest version is active at subject.entry_index {subject_index} (I-D §2.2)"
             ))
-        })?;
-        if claimed != active {
-            return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
-                "`subject.manifest` (`{claimed}`) is not the manifest version ACTIVE at \
+                })?;
+            if claimed != active {
+                return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
+                    "`subject.manifest` (`{claimed}`) is not the manifest version ACTIVE at \
                  subject.entry_index {subject_index} (`{active}`) (I-D §2.2, §7.6)"
-            )));
+                )));
+            }
         }
     }
     let record_subject = check_record_subject(claim, payload, &claim_type, &subject_type)?;
@@ -5399,7 +5514,15 @@ fn verify_nested(
         depth,
     };
     run.phase(Assertion::ClaimMaterial);
-    verify_claim_material(&ctx, run)?;
+    // The authority-dependent types resolve producer keys at entry indexes of their own
+    // (§7.5.1 4e) and authenticate further checkpoints, so their material cannot be settled
+    // against a key state the induction did not establish. Every other type's material is
+    // paths, shapes and commitments, and is checked as usual.
+    let needs_established_keys =
+        AUTHORITY_DEPENDENT_TYPES.contains(&claim_type.as_str()) && !established;
+    if !needs_established_keys {
+        verify_claim_material(&ctx, run)?;
+    }
     // The content-binding step inside claim material sets its own phase; put this receipt's
     // claim material back before the assertion is recorded.
     run.phase(Assertion::ClaimMaterial);

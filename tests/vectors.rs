@@ -1890,6 +1890,90 @@ fn one_variant_is_reported_under_the_assertion_whose_phase_raised_it() {
     }
 }
 
+/// A rotation whose proof cannot be authenticated applies no effect to K.
+///
+/// I-D §7.5.1 4b: "Only after phases 1 and 2 have BOTH passed, apply the statement's effect to
+/// K", and "No effect is ever applied to K by a statement that has not completed both earlier
+/// phases." 4b(M)'s rotation-anchoring proof rests on a checkpoint, and a checkpoint cannot be
+/// authenticated without the adaptor profile that fixes its serialization — so with no profile
+/// the induction stops at the rotating manifest, K stays at the pre-rotation state, and 4f's
+/// own rule follows: it "MUST NOT resolve a checkpoint-verification or cosignature-validating
+/// key from a manifest version whose log or witness key set was not established by the
+/// governance-key induction."
+#[test]
+fn an_unauthenticated_rotation_applies_no_effect_to_the_key_state() {
+    let mut policy = trust_policy();
+    policy.adaptor_profiles.clear();
+
+    for name in [
+        "trigger-effective-co-signed-by-authority.ahl",
+        "propagation-complete-valid-across-manifest-rotation.ahl",
+        "governance-state-valid.ahl",
+    ] {
+        let (_, receipt) = read_receipt(name);
+        assert_eq!(
+            receipt["governance"]["chain"][1]["entry_index"],
+            json!(25),
+            "{name}: this test needs a chain carrying the corpus's rotating manifest"
+        );
+
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(report.result, Outcome::Unverifiable, "{name}");
+
+        let governance = report.finding(Assertion::Governance).expect("governance finding");
+        assert_eq!(governance.outcome, Outcome::Unverifiable, "{name}");
+        assert!(
+            governance.detail.as_ref().is_some_and(|detail| detail.contains("25")),
+            "{name}: the finding must name the rotation it stopped at: {governance:?}"
+        );
+
+        // Nothing that would have needed a key from the rotating manifest is reported as
+        // established: the checkpoints these receipts carry are at tree sizes past entry 25,
+        // their subjects and enumerated envelopes are verified under K at their own indexes,
+        // and the authority tests of 4e resolve producer keys the same way.
+        for assertion in [
+            Assertion::CheckpointAuthentication,
+            Assertion::Witnesses,
+            Assertion::EnvelopeValidity,
+            Assertion::ClaimMaterial,
+            Assertion::CrossField,
+        ] {
+            assert_eq!(
+                report.finding(assertion).map(|finding| finding.outcome),
+                Some(Outcome::Unverifiable),
+                "{name}: {assertion} needs the key state past the rotation"
+            );
+        }
+        // What needs no key at all is still checked, which is what keeps a defect reachable.
+        for assertion in [Assertion::Versions, Assertion::Structure, Assertion::Anchoring] {
+            assert_eq!(
+                report.finding(assertion).map(|finding| finding.outcome),
+                Some(Outcome::Verified),
+                "{name}: {assertion} needs no key"
+            );
+        }
+    }
+
+    // A chain that rotates nothing is untouched by the same gap: only the assertions that rest
+    // on the checkpoint serialization are unverifiable, exactly as before.
+    let (_, unrotated) = read_receipt("record-ingested-valid.ahl");
+    assert_eq!(unrotated["governance"]["chain"].as_array().expect("chain").len(), 1);
+    let report = verify_receipt_report(&unrotated, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+    for assertion in [
+        Assertion::Governance,
+        Assertion::EnvelopeValidity,
+        Assertion::ClaimMaterial,
+        Assertion::ContentBinding,
+    ] {
+        assert_eq!(
+            report.finding(assertion).map(|finding| finding.outcome),
+            Some(Outcome::Verified),
+            "{assertion} is unaffected where the chain rotates nothing"
+        );
+    }
+}
+
 /// A gap on the PRIMARY checkpoint's cosignatures does not suppress the later checkpoint.
 ///
 /// I-D §7.6 states `continued_history` as its own rule — "`later_checkpoint`,
