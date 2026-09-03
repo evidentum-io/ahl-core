@@ -249,16 +249,33 @@ policy holds the key for, and admissible only under an identity the active manif
 declares — is covered by `tests/vectors.rs` instead, since what decides it is the verifier's
 own configuration rather than anything a portable vector can carry.
 
-Also not yet in the corpus: this corpus's ONE governance-key rotation (manifest v2, entry 25)
-rotates the WITNESS set only — the log checkpoint-signing key never itself rotates anywhere in
-this corpus. `governance-key-rotation-proof-incoming-key-must-fail.ahl` therefore substitutes a
-witness key for the rotation-proof checkpoint's signer to demonstrate "not a key of the outgoing
-set", which exercises the same code path (`log_key_set` membership) a genuine incoming LOG key
-would, but is not the same fact: a verifier that wrongly accepted an INCOMING log key
-specifically is not what that vector rules out. A second, LOG-rotating manifest version (a
-third manifest, or a variant corpus branch) with its own outgoing/incoming-key positive and
-negative pair — and, since this corpus would then carry two governance-key rotations, a genuine
-"out-of-order pair" `rotation_proofs[]` negative alongside it — is the intended follow-up.
+The corpus carries TWO governance-key rotations, one per side. Manifest v2 (entry 25) rotates
+the WITNESS set; manifest v4 (entry 55) replaces `log-1` with `log-2` in `log.keys` and changes
+nothing else. A chain over both therefore needs two `rotation_proofs[]` elements in ascending
+`manifest_entry_index` order, and the corpus publishes one checkpoint per rotation whose declared
+active manifest version is deliberately the version BEFORE its own tree size's — cp26 for the
+witness rotation and cp56 for the log one — because §7.5.1 4b(M) proves a rotating manifest's
+anchoring under the state it retires.
+
+`statement-anchored-log-key-rotation.ahl` is the positive, over a subject anchored after the
+rotation under cp57, which the INCOMING key signs. Four negatives police the rules only a second
+log key can exercise:
+`governance-key-rotation-proof-incoming-log-key-must-fail.ahl` re-signs the v4 proof under
+`log-2` — "exactly the key an attacker installs, whereas the exception accepts only the key
+being retired";
+`governance-key-rotation-proofs-out-of-order-must-fail.ahl` carries two otherwise-correct
+elements in descending order, which offers each rotation the other's proof;
+`governance-key-rotation-proof-incoming-witness-must-fail.ahl` cosigns the v2 proof under
+witness-2, the witness that rotation installs, with a genuine cosignature over the right
+checkpoint — a cosignature by a witness the outgoing manifest does not declare attests nothing
+about the handover, so it is passed over and the element is left with none;
+and `statement-anchored-outgoing-log-key-after-rotation-must-fail.ahl` anchors a subject under
+cp56 itself, a real correctly signed checkpoint of this log whose signer the version active for
+its own tree size no longer declares (§7.5.1 4f).
+`governance-key-rotation-proof-incoming-key-must-fail.ahl` is KEPT beside the first of those: it
+substitutes a witness key for the v2 proof's signer, which rules out any non-member of the
+outgoing log set, while the new vector rules out the incoming key specifically. The two are
+different facts about the same check.
 
 `governance.rotation_proofs[]` verification (I-D §7.1, §7.5.1) IS implemented: a manifest whose
 log or witness key objects, compared as sets, differ from its predecessor's is a GOVERNANCE-KEY

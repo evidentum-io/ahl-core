@@ -603,6 +603,45 @@
       "rule": "I-D §7.1 — a rotation proof's keys bind to the OUTGOING manifest version"
     },
     {
+      "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "statement-anchored",
+      "embedded_receipts": 0,
+      "expect": "verified",
+      "file": "statement-anchored-log-key-rotation.ahl"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "governance-key-rotation-proof-incoming-log-key-must-fail.ahl",
+      "finding": "governance",
+      "reason": "rotation proof for manifest entry index 55 is invalid: the element's checkpoint `key_id` (`sha256:fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889`) is not a log key of the OUTGOING state at manifest entry index 55 — a checkpoint signed by the INCOMING key does not attest the transition (I-D §7.1)",
+      "rule": "I-D §7.1 — the rotation-proof checkpoint must verify under a log key of the OUTGOING state"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "governance-key-rotation-proofs-out-of-order-must-fail.ahl",
+      "finding": "governance",
+      "reason": "rotation proof for manifest entry index 25 is invalid: the next unconsumed `governance.rotation_proofs[]` element carries `manifest_entry_index` 55, not 25 — one element per rotation, in ascending `manifest_entry_index` order (I-D §7.1)",
+      "rule": "I-D §7.1 — rotation_proofs[] elements are in ascending manifest_entry_index order"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "governance-key-rotation-proof-incoming-witness-must-fail.ahl",
+      "finding": "governance",
+      "reason": "rotation proof for manifest entry index 25 is invalid: AT L3, at least one `witnesses[]` cosignature must verify under a witness key of the OUTGOING state (I-D §7.1) — none did",
+      "rule": "I-D §7.1 — AT L3, a rotation-proof element needs a cosignature under the OUTGOING witness set"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-outgoing-log-key-after-rotation-must-fail.ahl",
+      "finding": "checkpoint-authentication",
+      "reason": "key `sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709` is not bound to a manifest key object at entry index 46",
+      "rule": "I-D §7.5.1 4f — a checkpoint's log key comes from the manifest version active for its own tree size"
+    },
+    {
       "claim_type": "governance-state",
       "expect": "invalid",
       "file": "governance-key-statement-wrong-key-id-must-fail.ahl",

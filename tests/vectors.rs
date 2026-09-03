@@ -1590,6 +1590,23 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             matches!(error, ReceiptError::ClosureMismatch(detail)
                 if detail.contains("recomputed 2 affected records"))
         }
+        // The LOG-key rotation at manifest v4 (entry 55): I-D §7.1's outgoing-state rules, and
+        // §7.5.1 4f's rule about which key a checkpoint of a given tree size resolves to.
+        "governance-key-rotation-proof-incoming-log-key-must-fail.ahl" => {
+            matches!(error, ReceiptError::RotationProofInvalid { manifest_entry_index: 55, detail }
+                if detail.contains("is not a log key of the OUTGOING state"))
+        }
+        "governance-key-rotation-proofs-out-of-order-must-fail.ahl" => {
+            matches!(error, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, detail }
+                if detail.contains("ascending `manifest_entry_index` order"))
+        }
+        "governance-key-rotation-proof-incoming-witness-must-fail.ahl" => {
+            matches!(error, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, detail }
+                if detail.contains("none did"))
+        }
+        "statement-anchored-outgoing-log-key-after-rotation-must-fail.ahl" => {
+            matches!(error, ReceiptError::KeyNotBound { entry_index: 46, .. })
+        }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };
     assert!(fired, "{name}: expected rejection by {rule}, got: {error}");
@@ -6196,4 +6213,70 @@ fn a_void_prefix_entry_is_excluded_from_the_anchored_affected_set() {
         verify_receipt(&control, &policy),
         Err(ReceiptError::ClosureMismatch(detail)) if detail.contains("recomputed 2")
     ));
+}
+
+/// I-D §7.1 and §7.5.1 4b(M)/4f over a rotation of the LOG checkpoint-signing key.
+///
+/// Manifest v4 (entry 55) replaces `log-1` with `log-2` and changes nothing else, so the corpus
+/// carries one witness-set rotation and one log-key rotation and a chain over both needs two
+/// `rotation_proofs[]` elements. What the log rotation adds over the witness one is the pair of
+/// rules only a second log key can exercise: a proof under the INCOMING key, and a checkpoint
+/// past the rotation still signed by the OUTGOING one.
+#[test]
+fn a_log_key_rotation_is_proven_under_the_outgoing_key_state() {
+    let policy = trust_policy();
+    let statements = statement_vectors();
+
+    // The rotation is on the log side alone: the witness objects and the producer snapshot are
+    // version 3's, unchanged.
+    let v3 = &statements[46]["envelope"]["payload"];
+    let v4 = &statements[55]["envelope"]["payload"];
+    assert_ne!(v3["log"]["keys"], v4["log"]["keys"], "the log key set rotates");
+    assert_eq!(v3["witnesses"], v4["witnesses"], "the witness set does not");
+    assert_eq!(v3["keys"], v4["keys"], "the producer snapshot does not");
+
+    let (_, valid) = read_receipt("statement-anchored-log-key-rotation.ahl");
+    let report = verify_receipt_report(&valid, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+
+    // Two rotations in the chain, two elements, ascending.
+    let proofs = valid["governance"]["rotation_proofs"].as_array().expect("rotation_proofs");
+    let indexes: Vec<u64> =
+        proofs.iter().map(|p| p["manifest_entry_index"].as_u64().expect("index")).collect();
+    assert_eq!(indexes, vec![25, 55]);
+
+    // The log rotation's proof checkpoint is signed by the OUTGOING key, and the receipt's own
+    // checkpoint by the INCOMING one — 4f resolving each from the version active for its own
+    // tree size.
+    let outgoing_key_id = field_str(&v3["log"]["keys"][0], "key_id").expect("outgoing log key");
+    let incoming_key_id = field_str(&v4["log"]["keys"][0], "key_id").expect("incoming log key");
+    assert_ne!(outgoing_key_id, incoming_key_id);
+    assert_eq!(
+        field_str(&proofs[1]["checkpoint"], "key_id").expect("checkpoint key_id"),
+        outgoing_key_id
+    );
+    assert_eq!(
+        field_str(&valid["anchoring"]["checkpoint"], "key_id").expect("checkpoint key_id"),
+        incoming_key_id
+    );
+
+    for (name, assertion) in [
+        ("governance-key-rotation-proof-incoming-log-key-must-fail.ahl", Assertion::Governance),
+        ("governance-key-rotation-proofs-out-of-order-must-fail.ahl", Assertion::Governance),
+        ("governance-key-rotation-proof-incoming-witness-must-fail.ahl", Assertion::Governance),
+        (
+            "statement-anchored-outgoing-log-key-after-rotation-must-fail.ahl",
+            Assertion::CheckpointAuthentication,
+        ),
+    ] {
+        let (_, receipt) = read_receipt(name);
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(report.result, Outcome::Invalid, "{name}: {:#?}", report.findings);
+        assert_eq!(
+            report.dominating().map(|finding| finding.assertion),
+            Some(assertion),
+            "{name}: {:#?}",
+            report.findings
+        );
+    }
 }

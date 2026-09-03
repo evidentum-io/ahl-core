@@ -96,6 +96,27 @@ pub const NAMES: [&str; 57] = [
     "56-ingestion-customers-j-under-v4",
 ];
 
+/// The governance-key rotations this corpus anchors, as
+/// `(rotating manifest entry index, the checkpoint that proves it, the OUTGOING manifest
+/// version's entry index)`.
+///
+/// I-D §7.5.1 4b(M) proves a rotating manifest's own anchoring under the state it retires, so
+/// each proof checkpoint is signed by a log key of the OUTGOING set and cosigned under the
+/// OUTGOING witness set — which is why cp26 and cp56 are the two checkpoints whose declared
+/// active manifest version is deliberately the version before their tree size's own.
+///
+/// Manifest v2 (entry 25) rotates the WITNESS set; manifest v4 (entry 55) rotates the LOG
+/// checkpoint-signing key. The two are separate so that each vector isolates one side.
+pub const ROTATIONS: [(u64, &str, u64); 2] = [(25, "cp26", 0), (55, "cp56", 46)];
+
+/// The [`ROTATIONS`] row for a rotating manifest version's entry index.
+pub fn rotation(manifest_index: u64) -> (u64, &'static str, u64) {
+    ROTATIONS
+        .into_iter()
+        .find(|(index, _, _)| *index == manifest_index)
+        .expect("a rotating manifest version of this corpus")
+}
+
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
 pub struct Anchor {
     pub name: String,
@@ -1563,13 +1584,15 @@ impl Corpus {
     /// cosigned by the OUTGOING witness, witness-1 — proves the rotating manifest's own
     /// anchoring under the state it retires. This corpus has exactly one governance-key
     /// rotation, so one element suffices for every vector whose chain carries manifest v2.
-    pub fn rotation_proof_element(&self, keys: &Keys) -> Value {
-        let cp26 = self.anchor("cp26");
+    pub fn rotation_proof_element(&self, keys: &Keys, manifest_index: u64) -> Value {
+        let (_, name, _) = rotation(manifest_index);
+        let anchor = self.anchor(name);
+        let index = usize::try_from(manifest_index).expect("small entry index");
         json!({
-            "manifest_entry_index": 25,
-            "checkpoint": cp26.checkpoint,
-            "inclusion_path": self.log_path(25, cp26.tree_size()),
-            "witnesses": [ cp26.witness_entry(keys) ],
+            "manifest_entry_index": manifest_index,
+            "checkpoint": anchor.checkpoint,
+            "inclusion_path": self.log_path(index, anchor.tree_size()),
+            "witnesses": [ anchor.witness_entry(keys) ],
         })
     }
 
