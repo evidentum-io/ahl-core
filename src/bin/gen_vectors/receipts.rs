@@ -348,6 +348,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp34 = corpus.anchor("cp34");
     let cp35 = corpus.anchor("cp35");
     let cp37 = corpus.anchor("cp37");
+    let cp38 = corpus.anchor("cp38");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -876,6 +877,111 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             rule: "I-D §7.2 / §2.7 — `input_members` is carried only with the input-set form",
             matches: |e| {
                 matches!(e, ReceiptError::Malformed(detail) if detail.contains("input_members"))
+            },
+        },
+    });
+
+    // I-D §2.7's tree rules bind input-set trees exactly as they bind outputs and disposition
+    // trees: "Tree rules, identical for every AHL tree — outputs, input sets, and
+    // dispositions". Three negatives, one per rule, over the batch at entry 37 whose three
+    // output leaves each commit an input-set tree breaking one of them. Every membership path
+    // in all three receipts is genuine and opens the committed root at the claimed index, and
+    // the complete committed set is carried — a verifier checking only paths, indexes and
+    // cardinality accepts all three.
+    let defective_input_set = |output: &String, input_root: &str, note: &str| {
+        let leaf = leaf_index(corpus, &corpus.defective_outputs_root, output);
+        let members: Vec<Value> = (0..corpus.tree_leaves(input_root).len())
+            .map(|index| {
+                json!({
+                    "input": corpus.tree_leaves(input_root)[index],
+                    "input_index": index,
+                    "input_path": corpus.tree_path(input_root, index),
+                })
+            })
+            .collect();
+        Spec {
+            claim_type: "record-derived",
+            subject_index: 37,
+            anchor: cp38,
+            chain: vec![0, 25],
+            record_subject: scores(output),
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({
+                "output": { "dataset": DS_SCORES, "record": output },
+                "batch_leaf": corpus.tree_leaves(&corpus.defective_outputs_root)[leaf],
+                "leaf_index": leaf,
+                "leaf_path": corpus.tree_path(&corpus.defective_outputs_root, leaf),
+                "input_members": members,
+            }),
+            producer_keys: None,
+            note: note.to_owned(),
+        }
+        .build(corpus, keys)
+    };
+    out.push(Vector {
+        file: "record-derived-input-set-unsorted-must-fail.ahl",
+        receipt: defective_input_set(
+            &r.x_unsorted,
+            &corpus.unsorted_input_root,
+            "MUST FAIL. The complete input set is carried: two members, distinct indexes, each \
+             opening the leaf's `input_set_root` at the index it claims, and the count matches \
+             `input_set_count`. The tree behind them is committed in DESCENDING record order. \
+             I-D §2.7 requires leaves \"sorted by `record`, comparing the UTF-8 bytes of the \
+             canonical commitment string in ascending lexicographic order\", and says the rules \
+             are identical for every AHL tree — input sets included. Order is not cosmetic \
+             here: the producer who picks the leaf order picks the tree, so a set assembled in \
+             any other order opens a root of its own while committing to nothing a second \
+             party can reproduce.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §2.7 — input-set leaves are sorted by `record` in ascending byte order",
+            matches: |e| {
+                matches!(e, ReceiptError::TreeMaterialInvalid { detail, .. }
+                    if detail.contains("ascending"))
+            },
+        },
+    });
+    out.push(Vector {
+        file: "record-derived-input-set-duplicate-record-must-fail.ahl",
+        receipt: defective_input_set(
+            &r.x_duplicate,
+            &corpus.duplicate_input_root,
+            "MUST FAIL. Again the complete set, again every path genuine. The two leaves name \
+             ONE record under two different roles, so they differ as bytes while the sort key \
+             repeats. I-D §2.7: \"Duplicate leaves are prohibited.\" A tree that repeats a \
+             record states the same input twice and makes `input_set_count` a count of leaves \
+             rather than of inputs, so \"the listed inputs and no others\" (§7.2) would be \
+             satisfied by a set that lists one input twice and another not at all.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §2.7 — duplicate leaves are prohibited in every AHL tree",
+            matches: |e| {
+                matches!(e, ReceiptError::TreeMaterialInvalid { detail, .. }
+                    if detail.contains("ascending"))
+            },
+        },
+    });
+    out.push(Vector {
+        file: "record-derived-input-set-non-canonical-record-must-fail.ahl",
+        receipt: defective_input_set(
+            &r.x_noncanonical,
+            &corpus.noncanonical_input_root,
+            "MUST FAIL. A single-leaf input set, carried complete, with a genuine membership \
+             path. Its `record` is `not-a-commitment`, which is not a family string under I-D \
+             §2.1. §2.7: \"Commitment strings are family strings under Section 2.1, and one \
+             failing the rules there is rejected.\" A leaf whose record is not a commitment \
+             names nothing a closure traversal or a second verifier could ever resolve, so \
+             accepting it would let a derivation claim an input that does not exist as a \
+             record at all.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §2.7 / §2.1 — an input-set leaf's `record` is a canonical family string",
+            matches: |e| {
+                matches!(e, ReceiptError::TreeMaterialInvalid { detail, .. }
+                    if detail.contains("not a canonical record commitment"))
             },
         },
     });

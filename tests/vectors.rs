@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 /// entry from a non-authority key alongside a non-verifying authority-named one. The two
 /// non-verifying fixtures sit at the tail so that enumerated material below them stays
 /// verifiable (I-D §7.5.1 4d).
-const STATEMENT_FILES: [&str; 37] = [
+const STATEMENT_FILES: [&str; 38] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -76,7 +76,18 @@ const STATEMENT_FILES: [&str; 37] = [
     "34-ingestion-customers-e-stale-manifest.json",
     "35-correction-a-to-cross-dataset-replacement.json",
     "36-retraction-cross-dataset-record.json",
+    "37-derivation-batch-defective-input-sets.json",
 ];
+
+/// The corpus prefix over which closure recomputation is defined.
+///
+/// Entry 37 anchors a batch whose input-set trees deliberately break the I-D §2.7 tree rules,
+/// one rule each, so the `record-derived-input-set-*-must-fail.ahl` vectors have something to
+/// bite on. Closure traversal validates every committed tree it opens against those same rules
+/// before reading an edge from it, so a walk reaching entry 37 fails by §2.7 — and the trees
+/// are deliberately not published under `vectors/merkle/`, where they would be read as
+/// conforming material. Every published closure scenario stops at tree size 28 or below.
+const CONFORMING_TREE_PREFIX: usize = 37;
 
 /// The four published closure scenarios.
 const CLOSURE_FILES: [&str; 6] = [
@@ -1411,6 +1422,20 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "trigger-effective-non-verifying-candidate-must-fail.ahl"
         | "governance-state-non-verifying-entry-must-fail.ahl" => {
             matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 32 })
+        }
+        // I-D §2.7: one set of tree rules, "identical for every AHL tree — outputs, input sets,
+        // and dispositions". Each vector carries the COMPLETE committed input set with genuine
+        // membership paths, so the rejection can only come from the tree rules themselves.
+        // Sortedness is strict, which is simultaneously the ordering rule and the no-duplicate
+        // rule, so the first two report the same ordering defect at the leaf that repeats.
+        "record-derived-input-set-unsorted-must-fail.ahl"
+        | "record-derived-input-set-duplicate-record-must-fail.ahl" => {
+            matches!(error, ReceiptError::TreeMaterialInvalid { detail, .. }
+                if detail.contains("ascending UTF-8 byte order"))
+        }
+        "record-derived-input-set-non-canonical-record-must-fail.ahl" => {
+            matches!(error, ReceiptError::TreeMaterialInvalid { detail, .. }
+                if detail.contains("is not a canonical record commitment"))
         }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };
@@ -3725,7 +3750,7 @@ fn completeness_is_pinned_to_the_declared_checkpoint() {
     let declared = &vectors[8]["envelope"]["payload"]["corpus_checkpoint"];
     let d_size = usize::try_from(declared["tree_size"].as_u64().expect("tree_size")).expect("size");
     let at_d = affected_set(&envelopes, &trees, 6, d_size).expect("corpus");
-    let later = affected_set(&envelopes, &trees, 6, envelopes.len()).expect("corpus");
+    let later = affected_set(&envelopes, &trees, 6, CONFORMING_TREE_PREFIX).expect("corpus");
 
     assert!(at_d.affected.is_subset(&later.affected));
     assert!(

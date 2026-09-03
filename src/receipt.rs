@@ -4513,6 +4513,13 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
 /// cover it exactly: one member per committed leaf, at distinct indexes, each opening the
 /// committed root. A short list proves a subset and would let a producer disclose the
 /// convenient inputs and withhold the rest under a root that says how many there were.
+///
+/// Once the set is complete it is also a TREE, and §2.7 states one set of rules "identical for
+/// every AHL tree — outputs, input sets, and dispositions": ascending order by the UTF-8 bytes
+/// of each leaf's canonical commitment string, commitment strings that are family strings under
+/// §2.1, and no duplicates. Membership paths do not reach any of that, so the assembled set is
+/// validated through [`ValidatedLeafSet::open`] — the same gate every other tree in this crate
+/// passes through.
 fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -> Result<()> {
     let material = ctx.material()?;
     // Where present, the member is an array; a wrong type is `invalid` and is never read as
@@ -4544,7 +4551,7 @@ fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -
             let members = members.ok_or_else(|| ctx.missing("input_members"))?;
             let root = text(inputs, "input_set_root")?;
             let count = number(inputs, "input_set_count")?;
-            let mut opened = BTreeSet::new();
+            let mut opened = BTreeMap::new();
             for member in members {
                 let input = obj(member, "input")?;
                 let index = number(member, "input_index")?;
@@ -4557,7 +4564,7 @@ fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -
                     "input-set member",
                     budget,
                 )?;
-                if !opened.insert(index) {
+                if opened.insert(index, input.clone()).is_some() {
                     return Err(ReceiptError::TreeMaterialInvalid {
                         root: root.to_owned(),
                         detail: format!(
@@ -4569,18 +4576,37 @@ fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -
             }
             // Every index opened is distinct and, by `check_inclusion`, smaller than `count`,
             // so an equal cardinality is exactly the committed set.
-            if opened.len() as u64 == count {
-                Ok(())
-            } else {
-                Err(ReceiptError::TreeMaterialInvalid {
+            if opened.len() as u64 != count {
+                return Err(ReceiptError::TreeMaterialInvalid {
                     root: root.to_owned(),
                     detail: format!(
                         "commits {count} input(s), {} proven by `input_members` — I-D §7.2 \
                          requires \"the listed inputs and no others\"",
                         opened.len()
                     ),
-                })
+                });
             }
+            // I-D §2.7 states one set of tree rules, "identical for every AHL tree — outputs,
+            // input sets, and dispositions": leaves sorted by `record`, "comparing the UTF-8
+            // bytes of the canonical commitment string in ascending lexicographic order",
+            // commitment strings that are family strings under §2.1 with "one failing the rules
+            // there rejected", and "duplicate leaves are prohibited". Membership paths alone do
+            // not reach any of that. They prove each carried input is a committed leaf at the
+            // index it claims, but a producer choosing the leaf ORDER decides the tree, so a set
+            // built in some other order — or over a leaf whose `record` is not a canonical
+            // commitment string — opens its own root perfectly well and is still not an AHL
+            // tree. Passing the complete set, ordered by `input_index`, through the same
+            // [`ValidatedLeafSet::open`] every other tree in this crate goes through is what
+            // applies those rules here rather than restating them; it recomputes the root over
+            // the assembled set as well, so the members must be the leaves of THIS tree in the
+            // order the rules fix, not merely leaves of some tree with this root.
+            ValidatedLeafSet::open(root, count, opened.into_values().collect()).map_err(
+                |source| ReceiptError::TreeMaterialInvalid {
+                    root: root.to_owned(),
+                    detail: source.to_string(),
+                },
+            )?;
+            Ok(())
         }
         _ => Err(ReceiptError::Malformed(
             "`batch_leaf.inputs` is either the full array of input objects or the input-set \

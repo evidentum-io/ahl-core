@@ -122,9 +122,9 @@ two different bindings, which is the case receipt key binding is tolerant for.
 | Path | Contents |
 | --- | --- |
 | `adaptor/` | The test adaptor profile document, content-addressed and pinned in both manifest versions |
-| `vectors/statements/` | The 37-entry toy corpus, plus malformed statements naming the rule each violates |
+| `vectors/statements/` | The 38-entry toy corpus, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
-| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 34, 35 and 37, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
+| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 34, 35, 37 and 38, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
 | `vectors/closure/` | Six closure scenarios (see below) |
 | `vectors/witness/` | Signed witness refusal evidence carrying two conflicting checkpoints (spec §3.3 step 3) |
 | `receipts/` | One positive and at least one negative receipt per claim-type registry entry, plus `index.json` naming the expected outcome, the rule each negative must trip, and the trust policy those outcomes assume |
@@ -132,7 +132,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 ## The scenarios
 
-The corpus is 37 anchored entries carrying these interlocking scenarios:
+The corpus is 38 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -222,6 +222,23 @@ ordinary artifact of a real log rather than something a producer must manufactur
    inclusion, real record — and needs a genuinely anchored statement rather than a mutated
    fixture, because mutating any already-anchored envelope invalidates its own inclusion path
    before the rule under test is ever reached.
+11. **Input-set trees take the §2.7 tree rules.** I-D §2.7 states one set of rules, "identical
+   for every AHL tree — outputs, input sets, and dispositions". Entry 37 is a batch whose three
+   output leaves each commit an input-set tree breaking exactly one of them: leaves out of
+   ascending `record` order, a record repeated under two roles, and a `record` that is not a
+   family string under §2.1. The three `record-derived-input-set-*-must-fail.ahl` vectors carry
+   the COMPLETE committed set for their tree, with genuine membership paths at genuine indexes,
+   so nothing about paths, indexes or cardinality is wrong — only the tree is, which is the
+   point: the producer who chooses the leaf order chooses the tree, so a set assembled in any
+   other order opens a root of its own and is still not an AHL tree. These have to be genuinely
+   anchored for the same reason the entries above do; mutating an anchored leaf's
+   `input_set_root` breaks the outputs path before the rule under test is reached.
+
+   The cost is stated rather than hidden: closure traversal opens every committed tree it
+   reaches and validates it against these same rules before reading an edge, so a closure walk
+   reaching entry 37 fails by §2.7. Every closure scenario this corpus publishes stops at tree
+   size 28 or below, and the three defective trees are deliberately absent from
+   `vectors/merkle/`, where they would be read as conforming material.
 
 ## Regenerating
 

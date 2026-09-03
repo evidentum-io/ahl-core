@@ -152,6 +152,27 @@
       "rule": "I-D §7.2 / §2.7 — `input_members` is carried only with the input-set form"
     },
     {
+      "claim_type": "record-derived",
+      "expect": "reject",
+      "file": "record-derived-input-set-unsorted-must-fail.ahl",
+      "reason": "tree material for `sha256:ee2d2a003c2349bc311ba5048e862f4862cfd7b9ea14891cf4334d86174b94d0` is invalid: tree `sha256:ee2d2a003c2349bc311ba5048e862f4862cfd7b9ea14891cf4334d86174b94d0`: leaf 1 (`hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad`) does not follow its predecessor in ascending UTF-8 byte order (spec §2.5)",
+      "rule": "I-D §2.7 — input-set leaves are sorted by `record` in ascending byte order"
+    },
+    {
+      "claim_type": "record-derived",
+      "expect": "reject",
+      "file": "record-derived-input-set-duplicate-record-must-fail.ahl",
+      "reason": "tree material for `sha256:db39af54b83944c12e6f9fa0281af053ecf3298438665576dc5eb25a35170ee2` is invalid: tree `sha256:db39af54b83944c12e6f9fa0281af053ecf3298438665576dc5eb25a35170ee2`: leaf 1 (`hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad`) does not follow its predecessor in ascending UTF-8 byte order (spec §2.5)",
+      "rule": "I-D §2.7 — duplicate leaves are prohibited in every AHL tree"
+    },
+    {
+      "claim_type": "record-derived",
+      "expect": "reject",
+      "file": "record-derived-input-set-non-canonical-record-must-fail.ahl",
+      "reason": "tree material for `sha256:e14a6f06851935a86b5d88fc0fcf60c93a7eb2327527feadc3975d4d0599de3b` is invalid: `not-a-commitment` is not a canonical record commitment (`sha256:`/`hmac-sha256:` + lowercase hex)",
+      "rule": "I-D §2.7 / §2.1 — an input-set leaf's `record` is a canonical family string"
+    },
+    {
       "boundary": "a trigger naming the record is anchored and signed under the declared chain by the declared issuer; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-declared",
       "embedded_receipts": 2,

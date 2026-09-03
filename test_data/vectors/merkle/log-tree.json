@@ -226,6 +226,12 @@
       "entry_index": 36,
       "leaf_hash": "sha256:621f0882388a8721e4316bc0ec8b18e81d2521f759716da7474ed92e49226745",
       "name": "36-retraction-cross-dataset-record"
+    },
+    {
+      "entry_id": "sha256:0c19b754c987eb9fb2419e685a0c99515063d06b22d6455616236f99035e48a4",
+      "entry_index": 37,
+      "leaf_hash": "sha256:6104fdce7de406525b550ed31f04b5b26c1f4b9f8e7b1e67d2dc77988a01e45a",
+      "name": "37-derivation-batch-defective-input-sets"
     }
   ],
   "inclusion": {
@@ -308,6 +314,11 @@
       "name": "cp37",
       "root": "sha256:94e39a9c8447da4273ddd26e36f0e8bf62785661e5407dc76712c5b08073ab2e",
       "tree_size": 37
+    },
+    {
+      "name": "cp38",
+      "root": "sha256:e9804ec0807a015231fb76b3b58741463df716d2f403e901bf5825ec38ce04cf",
+      "tree_size": 38
     }
   ]
 }

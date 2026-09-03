@@ -22,8 +22,19 @@ use crate::scenario::{
     T_EARLY, T_OPEN_FROM, T_PAST_FROM, T_PAST_TO, T_REKEY, T_RETRACTION, WITNESS_1, WITNESS_2,
 };
 
+/// The corpus prefix over which closure recomputation is defined.
+///
+/// Entry 37 anchors a batch whose three input-set trees deliberately break one I-D §2.7 tree
+/// rule each. Closure traversal opens every committed tree it reaches and validates it against
+/// those rules before reading an edge from it, so a walk reaching entry 37 fails by §2.7 —
+/// which is precisely what the `record-derived-input-set-*-must-fail.ahl` vectors prove, and
+/// the same shape of consequence the non-verifying envelopes at entries 32 and 33 have for
+/// enumerated claims. Every closure scenario this corpus publishes stops at tree size 28 or
+/// below; this constant names the boundary for the walks that would otherwise run to the end.
+pub const CONFORMING_TREE_PREFIX: usize = 37;
+
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 37] = [
+pub const NAMES: [&str; 38] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -61,6 +72,7 @@ pub const NAMES: [&str; 37] = [
     "34-ingestion-customers-e-stale-manifest",
     "35-correction-a-to-cross-dataset-replacement",
     "36-retraction-cross-dataset-record",
+    "37-derivation-batch-defective-input-sets",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -142,6 +154,12 @@ pub struct Records {
     pub c_e: String,
     pub h: String,
     pub z: String,
+    /// Outputs of the entry-37 batch. Each leaf commits an input-set tree that breaks exactly
+    /// one of the I-D §2.7 tree rules, so a receipt carrying that tree's complete leaf set is
+    /// rejected by the rule it breaks rather than by a membership path.
+    pub x_unsorted: String,
+    pub x_duplicate: String,
+    pub x_noncanonical: String,
     /// Canonical bytes of record B — the wrong bytes for the negative receipt.
     pub c_b_bytes: Vec<u8>,
     /// Record A's content, encoded AS RECEIVED — non-canonical key order and insignificant
@@ -160,6 +178,12 @@ pub struct Corpus {
     pub batch_root: String,
     pub wide_outputs_root: String,
     pub input_set_root: String,
+    /// Outputs tree of the entry-37 batch (see [`Records::x_unsorted`] and its siblings).
+    pub defective_outputs_root: String,
+    /// Input-set roots of that batch, one per I-D §2.7 tree rule they break.
+    pub unsorted_input_root: String,
+    pub duplicate_input_root: String,
+    pub noncanonical_input_root: String,
     pub affected_root: String,
     pub challenge_affected_root: String,
     pub records: Records,
@@ -842,17 +866,82 @@ impl Corpus {
             &keys.producer_1,
         );
 
+        // --- entry 37: a batch whose leaves commit input-set trees that break §2.7 --------
+        // I-D §2.7 states one set of tree rules, "identical for every AHL tree — outputs, input
+        // sets, and dispositions": leaves sorted by `record` in ascending UTF-8 byte order of
+        // the canonical commitment string, commitment strings that are family strings under
+        // §2.1 ("one failing the rules there is rejected"), and no duplicate leaves. Membership
+        // paths cannot reach any of that, because the producer who chooses the leaf order
+        // chooses the tree: a set assembled in some other order opens its own root perfectly
+        // well and is still not an AHL tree. So the trees below have to be genuinely built and
+        // genuinely anchored — one leaf each of the batch's outputs tree commits one of them —
+        // rather than mutated into a receipt, where the altered `input_set_root` would break
+        // the outputs path before the rule under test was reached.
+        //
+        // The outputs tree itself is well formed. Only the three input-set trees are not, and
+        // each breaks exactly one rule, so the negative built on it fails by that rule alone.
+        let defective_input = |record: &str, role: &str| json!({ "dataset": DS_CUSTOMERS, "record": record, "role": role, "statement": id_2 });
+        // Rule broken: ascending order. Both records are canonical and distinct; the leaves are
+        // committed in descending order.
+        let mut unsorted_input_leaves = record_sorted(vec![
+            defective_input(&r.c_a2, "feature"),
+            defective_input(&r.c_b, "reference"),
+        ])
+        .expect("distinct input records");
+        unsorted_input_leaves.reverse();
+        let unsorted_input_root = hash_hex(&tree_root(&leaf_bytes(&unsorted_input_leaves)));
+        // Rule broken: no duplicate. One record appears twice under two roles, so the leaves
+        // differ as bytes while the sort key repeats.
+        let duplicate_input_leaves =
+            vec![defective_input(&r.c_b, "feature"), defective_input(&r.c_b, "reference")];
+        let duplicate_input_root = hash_hex(&tree_root(&leaf_bytes(&duplicate_input_leaves)));
+        // Rule broken: the commitment string is not a family string under §2.1.
+        let noncanonical_input_leaves = vec![defective_input("not-a-commitment", "feature")];
+        let noncanonical_input_root = hash_hex(&tree_root(&leaf_bytes(&noncanonical_input_leaves)));
+        let defective_leaves = record_sorted(vec![
+            json!({
+                "dataset": DS_SCORES, "record": r.x_unsorted,
+                "inputs": { "input_set_root": unsorted_input_root, "input_set_count": 2 },
+            }),
+            json!({
+                "dataset": DS_SCORES, "record": r.x_duplicate,
+                "inputs": { "input_set_root": duplicate_input_root, "input_set_count": 2 },
+            }),
+            json!({
+                "dataset": DS_SCORES, "record": r.x_noncanonical,
+                "inputs": { "input_set_root": noncanonical_input_root, "input_set_count": 1 },
+            }),
+        ])
+        .expect("distinct batch outputs");
+        let defective_outputs_root = hash_hex(&tree_root(&leaf_bytes(&defective_leaves)));
+        let env_37 = signed(
+            "derivation",
+            &m2,
+            json!({
+                "pipeline": PIPELINE,
+                "outputs_root": defective_outputs_root,
+                "outputs_count": defective_leaves.len(),
+                "leaf_format": LEAF_FORMAT,
+                "transform": transform(),
+            }),
+            &keys.producer_1,
+        );
+
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
             env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32, env_33,
-            env_34, env_35, env_36,
+            env_34, env_35, env_36, env_37,
         ];
 
         let mut trees = TreeMaterial::new();
         trees.insert(batch_root.clone(), batch_leaves);
         trees.insert(wide_outputs_root.clone(), wide_leaves);
         trees.insert(input_set_root.clone(), input_leaves);
+        trees.insert(defective_outputs_root.clone(), defective_leaves);
+        trees.insert(unsorted_input_root.clone(), unsorted_input_leaves);
+        trees.insert(duplicate_input_root.clone(), duplicate_input_leaves);
+        trees.insert(noncanonical_input_root.clone(), noncanonical_input_leaves);
         trees.insert(affected_root.clone(), dispositions);
         trees.insert(challenge_affected_root.clone(), challenge_dispositions);
 
@@ -884,6 +973,7 @@ impl Corpus {
             (34, 25),
             (35, 25),
             (37, 25),
+            (38, 25),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
@@ -905,7 +995,8 @@ impl Corpus {
                     32 => "cp32",
                     34 => "cp34",
                     35 => "cp35",
-                    _ => "cp37",
+                    37 => "cp37",
+                    _ => "cp38",
                 },
                 checkpoint: cp,
                 witness_id,
@@ -924,6 +1015,10 @@ impl Corpus {
             batch_root,
             wide_outputs_root,
             input_set_root,
+            defective_outputs_root,
+            unsorted_input_root,
+            duplicate_input_root,
+            noncanonical_input_root,
             affected_root,
             challenge_affected_root,
             records,
@@ -1467,7 +1562,7 @@ impl Corpus {
         // descendant (spec §2.3.4).
         let at_declared = affected_set(&self.envelopes, &self.trees, 6, 8).expect("corpus");
         let later =
-            affected_set(&self.envelopes, &self.trees, 6, self.envelopes.len()).expect("corpus");
+            affected_set(&self.envelopes, &self.trees, 6, CONFORMING_TREE_PREFIX).expect("corpus");
         assert!(
             at_declared.affected.is_subset(&later.affected)
                 && at_declared.affected.len() < later.affected.len(),
@@ -1479,7 +1574,7 @@ impl Corpus {
              only (spec §2.3.4)",
             at_declared.affected.len(),
             later.affected.len(),
-            self.envelopes.len()
+            CONFORMING_TREE_PREFIX
         );
     }
 
@@ -2187,6 +2282,15 @@ impl Records {
             c_e: keyed(&json!({ "customer_id": "C-6006", "country": "NL", "segment": "retail" })),
             h: plain(&json!({ "customer_id": "C-5005", "model": "risk-v4.2", "score": 421 })),
             z: plain(&json!({ "customer_id": "C-1001", "metric": "rollup", "value_bp": 4200 })),
+            x_unsorted: plain(
+                &json!({ "customer_id": "C-7007", "model": "portfolio-v1", "score": 701 }),
+            ),
+            x_duplicate: plain(
+                &json!({ "customer_id": "C-7007", "model": "portfolio-v1", "score": 702 }),
+            ),
+            x_noncanonical: plain(
+                &json!({ "customer_id": "C-7007", "model": "portfolio-v1", "score": 703 }),
+            ),
             c_b_bytes: jcs(&b),
             // Same value as `a` above (I-D §2.6 "canonicalization equality is syntactic, not
             // semantic"), deliberately serialized in non-canonical key order with insignificant
