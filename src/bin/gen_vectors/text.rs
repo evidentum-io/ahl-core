@@ -479,7 +479,32 @@ ordinary artifact of a real log rather than something a producer must manufactur
    verifiable in declared mode MUST anchor a manifest version snapshotting the current producer
    key set before issuing them." Every declared-mode vector in this corpus satisfies that: its
    subject resolves against the manifest snapshot in force at its own entry index.
-14. **One statement id, three anchored entries.** I-D §2.1's duplicate rule is reachable
+14. **A void entry inside a propagation prefix.** I-D §7.5.1 4d names "an entry of a
+   propagation prefix" among the carried envelopes reliance excludes, and §2.1 adds that a void
+   entry is "never traversed by closure". Entry 37 is a derivation of a `scores` record from H —
+   the one derived record the retraction of record F at entry 29 reaches — carrying a `sig` no
+   key produced; entry 43 is byte for byte the same payload, genuinely signed. Entries 44 and 45
+   are two propagation statements over that trigger, anchoring the SAME one-member affected set
+   and declaring D at cp38 and cp44 respectively.
+
+   `propagation-complete-void-prefix-entry.ahl` proves the first: the prefix [0, 38) reaches the
+   void copy, which contributes no edge and no seed, so the closure has one member and the
+   anchored disposition tree agrees — `verified`, with entry 37 among the informative items.
+   Positions are preserved rather than dropped, since an entry index IS a position in the
+   prefix, and the prefix's own root is recomputed over the CARRIED bytes: voiding is about
+   traversal, not about what the log anchored.
+   `propagation-complete-void-prefix-entry-control-must-fail.ahl` is the control, and it is a
+   propagation statement of its own rather than a mutation: the prefix [0, 44) reaches the
+   VERIFYING copy at entry 43, which §2.1 leaves governing because a void entry never becomes a
+   governing statement and so occupies no statement id, the closure grows to two members, and
+   the same anchored set is now incomplete — `invalid` on `claim-material`. The two prefixes
+   differ by exactly which envelope over one payload they reach, which is what shows the
+   exclusion to be the signature's doing rather than an artifact of prefix length.
+
+   This is why the batch with the deliberately non-conforming input-set trees sits at entry 50
+   and not earlier: a propagation prefix is walked in full, and a prefix reaching that batch
+   cannot be opened at all.
+15. **One statement id, three anchored entries.** I-D §2.1's duplicate rule is reachable
    without any fabrication, because the statement id digests the PAYLOAD while the entry id
    digests the ENVELOPE: one payload under three signature sets is one statement anchored three
    times. Manifest version 3 is that payload — predecessor v2, the same log and witness key

@@ -1586,6 +1586,10 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "statement-anchored-duplicate-manifest-unsigned-must-fail.ahl" => {
             matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 48 })
         }
+        "propagation-complete-void-prefix-entry-control-must-fail.ahl" => {
+            matches!(error, ReceiptError::ClosureMismatch(detail)
+                if detail.contains("recomputed 2 affected records"))
+        }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };
     assert!(fired, "{name}: expected rejection by {rule}, got: {error}");
@@ -6134,4 +6138,62 @@ fn one_manifest_version_anchored_three_times_is_governed_by_its_smallest_index()
         "{:#?}",
         report.findings
     );
+}
+
+/// I-D §7.5.1 4d and §2.1, end to end over a propagation prefix.
+///
+/// 4d names "an entry of a propagation prefix" among the carried envelopes reliance excludes,
+/// and §2.1 says a void entry is "never traversed by closure". Both vectors below prove the
+/// SAME completeness claim for the SAME trigger; their prefixes differ by exactly which
+/// envelope over one payload they reach.
+#[test]
+fn a_void_prefix_entry_is_excluded_from_the_anchored_affected_set() {
+    let policy = trust_policy();
+    let statements = statement_vectors();
+    let keys = key_set(&statements);
+
+    // Entries 37 and 43 are one statement over two envelopes: the first does not verify.
+    assert_eq!(
+        field_str(&statements[37], "statement_id").expect("statement_id"),
+        field_str(&statements[43], "statement_id").expect("statement_id"),
+        "the control must be the SAME derivation, not a similar one"
+    );
+    for (index, verifies) in [(37usize, false), (43, true)] {
+        assert_eq!(
+            verify_envelope(&statements[index]["envelope"], |key_id| keys.get(key_id).cloned())
+                .expect("well-formed envelope"),
+            verifies,
+            "entry {index}"
+        );
+    }
+
+    let (_, verified) = read_receipt("propagation-complete-void-prefix-entry.ahl");
+    let report = verify_receipt_report(&verified, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    let void: BTreeSet<u64> = report.informative.iter().map(|item| item.entry_index).collect();
+    assert!(void.contains(&37), "the prefix entry is reported as a void entry: {void:?}");
+
+    // The disposition tree the propagation anchored has exactly one member, which is what the
+    // closure over a prefix that does not traverse entry 37 recomputes.
+    let anchored = &statements[44]["envelope"]["payload"];
+    assert_eq!(anchored["affected_count"].as_u64(), Some(1));
+
+    // The control: the same anchored set, over a prefix that reaches the VERIFYING copy.
+    let (_, control) = read_receipt("propagation-complete-void-prefix-entry-control-must-fail.ahl");
+    assert_eq!(
+        statements[45]["envelope"]["payload"]["affected_root"], anchored["affected_root"],
+        "the control anchors the same affected set, so only the prefix differs"
+    );
+    let report = verify_receipt_report(&control, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid, "{:#?}", report.findings);
+    assert_eq!(
+        report.dominating().map(|finding| finding.assertion),
+        Some(Assertion::ClaimMaterial),
+        "{:#?}",
+        report.findings
+    );
+    assert!(matches!(
+        verify_receipt(&control, &policy),
+        Err(ReceiptError::ClosureMismatch(detail)) if detail.contains("recomputed 2")
+    ));
 }

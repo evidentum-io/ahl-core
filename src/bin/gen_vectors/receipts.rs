@@ -418,6 +418,10 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp37 = corpus.anchor("cp37");
     let cp40 = corpus.anchor("cp40");
     let cp43 = corpus.anchor("cp43");
+    let cp38 = corpus.anchor("cp38");
+    let cp44 = corpus.anchor("cp44");
+    let cp45 = corpus.anchor("cp45");
+    let cp46 = corpus.anchor("cp46");
     let cp50 = corpus.anchor("cp50");
     let cp51 = corpus.anchor("cp51");
     let cp52 = corpus.anchor("cp52");
@@ -2005,6 +2009,129 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "propagation-complete-valid-across-manifest-rotation.ahl",
         receipt: cross_rotation_receipt,
         expect: Expect::Accept,
+    });
+
+    // I-D §7.5.1 4d, on a propagation prefix: "an entry of a propagation prefix" is named among
+    // the carried envelopes a receipt does NOT rest on, and §2.1 adds that a void entry is
+    // "never traversed by closure". The two vectors below are the same claim over two prefixes
+    // that differ by exactly one envelope's signature.
+    let f_trigger = |note: &str| {
+        Spec {
+            claim_type: "trigger-effective",
+            subject_index: 29,
+            anchor: cp34,
+            chain: vec![0, 25],
+            record_subject: customers(&r.c_f),
+            competing: "enumerated",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 34, cp34),
+            claim_material: json!({
+                "introduction": introduction(20, &r.c_f, cp34),
+                "checkpoint_C": cp34.checkpoint,
+                "competing": { "corpus_range": corpus.enumeration(20, 34, cp34) },
+            }),
+            producer_keys: Some(vec![
+                key_entry(&keys.producer_1, None, 25),
+                key_entry(&keys.producer_2, None, 28),
+            ]),
+            note: note.to_owned(),
+        }
+        .build(corpus, keys)
+    };
+    let f_prefix_roots: Vec<&String> = vec![
+        &corpus.batch_root,
+        &corpus.wide_outputs_root,
+        &corpus.input_set_root,
+        &corpus.challenge_affected_root,
+    ];
+
+    out.push(Vector {
+        file: "propagation-complete-void-prefix-entry.ahl",
+        receipt: Spec {
+            claim_type: "propagation-complete",
+            subject_index: 44,
+            anchor: cp45,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 45, cp45),
+            claim_material: json!({
+                "corpus_checkpoint": cp38.checkpoint,
+                "corpus_prefix": corpus.enumeration(0, 38, cp45),
+                "trees": trees_block(&f_prefix_roots, false),
+                "trigger": f_trigger(
+                    "Embedded trigger-effective proof for the retraction of record F at entry \
+                     29, bounded by cp34.",
+                ),
+            }),
+            producer_keys: None,
+            note: "The propagation at entry 44 anchors the affected set of the retraction of \
+                   record F at entry 29, complete at its own declared checkpoint D — cp38, tree \
+                   size 38. That prefix REACHES entry 37: a derivation of a `scores` record \
+                   from H, which is itself the derived record the trigger reaches, carrying a \
+                   `sig` no key produced. I-D §2.1 makes it void and §7.5.1 4d says what a void \
+                   entry costs a receipt that does not rest on it — \"an entry of a propagation \
+                   prefix\" is named there among the carried envelopes reliance excludes: it is \
+                   \"never effective and never traversed\", so the closure recomputed here has \
+                   one member and not two, and the disposition tree the producer anchored agrees \
+                   with it. Positions are preserved rather than dropped — an entry index IS a \
+                   position in the prefix — and the prefix's own root is recomputed over the \
+                   CARRIED bytes, since voiding is about traversal and not about what the log \
+                   anchored. Its entry index is reported as an informative item beside the four \
+                   other void entries in range, and the result is `verified`. \
+                   `propagation-complete-void-prefix-entry-control-must-fail.ahl` is the same \
+                   claim over a prefix that reaches the verifying copy of that derivation."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    out.push(Vector {
+        file: "propagation-complete-void-prefix-entry-control-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "propagation-complete",
+            subject_index: 45,
+            anchor: cp46,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 46, cp46),
+            claim_material: json!({
+                "corpus_checkpoint": cp44.checkpoint,
+                "corpus_prefix": corpus.enumeration(0, 44, cp46),
+                "trees": trees_block(&f_prefix_roots, false),
+                "trigger": f_trigger(
+                    "Embedded trigger-effective proof for the retraction of record F at entry \
+                     29, bounded by cp34.",
+                ),
+            }),
+            producer_keys: None,
+            note: "MUST FAIL, and it is the control that makes \
+                   `propagation-complete-void-prefix-entry.ahl` mean something. The propagation \
+                   at entry 45 anchors the SAME affected set for the SAME trigger, and declares \
+                   D at cp44 instead of cp38. Entry 43 is inside that prefix: byte for byte the \
+                   payload anchored at entry 37, genuinely signed this time, so §2.1's \
+                   first-wins rule leaves it governing — a void entry never becomes a governing \
+                   statement and so occupies no statement id. The closure recomputable at this D \
+                   therefore has two members, the anchored disposition tree still has one, and \
+                   the completeness claim is `invalid` on `claim-material`. The only difference \
+                   between the two receipts' prefixes is which envelope over that payload they \
+                   reach, which is what shows the exclusion at cp38 to be the signature's doing \
+                   rather than an artifact of prefix length."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "spec §5.3 / receipt §3 — the anchored affected set must equal the closure \
+                   recomputed at D",
+            matches: |e| matches!(e, ReceiptError::ClosureMismatch(_)),
+        },
     });
 
     out.push(Vector {

@@ -354,6 +354,23 @@
       "file": "propagation-complete-valid-across-manifest-rotation.ahl"
     },
     {
+      "boundary": "the propagation statement's affected set equals the closure recomputable from the enumerated corpus prefix — complete relative to the declared corpus only; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "propagation-complete",
+      "embedded_receipts": 2,
+      "expect": "verified",
+      "file": "propagation-complete-void-prefix-entry.ahl",
+      "informative": 5
+    },
+    {
+      "claim_type": "propagation-complete",
+      "expect": "invalid",
+      "file": "propagation-complete-void-prefix-entry-control-must-fail.ahl",
+      "finding": "claim-material",
+      "informative": 5,
+      "reason": "recomputed affected set disagrees with the anchored disposition tree: recomputed 2 affected records, the disposition tree anchors 1",
+      "rule": "spec §5.3 / receipt §3 — the anchored affected set must equal the closure recomputed at D"
+    },
+    {
       "claim_type": "propagation-complete",
       "expect": "invalid",
       "file": "propagation-complete-missing-leaf-must-fail.ahl",
