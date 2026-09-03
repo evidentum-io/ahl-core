@@ -1,9 +1,18 @@
 //! Offline verification of AHL Evidence Receipts (`.ahl`).
 //!
-//! [`verify_receipt`] implements the normative algorithm outline of Evidence Receipt format
-//! §5, the assurance semantics of §2.1, the key-binding rules of §2.2, the cross-field
+//! [`verify_receipt_report`] implements the normative algorithm outline of Evidence Receipt
+//! format §5, the assurance semantics of §2.1, the key-binding rules of §2.2, the cross-field
 //! consistency rules of §2.3, the claim-type registry of §3, the resource limits of §3.1 and
 //! the governance-currency modes of §4.
+//!
+//! # The result
+//!
+//! A run that completes reaches exactly one of I-D §7.7's three values — [`Outcome::Verified`],
+//! [`Outcome::Invalid`], [`Outcome::Unverifiable`] — over the whole receipt, reduced from one
+//! [`Finding`] per required [`Assertion`]. A run that does NOT complete reaches none of them and
+//! is reported as [`ExecutionError`] instead, which is a statement about the verifier rather
+//! than about the receipt. [`verify_receipt`] is the single-value form of the same run, for
+//! callers that report one rejection rather than a report.
 //!
 //! # What "offline" means here
 //!
@@ -18,7 +27,10 @@
 //!
 //! Every rejection is a distinct [`ReceiptError`] variant naming the rule that fired, so a test
 //! can assert *which* rule rejected a deliberately malformed receipt rather than that "it
-//! failed somehow". Resource exhaustion is a rejection, never a degraded acceptance (§3.1).
+//! failed somehow", and every variant carries its §7.7 value ([`ReceiptError::class`]) and the
+//! assertion it belongs to ([`ReceiptError::assertion`]). Resource exhaustion is a rejection,
+//! never a degraded acceptance (§3.1): a FIXED limit is `invalid` and a verifier-local budget is
+//! `unverifiable`, naming the budget and the value in force.
 
 use std::collections::{BTreeMap, BTreeSet};
 

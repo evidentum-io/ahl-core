@@ -45,40 +45,85 @@ semantics, cross-field rules, resource limits, the governance-key rotation rule 
 Revision 0.4 verifies no material issued under any earlier revision (I-D §2.2, §7.1); this crate
 implements it as a clean break, not a superset.
 
+## The verification result (I-D §7.7)
+
+A run that completes reaches exactly one of three values — `verified`, `invalid`,
+`unverifiable` — and `verify_receipt_report` returns it together with the findings it reduces
+from. `index.json` records both: every vector's `expect` is one of those three values, and a
+non-verified vector also names, in `finding`, the required assertion whose finding produced it.
+
+A **finding** is the outcome of one required assertion, with the same three values. The required
+assertions of a receipt are the ones I-D §7.7 lists — the claim type's own §7.2 material, the
+anchoring, envelope-validity, governance and cross-field checks of §7.5 steps 1-4 and §7.6, and
+its content binding if and only if its own `assurance.content_binding` is not `none` — plus
+every required assertion of each embedded receipt, WITH ONE EXCEPTION: an embedded receipt's
+content binding is never a required assertion of the receipt that embeds it. This crate names
+them `versions`, `resource-limits`, `structure`, `adaptor-profile`, `anchoring`, `governance`,
+`checkpoint-authentication`, `envelope-validity`, `cross-field`, `claim-material` and
+`content-binding`, and reports one finding per assertion per receipt, embedded receipts under
+the `claim_material` member names that reach them.
+
+The result is the reduction: `invalid` if any required finding is `invalid`, otherwise
+`unverifiable` if any is `unverifiable`, otherwise `verified`. An `invalid` finding ends the run
+— the result is decided, and the assertions after it are not reported at all — while an
+`unverifiable` finding does not: the run carries on so that a defect reached later still
+dominates, and the assertions that rest on the material it was short of are reported
+`unverifiable` naming that prerequisite. Two conditions end the run even so, both ordering rules
+rather than reductions: an unsupported version, which §7.5 step 1 follows with "no further
+processing", and an exhausted verifier-local budget, which §7.8 requires to fail closed. A
+boundary is rendered only for `verified`, and no result is ever expressed by rewriting the
+receipt's own assurance fields.
+
+`verify_receipt` remains as the single-value form for callers that report one rejection: `Ok`
+if and only if the result is `verified`, and otherwise the rejection behind the finding that
+decided it. `ReceiptError::class` gives the §7.7 value of one rejection and
+`ReceiptError::assertion` the assertion it belongs to, both exhaustive over the variants.
+
+Which conditions this build reports as `unverifiable` rather than `invalid`, and why:
+`UnsupportedVersion` (I-D §2.2, §7.5 step 1), `BudgetExhausted` (§7.8, naming the budget and
+the value in force), `AdaptorUnknown` and `AdaptorCapabilityUnsupported` (§7.5 step 2),
+`AdaptorProfileMisconfigured` and `GenesisAnchorMismatch` and `WitnessKeyNotTrusted` (local
+configuration the verifier was not given), `CanonicalizationUnsupported` (§6.3),
+`DatasetKeyNotHeld` (§7.3) and `ProducerKeyNotCarried` (§7.4). Everything else is `invalid`.
+
+`ProducerKeyNotCarried` is the one of these decided by the receipt's governance MODE rather
+than by this build's capabilities. Under `declared` governance an envelope naming a producer
+key the presented chain holds nothing for is `unverifiable` — the transition is a `key`
+statement, and I-D §7.4 carries those in enumeration material alone, so the receipt is short
+of material rather than defective. Under `enumerated` the same condition is `invalid`
+(`EnvelopeSignatureInvalid`), because the range proof over exactly `[0, tree_size(C))`
+forecloses omission (§7.5.1 4c). The pair
+`statement-anchored-uncarried-key-transition-must-fail.ahl` and
+`trigger-effective-derived-rotated-key.ahl` carry the SAME entry-19 envelope under the two
+modes: the first is `unverifiable` — the corpus's one non-`invalid` negative — and the second
+verifies.
+
+Three capability gaps are exercised by `tests/vectors.rs` rather than by a vector, because what
+decides each of them is the verifier's own configuration rather than anything a portable vector
+can carry: a `keyed-authorized` binding under a policy holding no dataset key (I-D §7.7's own
+worked example — result `unverifiable`, anchoring and claim material still `verified`, the
+content binding `unverifiable`), and each of the two verifier-local budgets of §7.8 exhausted
+under a tightened policy, which must name the budget and the value in force. The embedded-content
+-binding exception is covered the same way, by splicing the content-bound `record-ingested`
+vector into the `trigger-declared` vector's `introduction` slot, since every embedded receipt
+this corpus carries asserts `content_binding: "none"`.
+
 ## Not yet implemented from revision 0.4
 
-This crate's `verify_receipt` does not yet implement every rule revision 0.4 states, and refuses
-rather than silently mis-verifying wherever the gap could otherwise be mistaken for a pass:
+This crate's verifier does not yet implement every rule revision 0.4 states, and refuses rather
+than silently mis-verifying wherever the gap could otherwise be mistaken for a pass:
 
-*   **The full three-valued verification-result model (I-D §7.7: `verified` / `invalid` /
-    `unverifiable`, reduced from per-assertion findings).** `verify_receipt` remains the binary
-    `Result<Verdict, ReceiptError>` it always was, rather than a completed-run outcome carrying
-    a scalar result plus a findings list. A handful of `ReceiptError` variants represent the
-    I-D's `unverifiable` outcome rather than `invalid` — `UnsupportedVersion` (I-D §7.1
-    "Revision and rule selection"), `CanonicalizationUnsupported` (I-D §6.3), `AdaptorUnknown`
-    (I-D §7.5 step 2) and `ProducerKeyNotCarried` (I-D §7.4, "Declared mode and producer-key
-    transitions") — and each says so on its own doc comment, but a caller that needs to
-    DISTINGUISH `invalid` from `unverifiable` must match on the specific variant, and a
-    capability gap on one assertion still aborts the whole run rather than being isolated to its
-    own finding while independent assertions continue to be checked.
-
-    `ProducerKeyNotCarried` is the one of these decided by the receipt's governance MODE rather
-    than by this build's capabilities. Under `declared` governance an envelope naming a producer
-    key the presented chain holds nothing for is `unverifiable` — the transition is a `key`
-    statement, and I-D §7.4 carries those in enumeration material alone, so the receipt is short
-    of material rather than defective. Under `enumerated` the same condition is `invalid`
-    (`EnvelopeSignatureInvalid`), because the range proof over exactly `[0, tree_size(C))`
-    forecloses omission (§7.5.1 4c). The pair
-    `statement-anchored-uncarried-key-transition-must-fail.ahl` and
-    `trigger-effective-derived-rotated-key.ahl` carry the SAME entry-19 envelope under the two
-    modes: the first is refused as unverifiable, the second accepts.
 *   **Canonicalization procedures beyond `jcs` and `exact-bytes` (I-D §2.6).** These are the
     only two the I-D itself defines, and the only two this crate implements. A dataset declaring
     any other `canonicalization` identifier — a registered one this crate has not implemented,
     or a private-use `x-` one — makes that dataset's content-binding finding `unverifiable`
     (`ReceiptError::CanonicalizationUnsupported`), never `invalid` and never rehabilitated to
     `content_binding: "none"`, exactly as I-D §6.3's conformance table requires. No vector in
-    this corpus currently exercises an unimplemented identifier end to end.
+    this corpus exercises an unimplemented identifier end to end: the identifier comes from the
+    MANIFEST, so carrying one would mean a manifest declaring a dataset this crate cannot
+    verify, and every receipt over that dataset would be built on it. The equivalent
+    capability gap on the same finding — a dataset key the verifier is not authorized to hold —
+    is exercised instead, in `tests/vectors.rs`.
 *   **ATL adaptor profile support in the receipt verifier.** Leaf construction (adaptor
     `ahl-adaptor-atl-v1` §4.2: `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`),
     origin-derived `log_id` (§7.1: `sha256(Origin ID)`, Origin ID the SHA-256 of a 16-byte Data
@@ -139,7 +184,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 | `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 34, 35, 37 and 38, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
 | `vectors/closure/` | Six closure scenarios (see below) |
 | `vectors/witness/` | Signed witness refusal evidence carrying two conflicting checkpoints (spec §3.3 step 3) |
-| `receipts/` | One positive and at least one negative receipt per claim-type registry entry, plus `index.json` naming the expected outcome, the rule each negative must trip, and the trust policy those outcomes assume |
+| `receipts/` | One positive and at least one negative receipt per claim-type registry entry, plus `index.json` naming the I-D §7.7 result each must reach, the assertion whose finding produces a non-verified one, the rule each negative must trip, and the trust policy those outcomes assume |
 | `keys/` | Committed test key seeds — **see the warning below** |
 
 ## The scenarios
@@ -297,8 +342,9 @@ cosignature, every inclusion proof, every range proof (including that it rejects
 every consistency proof between published checkpoints (including that a proof for the wrong pair
 of sizes is rejected), the witness refusal evidence, and an independent recomputation of every
 revocation closure. It then runs every receipt vector
-through `verify_receipt` and requires each positive one to be accepted and each negative one to
-be rejected *by the specific rule it names*. A vector that cannot be self-verified never reaches
+through `verify_receipt_report` and requires each positive one to reach `verified` and each
+negative one to reach the §7.7 result of the rejection it names, *by the specific rule it
+names*. A vector that cannot be self-verified never reaches
 the repository.
 
 ## Checking
@@ -346,7 +392,8 @@ Working draft, tracking AHL Internet-Draft draft-zatona-ahl-00 revision 0.4 (whi
 both the core protocol and, in its own §7, the Evidence Receipt container) for everything it
 covers, and spec v0.3-draft for the rest. All are drafts, so the corpus is expected to change
 with them; the intended stable contract is the *shape* of the corpus, not yet its digests. See
-"Not yet implemented from revision 0.4" above for what `verify_receipt` does not yet check.
+"Not yet implemented from revision 0.4" above for what `verify_receipt_report` does not yet
+check.
 "#;
 
 /// `test_data/adaptor/ahl-test-log-v1.md` — the content-addressed adaptor profile.
