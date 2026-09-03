@@ -4853,31 +4853,31 @@ fn authority_at(
     Ok(&declared_keys & &in_force)
 }
 
-/// Whether the envelope at `index` is a trigger signed — cryptographically, not just by
-/// claimed `key_id` — by the record's authority.
+/// Whether the ALREADY-VALID envelope at `index` is a trigger signed by the record's authority.
 ///
-/// I-D §8.4 fixes two separate tests, in that order, and this function applies both:
+/// I-D §8.4 fixes two separate tests, in that order — "Validity and authorization are separate
+/// tests, applied in that order" — and this function is the SECOND of them only. §7.5.1 4e says
+/// so directly: authorization is "applied only to envelopes already valid under 4d". The trigger
+/// is authorized if and only if at least one of its signers holds a key in the authority key set
+/// active at `index`. Core spec §2.3.3 requires a trigger to be "signed by the record's
+/// authority", not signed *exclusively* by authority keys — a trigger genuinely co-signed by the
+/// authority AND some other active producer key is still authorized. That is also why the two
+/// tests must stay separate rather than being merged into one resolver restricted to authority
+/// keys: such a resolver would fail the whole envelope over any additional, genuinely valid
+/// co-signer, misclassifying an authorized trigger as a challenge.
 ///
-/// 1. **Envelope validity** (§7.5.1 4d): EVERY entry in `signatures` MUST resolve to a producer
-///    key active at `index` and MUST verify (`crate::verify_envelope`'s AND-all semantics). An
-///    envelope carrying even one non-verifying or unresolvable entry is invalid outright,
-///    regardless of its other entries — a candidate's `signatures[].key_id` naming an authority
-///    key proves nothing on its own, since the `sig` bytes are controlled by whoever assembled
-///    the statement, who may be a party without authority. Failure is `invalid` FOR THE RUN and
-///    is returned as an error, never as `Ok(false)`: reporting it as "unauthorized" would file
-///    a defective envelope under §8.4's challenge outcome, which is reserved for a VALID
-///    envelope whose signers hold no authority.
-/// 2. **Authorization** (§7.5.1 4e), tested only once the envelope is valid: the trigger is
-///    authorized iff AT LEAST ONE of those verified signers is in the authority key set active
-///    at `index`. Core spec §2.3.3 requires a trigger to be "signed by the record's authority",
-///    not signed *exclusively* by authority keys — a trigger genuinely co-signed by the
-///    authority AND some other active producer key is still authorized.
+/// # Precondition
 ///
-/// Splitting the two tests this way, rather than restricting step 1's resolver to authority
-/// keys, is what makes a legitimately co-signed trigger classify correctly: restricting
-/// resolution to authority keys would make ANY additional, genuinely valid co-signer from a
-/// non-authority key fail the whole envelope, misclassifying an authorized trigger as a
-/// challenge.
+/// The envelope has already passed 4d at `index` — every entry in `signatures` resolved to a
+/// producer key active there and verified over `JCS(payload)`. Both call sites establish it,
+/// and neither can be reached otherwise: [`verify_trigger_authority`] takes the subject's own
+/// envelope, which [`verify_nested`] verifies through [`verify_envelope_at`] before any claim
+/// material is read, and [`verify_competing_triggers`] takes candidates out of an
+/// [`Enumeration`] whose every non-induction envelope [`verify_enumeration`] has verified at its
+/// own index. Re-checking the signature here would therefore never reject anything, while
+/// leaving the impression that a caller MAY hand this function unvalidated material — the one
+/// reading §8.4's ordering rules out. A false return means a valid envelope whose signers hold
+/// no authority, which §7.5.1 4e calls a challenge and "not a defect".
 fn is_authorized_trigger(
     ctx: &ClaimCtx<'_>,
     envelope: &Value,
@@ -4886,11 +4886,9 @@ fn is_authorized_trigger(
     index: u64,
     budget: &mut Budget,
 ) -> Result<bool> {
+    // The §7.8 budget is charged per candidate examined: resolving the authority key set walks
+    // the governance state at `index`, which is per-candidate work whatever it concludes.
     budget.spend(1)?;
-    let pubkeys = ctx.governance.producer_pubkeys_at(index);
-    if !crate::verify_envelope(envelope, |key_id| pubkeys.get(key_id).cloned())? {
-        return Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index });
-    }
     let authority = authority_at(ctx, dataset, by_ingestion, index)?;
     let signers: BTreeSet<String> = array(envelope, "signatures")?
         .iter()
@@ -4904,10 +4902,11 @@ fn is_authorized_trigger(
 ///
 /// Format §5 step 3a requires this to be a real cryptographic check, not a `key_id` name match:
 /// a signature entry that merely *names* an authority key proves nothing on its own, since the
-/// `sig` bytes are controlled by whoever assembled the envelope. This routes through the same
-/// `is_authorized_trigger` machinery `verify_competing_triggers` uses, so the receipt's own
-/// envelope must actually verify (every entry, against a key active at `ctx.subject_index`) and
-/// at least one of its genuine signers must be the record's authority.
+/// `sig` bytes are controlled by whoever assembled the envelope. That check has already run by
+/// the time this is reached — [`verify_nested`] verifies the subject's own envelope under I-D
+/// §7.5.1 4d, at its own entry index, before any claim material is read — so what remains here
+/// is 4e's authority comparison over signers already known genuine, through the same
+/// [`is_authorized_trigger`] that `verify_competing_triggers` uses.
 fn verify_trigger_authority(
     ctx: &ClaimCtx<'_>,
     introduction: &Embedded,
