@@ -279,7 +279,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 | Path | Contents |
 | --- | --- |
 | `adaptor/` | The test adaptor profile document, content-addressed and pinned in both manifest versions |
-| `vectors/statements/` | The 41-entry toy corpus, plus malformed statements naming the rule each violates |
+| `vectors/statements/` | The 45-entry toy corpus, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
 | `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 34, 35, 37 and 38, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
 | `vectors/closure/` | Six closure scenarios (see below) |
@@ -289,7 +289,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 ## The scenarios
 
-The corpus is 41 anchored entries carrying these interlocking scenarios:
+The corpus is 45 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -381,18 +381,32 @@ ordinary artifact of a real log rather than something a producer must manufactur
    before the rule under test is ever reached.
 11. **Void governance material, and the reliance rule.** Entries 38 and 39 are a purported
    `key` statement and a purported manifest version whose envelopes do not verify — a log
-   anchors opaque bytes and validates none, so both really can be anchored — and entry 40 is a
-   `key` statement that DOES verify while declaring `ahl_version: "0.5"`. I-D §7.5.1 4b selects
-   an enumeration-only entry for the induction by its purported `type` but admits it "only if
-   its envelope verifies in phase 1": 38 and 39 are void, not inducted, with no effect on the
-   key state and no type-specific validation at all (§7.5 step 1 exempts a non-verifying
+   anchors opaque bytes and validates none, so both really can be anchored. I-D §7.5.1 4b
+   selects an enumeration-only entry for the induction by its purported `type` but admits it
+   "only if its envelope verifies in phase 1": both are void, not inducted, with no effect on
+   the key state and no type-specific validation at all (§7.5 step 1 exempts a non-verifying
    enumeration-only entry from the version read too), while §7.4 adds that a void entry's
-   absence from `governance.chain[]` is not an omission. Entry 40 is the other case: verifying,
-   so K is unestablished from its index and the `governance` finding is `unverifiable`.
+   absence from `governance.chain[]` is not an omission.
    `governance-state-void-governance-entries.ahl` (over cp40) verifies with four informative
-   items; `governance-state-foreign-revision-key-must-fail.ahl` (over cp41) is `unverifiable`.
-   All three sit past every checkpoint the rest of the corpus anchors at, so no other vector's
-   range reaches them.
+   items.
+
+   A void entry occupies no statement id either, because §2.1's first-wins rule is about
+   GOVERNING statements and a void entry never becomes one. Entry 41 is BYTE-FOR-BYTE the
+   statement anchored at entry 38 — one statement id, two entry ids — genuinely signed this
+   time, with entry 40 retiring `producer-2` in between and entry 42 an ingestion signed by that
+   key. `statement-anchored-void-then-verifying-key.ahl` verifies only if the copy at 41 was
+   inducted; a verifier that claimed the id when it voided the first copy would leave the key
+   retired and refuse the subject.
+
+   Entries 43 and 44 are the other half of 4b's rule: a manifest version and a `key` statement
+   that DO verify while declaring `ahl_version: "0.5"`. Each is "not inducted, K is unestablished
+   at and after its index, the governance finding is `unverifiable`", and each reaches the
+   verifier by a different path — the `key` statement through the induction (4b), the manifest
+   through the completeness check (4c), which must read the revision before calling its absence
+   from the chain an omission. `governance-state-foreign-revision-manifest-must-fail.ahl` (over
+   cp44) and `governance-state-foreign-revision-key-must-fail.ahl` (over cp45) are both
+   `unverifiable` on `governance`. All seven entries sit past every checkpoint the rest of the
+   corpus anchors at, so no other vector's range reaches them.
 
 12. **Input-set trees take the §2.7 tree rules.** I-D §2.7 states one set of rules, "identical
    for every AHL tree — outputs, input sets, and dispositions". Entry 37 is a batch whose three
