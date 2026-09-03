@@ -2112,6 +2112,70 @@ fn the_dominating_finding_is_the_cause_and_invalid_wins() {
     assert!(report.findings.iter().any(|finding| finding.outcome == Outcome::Unverifiable));
 }
 
+/// Two independent causes in one run, and the two APIs still name the same one.
+///
+/// I-D §7.7: "the result alone does not say which assertion produced it." Where a run tolerates
+/// more than one gap — each recorded by its own check, each `rests_on: None` — the report and
+/// the single-value form must not disagree about which of them decided the result, or a caller
+/// reading one and a caller reading the other would act on different facts about one artifact.
+///
+/// The pair here is a cosignature under a `local-policy` witness key local policy does not hold
+/// (settling `witnesses`) and a `keyed-authorized` content binding over a dataset the verifier
+/// holds no key for (settling `content-binding`). Neither ends the run, so both are reached.
+#[test]
+fn two_independent_causes_agree_between_the_report_and_the_error() {
+    let mut policy = trust_policy();
+    policy.dataset_keys.clear();
+    let impostor = TestKey::from_seed_hex("impostor", &"ee".repeat(32)).expect("32-byte seed");
+    let (_, mut receipt) = read_receipt("record-ingested-valid.ahl");
+    assert_eq!(receipt["claim"]["assurance"]["content_binding"], json!("keyed-authorized"));
+    receipt["keys"]["witness"] = json!([{
+        "witness_id": "witness-1",
+        "key_id": impostor.key_id(),
+        "pubkey": impostor.pubkey(),
+        "source": "local-policy",
+    }]);
+    receipt["anchoring"]["witnesses"] = json!([{
+        "witness_id": "witness-1",
+        "key_id": impostor.key_id(),
+        "cosignature": impostor
+            .sign(&cosignature_bytes(&receipt["anchoring"]["checkpoint"], "witness-1")),
+        "cosigned_at": "2026-08-16T12:00:00Z",
+    }]);
+
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+
+    // Two causes, each produced by its own check, and nothing else claiming to be one.
+    let causes: Vec<Assertion> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.outcome == Outcome::Unverifiable && finding.rests_on.is_none())
+        .map(|finding| finding.assertion)
+        .collect();
+    assert_eq!(
+        causes,
+        vec![Assertion::Witnesses, Assertion::ContentBinding],
+        "two independent gaps, in report order: {:#?}",
+        report.findings
+    );
+    // What rests on one of them is reported as resting on it, not as a second cause.
+    assert_eq!(
+        report.finding(Assertion::CrossField).and_then(|finding| finding.rests_on),
+        Some(Assertion::Witnesses)
+    );
+
+    // The report leads with the earlier of the two, and the single-value form returns the
+    // rejection behind that same finding.
+    let dominating = report.dominating().expect("a non-verified result has a cause");
+    assert_eq!(dominating.assertion, Assertion::Witnesses);
+    let error = verify_receipt(&receipt, &policy).expect_err("two gaps, one result");
+    assert_eq!(error.class(), dominating.outcome);
+    assert_eq!(error.assertion(), dominating.assertion);
+    assert_eq!(Some(error.to_string()), dominating.detail, "one fact, reported once");
+    assert!(matches!(error, ReceiptError::WitnessKeyNotTrusted { .. }), "{error}");
+}
+
 /// Every non-verified vector's dominating finding is a cause, never a derivation — the fallback
 /// arm of `Report::dominating` is unreachable across the corpus.
 #[test]
