@@ -59,13 +59,29 @@ pub const SPEC_VERSION: &str = "0.4.0";
 // Policy and limits
 // ---------------------------------------------------------------------------
 
-/// Resource limits (format §3.1). A verifier MUST fail closed on exhaustion.
+/// Maximum embedded-receipt nesting depth (I-D §7.8).
+///
+/// A FIXED limit, not policy: §7.8 puts it among the limits that "are properties of the
+/// artifact, decided identically by every verifier in every year, so a receipt exceeding either
+/// is `invalid`". A verifier that could lower it would report `invalid` over a receipt another
+/// verifier verifies, which §7.7 forbids; one that could raise it would accept a receipt the
+/// document says is invalid. It is therefore a constant of this crate rather than a member of
+/// [`Limits`].
+pub const MAX_EMBEDDED_DEPTH: usize = 4;
+
+/// Maximum embedded receipts per file (I-D §7.8). Fixed, for the reason [`MAX_EMBEDDED_DEPTH`]
+/// gives.
+pub const MAX_EMBEDDED_RECEIPTS: usize = 64;
+
+/// The VERIFIER-LOCAL budgets of I-D §7.8. A verifier MUST fail closed on exhaustion.
+///
+/// Only the two budgets live here. The §7.8 fixed limits are [`MAX_EMBEDDED_DEPTH`] and
+/// [`MAX_EMBEDDED_RECEIPTS`], and they are deliberately not configurable: "This document defines
+/// no receipt member, manifest field, or other declaration source that sets them, states no
+/// value for them" applies to the BUDGETS, while the fixed limits get values stated in the
+/// document itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// Maximum embedded-receipt nesting depth. Normative maximum: 4.
-    pub max_depth: usize,
-    /// Maximum embedded receipts per file. Normative maximum: 64.
-    pub max_embedded: usize,
     /// Decoded-size budget in bytes, over the JCS serialization of the whole receipt.
     pub max_decoded_bytes: usize,
     /// Verification-work budget: one unit per signature check, proof check or tree opening.
@@ -74,12 +90,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self {
-            max_depth: 4,
-            max_embedded: 64,
-            max_decoded_bytes: 8 * 1024 * 1024,
-            max_work_units: 100_000,
-        }
+        Self { max_decoded_bytes: 8 * 1024 * 1024, max_work_units: 100_000 }
     }
 }
 
@@ -299,9 +310,13 @@ pub enum Assertion {
     /// `ahl_receipt_version`, `spec_version` and every carried statement's `ahl_version`
     /// (I-D §7.5 step 1, §2.2).
     Versions,
-    /// The §7.8 resource limits: the fixed limits, and the verifier-local budgets.
+    /// The verifier-local budgets of §7.8: decoded size, and verification work. The §7.8 FIXED
+    /// limits belong to [`Self::Structure`] — they "bound a receipt's STRUCTURE and not its
+    /// size" — and are `invalid`, while an exhausted budget is `unverifiable`.
     ResourceLimits,
-    /// The container schema of §7.1 and the identifier recomputation of §7.5 step 1.
+    /// The container schema of §7.1, the identifier recomputation of §7.5 step 1, and the
+    /// FIXED limits of §7.8 (nesting depth, embedded-receipt count), which bound the receipt's
+    /// structure.
     Structure,
     /// Adaptor-profile resolution from local possession (§7.5 step 2).
     AdaptorProfile,
@@ -1283,10 +1298,15 @@ impl ReceiptError {
     pub fn assertion(&self) -> Assertion {
         match *self {
             Self::UnsupportedVersion { .. } => Assertion::Versions,
-            Self::LimitExceeded(_) | Self::BudgetExhausted { .. } => Assertion::ResourceLimits,
-            Self::Malformed(_) | Self::IdentifierMismatch { .. } | Self::Ahl(_) => {
-                Assertion::Structure
-            }
+            Self::BudgetExhausted { .. } => Assertion::ResourceLimits,
+            // I-D §7.8 on the fixed limits: "A nesting depth of 4 and a count of 64 embedded
+            // receipts bound a receipt's STRUCTURE and not its size." They are properties of the
+            // artifact, decided from its own shape, so they belong to the structural assertion
+            // rather than to the verifier-local budgets.
+            Self::LimitExceeded(_)
+            | Self::Malformed(_)
+            | Self::IdentifierMismatch { .. }
+            | Self::Ahl(_) => Assertion::Structure,
             Self::AdaptorUnknown { .. }
             | Self::AdaptorHashMismatch { .. }
             | Self::AdaptorBindingInvalid { .. }
@@ -1776,13 +1796,14 @@ impl Run {
         Ok(())
     }
 
+    /// The §7.8 FIXED limits, enforced at exactly the values the document states.
     const fn enter(&mut self, depth: usize) -> Result<()> {
-        if depth > self.limits.max_depth {
+        if depth > MAX_EMBEDDED_DEPTH {
             return Err(ReceiptError::LimitExceeded("embedded-receipt nesting depth"));
         }
         if depth > 0 {
             self.embedded += 1;
-            if self.embedded > self.limits.max_embedded {
+            if self.embedded > MAX_EMBEDDED_RECEIPTS {
                 return Err(ReceiptError::LimitExceeded("embedded receipts per file"));
             }
         }
@@ -6727,7 +6748,8 @@ mod tests {
 
     use super::{
         log_key_set, verify_rotation_proof, witness_key_set, AdaptorCapabilities, AdaptorProfile,
-        Limits, ReceiptError, RotationContext, Run, TrustPolicy, TEST_ADAPTOR_PROFILE_ID,
+        Assertion, Limits, Outcome, ReceiptError, RotationContext, Run, TrustPolicy,
+        MAX_EMBEDDED_RECEIPTS, TEST_ADAPTOR_PROFILE_ID,
     };
     use crate::{
         checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, sha256_hex, tree_root,
@@ -6743,6 +6765,31 @@ mod tests {
     /// chain hop's own committed inclusion path before the rotation check is ever reached —
     /// the same structural constraint documented for the `media_type` presence test in
     /// `tests/vectors.rs`.
+    /// I-D §7.8's second fixed limit: "Maximum embedded receipts per file: 64."
+    ///
+    /// Tested directly on the counter rather than through a receipt, because no receipt can
+    /// reach it: §7.2 gives a claim type at most two embedded-receipt members
+    /// (`introduction` and `replacement_introduction`), so a tree inside the fixed nesting
+    /// depth of 4 carries at most 2 + 4 + 8 + 16 = 30 embedded receipts. A file with 65 of them
+    /// is not expressible in the container, and a test that pretended otherwise would be
+    /// testing a shape the format does not have.
+    #[test]
+    fn the_embedded_receipt_count_is_capped_at_the_fixed_limit() {
+        let mut run = Run::new(Limits::default());
+        for _ in 0..MAX_EMBEDDED_RECEIPTS {
+            run.enter(1).expect("inside the fixed limit");
+        }
+        let error = run.enter(1).expect_err("one past the fixed limit");
+        assert!(matches!(error, ReceiptError::LimitExceeded("embedded receipts per file")));
+        assert_eq!(error.class(), Outcome::Invalid);
+        assert_eq!(error.assertion(), Assertion::Structure);
+        // The outermost receipt is not an embedded one, so entering at depth 0 never counts.
+        let mut run = Run::new(Limits::default());
+        for _ in 0..(MAX_EMBEDDED_RECEIPTS * 2) {
+            run.enter(0).expect("depth 0 is the receipt itself");
+        }
+    }
+
     #[test]
     fn key_set_comparison_is_order_independent() {
         let aa = format!("sha256:{}", "aa".repeat(32));

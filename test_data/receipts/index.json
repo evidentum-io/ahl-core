@@ -19,8 +19,6 @@
     ],
     "limits": {
       "max_decoded_bytes": 8388608,
-      "max_embedded_depth": 4,
-      "max_embedded_receipts": 64,
       "max_work_units": 100000
     }
   },

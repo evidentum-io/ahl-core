@@ -2013,25 +2013,63 @@ fn an_unauthorized_verifier_cannot_satisfy_a_keyed_content_binding() {
 /// `invalid`". The VERIFIER-LOCAL budgets are the opposite: "Exhaustion of either budget yields
 /// `unverifiable`, never `invalid`", and the verifier "MUST report WHICH budget was exhausted
 /// and the value that was in force". Both fail closed either way.
-#[test]
-fn fixed_resource_limits_are_rejections_of_the_artifact() {
-    let (_, receipt) = read_receipt("disposition-effective-valid.ahl");
-
-    for (limits, expected) in [
-        (Limits { max_depth: 1, ..Limits::default() }, "embedded-receipt nesting depth"),
-        (Limits { max_embedded: 1, ..Limits::default() }, "embedded receipts per file"),
-    ] {
-        let policy = TrustPolicy { limits, ..trust_policy() };
-        let error = verify_receipt(&receipt, &policy).expect_err("the fixed limit must fire");
-        assert!(
-            matches!(error, ReceiptError::LimitExceeded(what) if what == expected),
-            "{expected}: a fixed limit rejects, never degrades (I-D §7.8), got: {error}"
-        );
+/// A receipt tree nested `levels` deep, built by putting a copy of the `trigger-declared`
+/// vector into its own `introduction` slot.
+///
+/// The corpus cannot carry an over-deep receipt: every vector in it is a conforming artifact,
+/// and one exceeding a FIXED limit is by definition not. The tree is therefore assembled here.
+/// The innermost trigger keeps its own `record-ingested` introduction, so a tree of `levels`
+/// nested triggers reaches nesting depth `levels + 1`.
+fn nested_triggers(levels: usize) -> Value {
+    let (_, base) = read_receipt("trigger-declared-valid.ahl");
+    let mut receipt = base.clone();
+    for _ in 0..levels {
+        let mut outer = base.clone();
+        outer["claim_material"]["introduction"] = receipt;
+        receipt = outer;
     }
+    receipt
+}
+
+/// I-D §7.8's FIXED limits: "These are properties of the artifact, decided identically by every
+/// verifier in every year, so a receipt exceeding either is `invalid`: Maximum embedded-receipt
+/// nesting depth: 4. Maximum embedded receipts per file: 64."
+///
+/// They are constants of the crate, not members of `Limits`: a verifier that could lower either
+/// would report `invalid` over a receipt another verifier verifies, which I-D §7.7 forbids.
+#[test]
+fn the_fixed_nesting_depth_is_a_property_of_the_artifact() {
+    let policy = trust_policy();
+    assert_eq!(ahl_core::receipt::MAX_EMBEDDED_DEPTH, 4);
+    assert_eq!(ahl_core::receipt::MAX_EMBEDDED_RECEIPTS, 64);
+
+    // Depth 5, one past the limit.
+    let error = verify_receipt(&nested_triggers(4), &policy).expect_err("the depth cap fires");
+    assert!(
+        matches!(error, ReceiptError::LimitExceeded("embedded-receipt nesting depth")),
+        "an over-deep tree is invalid however the verifier is configured, got: {error}"
+    );
+    assert_eq!(error.class(), Outcome::Invalid);
+    assert_eq!(
+        error.assertion(),
+        Assertion::Structure,
+        "the fixed limits `bound a receipt's STRUCTURE and not its size` (I-D §7.8)"
+    );
+    let report = verify_receipt_report(&nested_triggers(4), &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+
+    // Depth 4 is inside the limit, so the tree is refused for what it says rather than for how
+    // deep it is — proving the cap fired at 5 rather than everywhere.
+    let error = verify_receipt(&nested_triggers(3), &policy).expect_err("still not a valid tree");
+    assert!(
+        !matches!(error, ReceiptError::LimitExceeded(_)),
+        "depth 4 is within the fixed limit, got: {error}"
+    );
 
     // The nesting the corpus actually uses stays inside the normative limits.
-    let verdict = verify_receipt(&receipt, &trust_policy()).expect("valid receipt");
-    assert!(verdict.embedded_receipts <= 64);
+    let (_, receipt) = read_receipt("disposition-effective-valid.ahl");
+    let verdict = verify_receipt(&receipt, &policy).expect("valid receipt");
+    assert!(verdict.embedded_receipts <= ahl_core::receipt::MAX_EMBEDDED_RECEIPTS);
 }
 
 #[test]
@@ -2110,22 +2148,22 @@ fn an_unsupported_version_is_reported_ahead_of_the_size_budget() {
 /// the receipt is told about.
 #[test]
 fn an_embedded_receipts_version_is_read_before_the_depth_limit() {
-    let (_, valid) = read_receipt("disposition-effective-valid.ahl");
-    let shallow =
-        TrustPolicy { limits: Limits { max_depth: 1, ..Limits::default() }, ..trust_policy() };
+    let shallow = trust_policy();
+    let valid = nested_triggers(4);
 
-    // The cap really is live for this tree: the innermost receipt sits at depth 2.
+    // The cap really is live for this tree: its innermost receipt sits at depth 5.
     assert!(
         matches!(
             verify_receipt(&valid, &shallow),
             Err(ReceiptError::LimitExceeded("embedded-receipt nesting depth"))
         ),
-        "the depth cap must fire for a tree this verifier does support"
+        "the depth cap must fire for a tree this deep"
     );
 
     let mut foreign = valid;
-    foreign["claim_material"]["trigger"]["claim_material"]["introduction"]["ahl_receipt_version"] =
-        json!("1");
+    foreign["claim_material"]["introduction"]["claim_material"]["introduction"]["claim_material"]
+        ["introduction"]["claim_material"]["introduction"]["claim_material"]["introduction"]
+        ["ahl_receipt_version"] = json!("1");
     assert!(
         matches!(
             verify_receipt(&foreign, &shallow),

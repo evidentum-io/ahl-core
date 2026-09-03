@@ -170,8 +170,10 @@ pub fn write_all(corpus: &Corpus, keys: &Keys, root: &Path, dataset_key: &[u8]) 
                                    authorized verifier; never packaged in a receipt",
                 },
                 "limits": {
-                    "max_embedded_depth": 4,
-                    "max_embedded_receipts": 64,
+                    // The verifier-local budgets alone: I-D §7.8's fixed limits are
+                    // properties of the artifact and are not policy a vector's outcome could
+                    // depend on (`ahl_core::receipt::MAX_EMBEDDED_DEPTH`,
+                    // `MAX_EMBEDDED_RECEIPTS`).
                     "max_decoded_bytes": 8_388_608,
                     "max_work_units": 100_000,
                 },
