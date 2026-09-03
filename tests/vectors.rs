@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 /// entry from a non-authority key alongside a non-verifying authority-named one. The two
 /// non-verifying fixtures sit at the tail so that enumerated material below them stays
 /// verifiable (I-D §7.5.1 4d).
-const STATEMENT_FILES: [&str; 46] = [
+const STATEMENT_FILES: [&str; 47] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -89,6 +89,7 @@ const STATEMENT_FILES: [&str; 46] = [
     "43-ingestion-foreign-revision.json",
     "44-manifest-foreign-revision.json",
     "45-key-add-foreign-revision.json",
+    "46-manifest-foreign-revision-unsigned.json",
 ];
 
 /// The corpus prefix over which closure recomputation is defined.
@@ -240,11 +241,11 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
         if index == 34 {
             continue;
         }
-        // Entries 39 and 43 are purported MANIFESTS — a manifest statement declares no
-        // `manifest` member (spec §2.3.5) — carried by no chain: 39 void for want of a verifying
-        // signature, 43 verifying but declaring a revision this document does not define (I-D
-        // §7.5.1 4b, 4d).
-        if index == 39 || index == 44 {
+        // Entries 39, 44 and 46 are purported MANIFESTS — a manifest statement declares no
+        // `manifest` member (spec §2.3.5): 39 void for want of a verifying signature, 44
+        // verifying but declaring a revision this document does not define, 46 neither signed
+        // nor of a revision this document defines (I-D §7.5.1 4b, 4d).
+        if index == 39 || index == 44 || index == 46 {
             continue;
         }
         // The manifest version id is the manifest statement's *statement id* (spec §2.3.5).
@@ -483,8 +484,10 @@ fn every_statement_signature_verifies() {
     // not.
     // Entries 38 and 39 join the two at 32 and 33: a purported `key` statement and a purported
     // `manifest` whose envelopes do not verify, anchored past every checkpoint the rest of the
-    // corpus uses, for the reliance rule of I-D §7.5.1 4d.
-    const NON_VERIFYING: [usize; 4] = [32, 33, 38, 39];
+    // corpus uses, for the reliance rule of I-D §7.5.1 4d. Entry 46 is the third of that kind
+    // and declares `ahl_version: "0.5"` besides, for the ordering rule of 4b: a chain element's
+    // phase-1 failure is `invalid` whatever revision it declares.
+    const NON_VERIFYING: [usize; 5] = [32, 33, 38, 39, 46];
     let vectors = statement_vectors();
     let keys = key_set(&vectors);
     for (index, vector) in vectors.iter().enumerate() {
@@ -1435,6 +1438,9 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         // would be blind to exactly the regression the vector exists to catch.
         "governance-key-statement-unsigned-common-field-must-fail.ahl" => {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
+        }
+        "statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl" => {
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 46 })
         }
         "governance-state-foreign-revision-key-must-fail.ahl"
         | "governance-state-foreign-revision-manifest-must-fail.ahl"
@@ -2470,6 +2476,74 @@ fn a_verifying_foreign_revision_governance_entry_is_unverifiable_either_way() {
             "{name}: the entry at {index} must VERIFY, or it is the void case instead"
         );
     }
+}
+
+/// A `governance.chain[]` element's phase-1 failure is `invalid`, whatever revision it declares.
+///
+/// I-D §7.5.1 4b states the two rules in this order: "A `governance.chain[]` element is
+/// different: the receipt presents it as its own lineage, so its phase-1 failure is `invalid`",
+/// and the foreign-revision rule that follows applies to "A VERIFYING purported governance
+/// entry". Reading the version member before the signature is settled would let a receipt
+/// reduce any broken chain element to a capability gap by declaring a revision of its own.
+#[test]
+fn a_chain_hop_that_does_not_verify_is_invalid_whatever_revision_it_declares() {
+    let policy = trust_policy();
+
+    // Entries 44 and 46 are the same manifest shape at the same declared revision; only the
+    // signature differs, and only these two vectors' last hop differs with it.
+    let statements = statement_vectors();
+    let keys = key_set(&statements);
+    for (index, verifies) in [(44usize, true), (46, false)] {
+        let entry = &statements[index];
+        assert_eq!(entry["envelope"]["payload"]["ahl_version"], json!("0.5"), "entry {index}");
+        assert_eq!(entry["envelope"]["payload"]["type"], json!("manifest"), "entry {index}");
+        assert_eq!(
+            verify_envelope(&entry["envelope"], |key_id| keys.get(key_id).cloned())
+                .expect("well-formed envelope"),
+            verifies,
+            "entry {index}"
+        );
+    }
+
+    let (_, broken) =
+        read_receipt("statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl");
+    let report = verify_receipt_report(&broken, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid, "{:#?}", report.findings);
+    let governance = report.finding(Assertion::Governance).expect("governance finding");
+    assert_eq!(governance.outcome, Outcome::Invalid);
+    assert_eq!(governance.rests_on, None, "the cause, not a derivation");
+    assert_eq!(
+        report.dominating().map(|finding| finding.assertion),
+        Some(Assertion::Governance),
+        "{:#?}",
+        report.findings
+    );
+    assert!(
+        matches!(
+            verify_receipt(&broken, &policy),
+            Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: 46 })
+        ),
+        "the failure is named at the hop's own index: {:?}",
+        verify_receipt(&broken, &policy)
+    );
+    // Nothing here is a capability gap: the revision the hop declares never gets to soften the
+    // signature failure, so no finding may be `unverifiable`.
+    assert!(
+        report.findings.iter().all(|finding| finding.outcome != Outcome::Unverifiable),
+        "{:#?}",
+        report.findings
+    );
+
+    // And the VERIFYING hop of the same revision is untouched: still a gap, still not a defect.
+    let (_, verifying) =
+        read_receipt("statement-anchored-foreign-revision-chain-hop-must-fail.ahl");
+    let report = verify_receipt_report(&verifying, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable, "{:#?}", report.findings);
+    assert_eq!(
+        report.finding(Assertion::Governance).map(|finding| finding.outcome),
+        Some(Outcome::Unverifiable)
+    );
+    assert!(report.findings.iter().all(|finding| finding.outcome != Outcome::Invalid));
 }
 
 /// A carried statement of an unsupported revision is a gap, not the end of the run.

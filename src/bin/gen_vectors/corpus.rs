@@ -34,7 +34,7 @@ use crate::scenario::{
 pub const CONFORMING_TREE_PREFIX: usize = 37;
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 46] = [
+pub const NAMES: [&str; 47] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -81,6 +81,7 @@ pub const NAMES: [&str; 46] = [
     "43-ingestion-foreign-revision",
     "44-manifest-foreign-revision",
     "45-key-add-foreign-revision",
+    "46-manifest-foreign-revision-unsigned",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -1063,12 +1064,30 @@ impl Corpus {
         foreign_key_payload["ahl_version"] = json!("0.5");
         let env_45 = envelope(foreign_key_payload, &keys.producer_1);
 
+        // --- entry 46: a foreign-revision `manifest` whose signature does NOT verify --------
+        // The two halves of 4b's governance-entry rule meet here. A `governance.chain[]` element
+        // "is different: the receipt presents it as its own lineage, so its phase-1 failure is
+        // `invalid`", and the foreign-revision rule that follows opens with "A VERIFYING
+        // purported governance entry". This entry is well formed as a manifest version and
+        // declares `ahl_version: "0.5"`, but nothing signs it — so a receipt carrying it as a
+        // chain hop is `invalid` on the signature, and the revision it declares never gets to
+        // soften that to a capability gap. Anchored, like the rest, past every other vector's
+        // range.
+        let mut foreign_unsigned_payload =
+            manifest(keys, &log_id, adaptor_hash, 46, Some(&entry_id(&env_25)));
+        foreign_unsigned_payload["ahl_version"] = json!("0.5");
+        let mut env_46 = envelope(foreign_unsigned_payload, &keys.producer_1);
+        env_46["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
+
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
             env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32, env_33,
             env_34, env_35, env_36, env_37, env_38, env_39, env_40, env_41, env_42, env_43, env_44,
-            env_45,
+            env_45, env_46,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -1126,6 +1145,8 @@ impl Corpus {
             (45, 25),
             // cp46 reaches the foreign-revision `key` statement at entry 45 as well.
             (46, 25),
+            // cp47 reaches the unsigned foreign-revision manifest at entry 46.
+            (47, 25),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
@@ -1153,7 +1174,8 @@ impl Corpus {
                     43 => "cp43",
                     44 => "cp44",
                     45 => "cp45",
-                    _ => "cp46",
+                    46 => "cp46",
+                    _ => "cp47",
                 },
                 checkpoint: cp,
                 witness_id,
@@ -1434,7 +1456,7 @@ impl Corpus {
         // Entries 38 and 39 join them: a purported `key` statement and a purported `manifest`
         // whose signatures do not verify, anchored past every checkpoint the rest of the corpus
         // uses, for the reliance rule of I-D §7.5.1 4d.
-        const NON_VERIFYING_ENTRIES: [usize; 4] = [32, 33, 38, 39];
+        const NON_VERIFYING_ENTRIES: [usize; 5] = [32, 33, 38, 39, 46];
         for (index, env) in self.envelopes.iter().enumerate() {
             if NON_VERIFYING_ENTRIES.contains(&index) {
                 continue;
@@ -1854,6 +1876,21 @@ impl Corpus {
                      that does not verify is VOID (I-D §2.1, §7.5.1 4b and 4d): not inducted, no \
                      effect on the key state, reported as an informative item. See \
                      governance-state-void-governance-entries.ahl."
+                );
+            }
+            if index == 46 {
+                // A chain hop that is both: a foreign revision AND a signature no key produced.
+                // I-D §7.5.1 4b orders the two rules — "A `governance.chain[]` element is
+                // different: the receipt presents it as its own lineage, so its phase-1 failure
+                // is `invalid`", and the foreign-revision rule that follows applies to "A
+                // VERIFYING purported governance entry" — so the signature settles this one and
+                // the revision it declares never softens it to a capability gap.
+                vector["note"] = json!(
+                    "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against \
+                     `signatures[0].key_id`'s real public key, and the payload declares \
+                     `ahl_version: \"0.5\"` besides. As a `governance.chain[]` element this is \
+                     `invalid` on the signature (I-D §7.5.1 4b), not `unverifiable` on the \
+                     revision. See statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl."
                 );
             }
             if index == 33 {

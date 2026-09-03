@@ -280,6 +280,12 @@
       "entry_index": 45,
       "leaf_hash": "sha256:c767d77373b8285f90f2cf71f6db2b0f5ce52d5b3e0cf5b01bc0cea1ee738c4f",
       "name": "45-key-add-foreign-revision"
+    },
+    {
+      "entry_id": "sha256:21a68fffdb56a8e0f0037d69da8c78934b777aa9d8ebddab1021692405640401",
+      "entry_index": 46,
+      "leaf_hash": "sha256:751b4057527d5708515ee6924fa9801d5746d69a346e658114bbb321ffb1cf86",
+      "name": "46-manifest-foreign-revision-unsigned"
     }
   ],
   "inclusion": {
@@ -392,6 +398,11 @@
       "name": "cp46",
       "root": "sha256:f7229d54f3a44a6eec2497adca4b70f207d0fe6deb5ab000d8a9770ad30c1d83",
       "tree_size": 46
+    },
+    {
+      "name": "cp47",
+      "root": "sha256:b1645030d490104f4efa3831b80b38e0010ebf47257878100178e1dd4844fb73",
+      "tree_size": 47
     }
   ]
 }

@@ -4031,20 +4031,28 @@ fn read_chain<'a>(
         walked_indexes.insert(index);
 
         let payload = payload_of(envelope)?;
-        // §7.5 step 1 puts the version read before this statement is validated, and §7.1 says
-        // what an unsupported one means: it "is `unverifiable` as for any carried statement".
-        // For a governance statement 4b says what follows — "not inducted, K is unestablished at
-        // and after its index, the governance finding is `unverifiable`... and the scalar result
-        // is reduced under Section 7.7 — a later required `invalid` still dominates" — so the
-        // walk stops with the prefix state it has established and the run carries on. Ending it
-        // would make that last clause unreachable.
+        // I-D §7.5.1 4b: "A `governance.chain[]` element is different: the receipt presents it
+        // as its own lineage, so its phase-1 failure is `invalid`." Phase 1 therefore runs
+        // before the version member is ACTED on. The foreign-revision rule below opens with "A
+        // VERIFYING purported governance entry", so a hop whose signature is corrupted, whose
+        // signer is not active at that index, or that carries no usable signature at all is a
+        // defect of the receipt whatever revision it declares — reducing it to `unverifiable`
+        // would let a broken lineage hide behind a version member. Reading the member early is
+        // fine; acting on it before the signature is settled is not.
+        verify_governance_phase_1(envelope, &manifests, &events, index, mode, run)?;
+
+        // Verifying, so the version read is now due. §7.1: an unsupported one "is
+        // `unverifiable` as for any carried statement". For a governance statement 4b says what
+        // follows — "not inducted, K is unestablished at and after its index, the governance
+        // finding is `unverifiable`... and the scalar result is reduced under Section 7.7 — a
+        // later required `invalid` still dominates" — so the walk stops with the prefix state it
+        // has established and the run carries on. Ending it would make that last clause
+        // unreachable.
         if let Err(error @ ReceiptError::UnsupportedVersion { .. }) = check_ahl_version(payload) {
             run.record_gap(error);
             unestablished_from = Some(index);
             break;
         }
-
-        verify_governance_phase_1(envelope, &manifests, &events, index, mode, run)?;
 
         // "A failure at phase 1 or phase 2 is invalid, and the induction does not continue past
         // it. No effect is ever applied to K by a statement that has not completed both

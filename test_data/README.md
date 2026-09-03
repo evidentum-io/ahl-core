@@ -260,7 +260,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 ## The scenarios
 
-The corpus is 46 anchored entries carrying these interlocking scenarios:
+The corpus is 47 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -389,9 +389,19 @@ ordinary artifact of a real log rather than something a producer must manufactur
    `governance-state-foreign-revision-entry-must-fail.ahl` (over cp44), on `envelope-validity`,
    the assertion of the sweep that met it. In each case the run continues: 4b ends "a later
    required `invalid` still dominates", and the tests pair every path with a §7.6 disagreement
-   that does exactly that while the gap stays reported beside it. All eight entries sit past
-   every checkpoint the rest of the corpus anchors at, so no other vector's range reaches
-   them.
+   that does exactly that while the gap stays reported beside it.
+
+   Which of 4b's two rules applies is settled by the ORDER they are stated in. A
+   `governance.chain[]` element "is different: the receipt presents it as its own lineage, so
+   its phase-1 failure is `invalid`", and only then does the foreign-revision rule apply — to "A
+   VERIFYING purported governance entry". Entry 46 is the pair to entry 44 that shows it: the
+   same manifest shape at the same declared revision, carrying a signature no key produced.
+   `statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl` hangs it off the same
+   chain position and is `invalid` on `governance`, naming the signature at entry 46 — a
+   verifier that read the revision member first would report a broken lineage as its own
+   capability gap, and any unsigned chain element could then hide behind a version its receipt
+   made up. All nine entries sit past every checkpoint the rest of the corpus anchors at, so no
+   other vector's range reaches them.
 
 12. **Input-set trees take the §2.7 tree rules.** I-D §2.7 states one set of rules, "identical
    for every AHL tree — outputs, input sets, and dispositions". Entry 37 is a batch whose three

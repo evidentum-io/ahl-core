@@ -422,6 +422,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp44 = corpus.anchor("cp44");
     let cp45 = corpus.anchor("cp45");
     let cp46 = corpus.anchor("cp46");
+    let cp47 = corpus.anchor("cp47");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -2345,10 +2346,11 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    at entry 44 having ESTABLISHED the prefix state — genesis and version 2 — \
                    which is what the subject at entry 26 is verified against, and every check \
                    that would need a key at or after 44 rests on `governance` instead. The \
-                   version read is where §7.5 step 1 puts it for a chain hop, before that \
-                   statement is validated, and what an unsupported one costs is this finding \
-                   rather than the end of the run: \"the scalar result is reduced under Section \
-                   7.7 — a later required `invalid` still dominates\"."
+                   hop VERIFIES, which is what the rule is about — \"A VERIFYING purported \
+                   governance entry\" — so phase 1 has already passed by the time the revision \
+                   is acted on, and what an unsupported one costs is this finding rather than \
+                   the end of the run: \"the scalar result is reduced under Section 7.7 — a \
+                   later required `invalid` still dominates\"."
                 .to_owned(),
         }
         .build(corpus, keys),
@@ -2356,6 +2358,42 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             rule: "I-D §7.5.1 4b / §7.1 — a chain hop of an unsupported revision leaves K \
                    unestablished from its index",
             matches: |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
+        },
+    });
+
+    // The same hop, unsigned: a chain element's phase-1 failure is `invalid` whatever revision
+    // it declares.
+    out.push(Vector {
+        file: "statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 26,
+            anchor: cp47,
+            chain: vec![0, 25, 46],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: None,
+            note: "MUST NOT VERIFY, for a DEFECT. The last hop is the manifest at entry 46: \
+                   well formed, declaring `ahl_version: \"0.5\"` exactly as the hop at entry 44 \
+                   does, and carrying a signature that does not verify. I-D §7.5.1 4b orders \
+                   these two rules: \"A `governance.chain[]` element is different: the receipt \
+                   presents it as its own lineage, so its phase-1 failure is `invalid`\", and \
+                   the foreign-revision rule that follows applies to \"A VERIFYING purported \
+                   governance entry\". So phase 1 settles this hop first and the receipt is \
+                   `invalid` on `governance`. A verifier that read the revision member first \
+                   would report a broken lineage as its own capability gap, and a receipt could \
+                   hide any unsigned chain element behind a version it made up."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4b — a chain element's phase-1 failure is invalid, whatever \
+                   revision it declares",
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 46 }),
         },
     });
 
