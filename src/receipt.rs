@@ -415,6 +415,21 @@ pub struct Finding {
     /// For an outcome other than [`Outcome::Verified`], what produced it: the rendered rule
     /// that fired, or the prerequisite assertion this one rests on.
     pub detail: Option<String>,
+    /// The assertion whose gap this finding INHERITS, where it has one.
+    ///
+    /// `None` — the finding is what its own check produced, and is therefore a CAUSE: the rule
+    /// that fired, the budget that ran out, the capability that was missing. `Some(assertion)`
+    /// — the check was not run, or could not be settled, because that other assertion was
+    /// `unverifiable`; the same fact is in [`Self::detail`] in prose, and here as a fact a
+    /// consumer can act on rather than parse.
+    ///
+    /// The distinction is what makes a report actionable. §7.8: "A verifier MUST report WHICH
+    /// budget was exhausted and the value that was in force"; §7.7: "a reader cannot act on
+    /// `unverifiable` without knowing what was missing". A reader taking the first
+    /// `unverifiable` finding in report order would be told "`versions` rests on
+    /// `resource-limits`", where the fact it needs — the budget and its value — is on the
+    /// `resource-limits` finding. [`Report::dominating`] uses this field to pick the cause.
+    pub rests_on: Option<Assertion>,
 }
 
 impl Finding {
@@ -451,6 +466,38 @@ pub struct Report {
 }
 
 impl Report {
+    /// The finding that decided the result — the one to lead a report with.
+    ///
+    /// §7.8: "A verifier MUST report WHICH budget was exhausted and the value that was in
+    /// force." §7.7: "a reader cannot act on `unverifiable` without knowing what was missing."
+    /// So the finding a consumer wants is the CAUSE, not a finding that merely inherited the
+    /// gap: the first `invalid` finding in report order, since `invalid` dominates the
+    /// reduction; otherwise the first `unverifiable` finding that its own check produced
+    /// ([`Finding::rests_on`] is `None`).
+    ///
+    /// Embedded receipts' findings are candidates on the same terms and in the order the report
+    /// lists them, except the ones that do not enter the reduction at all — an embedded
+    /// receipt's content binding (§7.7) cannot decide a result and so cannot be what decided
+    /// one.
+    ///
+    /// The final fallback — the first `unverifiable` finding whatever it rests on — should be
+    /// unreachable: an `unverifiable` result is reduced from at least one finding a check
+    /// produced, and every derived finding names a prerequisite that is itself in the report.
+    /// It is kept so that this function is total rather than silently returning `None` for a
+    /// non-`verified` result, and a test asserts that no corpus vector reaches it.
+    #[must_use]
+    pub fn dominating(&self) -> Option<&Finding> {
+        let counting = || self.findings.iter().filter(|finding| finding.counts_toward_result());
+        counting()
+            .find(|finding| finding.outcome == Outcome::Invalid)
+            .or_else(|| {
+                counting().find(|finding| {
+                    finding.outcome == Outcome::Unverifiable && finding.rests_on.is_none()
+                })
+            })
+            .or_else(|| counting().find(|finding| finding.outcome == Outcome::Unverifiable))
+    }
+
     /// The finding for one assertion of the receipt itself.
     #[must_use]
     pub fn finding(&self, assertion: Assertion) -> Option<&Finding> {
@@ -1736,7 +1783,13 @@ impl Run {
     /// assertion is settled more than once — a version read that passes for the subject and
     /// then fails for an enumerated statement is one `unverifiable` finding on `versions`, not
     /// two contradictory ones.
-    fn record(&mut self, assertion: Assertion, outcome: Outcome, detail: Option<String>) {
+    fn record(
+        &mut self,
+        assertion: Assertion,
+        outcome: Outcome,
+        detail: Option<String>,
+        rests_on: Option<Assertion>,
+    ) {
         if let Some(existing) = self
             .findings
             .iter_mut()
@@ -1745,10 +1798,17 @@ impl Run {
             if outcome > existing.outcome {
                 existing.outcome = outcome;
                 existing.detail = detail;
+                existing.rests_on = rests_on;
             }
             return;
         }
-        self.findings.push(Finding { assertion, outcome, receipt_path: self.path.clone(), detail });
+        self.findings.push(Finding {
+            assertion,
+            outcome,
+            receipt_path: self.path.clone(),
+            detail,
+            rests_on,
+        });
     }
 
     /// Enter the phase of the §7.5 algorithm that settles `assertion`.
@@ -1796,14 +1856,15 @@ impl Run {
         match unmet {
             Some(prerequisite) => {
                 let detail = format!("rests on `{prerequisite}`, which is unverifiable (I-D §7.7)");
-                self.record(assertion, Outcome::Unverifiable, Some(detail));
+                let prerequisite = *prerequisite;
+                self.record(assertion, Outcome::Unverifiable, Some(detail), Some(prerequisite));
                 // Dependence is transitive: an assertion left `unverifiable` by a gap is itself
                 // a prerequisite nothing further can be settled against.
                 if !self.blocked.contains(&assertion) {
                     self.blocked.push(assertion);
                 }
             }
-            None => self.record(assertion, Outcome::Verified, None),
+            None => self.record(assertion, Outcome::Verified, None, None),
         }
     }
 
@@ -1842,7 +1903,8 @@ impl Run {
             return Err(error);
         }
         let settled = self.attribute(&error);
-        self.record(settled, error.class(), Some(error.to_string()));
+        // A tolerated rejection is what its own check produced: a cause, never a derivation.
+        self.record(settled, error.class(), Some(error.to_string()), None);
         self.deferred.push((settled, self.path.clone(), error));
         // What this gap reaches is [`prerequisites`], and nothing else: I-D §7.7 wants the run
         // to carry on with every assertion that does not depend on the missing material.
@@ -1888,7 +1950,7 @@ impl Run {
             Err(error) => {
                 let stopped_at = self.attribute(&error);
                 let class = error.class();
-                self.record(stopped_at, class, Some(error.to_string()));
+                self.record(stopped_at, class, Some(error.to_string()), None);
                 if class == Outcome::Unverifiable {
                     self.fill_unreached(receipt, stopped_at);
                 }
@@ -1936,6 +1998,7 @@ impl Run {
                 assertion,
                 Outcome::Unverifiable,
                 Some(format!("rests on `{stopped_at}`, which is unverifiable (I-D §7.7)")),
+                Some(stopped_at),
             );
         }
     }
@@ -1943,23 +2006,24 @@ impl Run {
     /// The tolerated rejection that decided the result, for the callers that report one error
     /// rather than a report.
     ///
-    /// `invalid` first and `unverifiable` after it, which is the reduction's own order, and
-    /// only among findings that enter the reduction: an embedded receipt's content binding
-    /// never does (I-D §7.7).
+    /// The rule is [`Report::dominating`]'s, so the single-value API and the report name the
+    /// same thing: `invalid` first, then the first `unverifiable`, among the findings that enter
+    /// the reduction — an embedded receipt's content binding never does (I-D §7.7) — and in the
+    /// report's own order, by receipt path and then by [`Assertion::ORDER`]. Every rejection
+    /// here is one a check produced, so all of them are causes; the `rests_on` half of the rule
+    /// has nothing to exclude.
     fn dominating_deferred(self) -> Option<ReceiptError> {
-        let mut unverifiable = None;
-        for (assertion, path, error) in self.deferred {
-            if !counts_toward_result(assertion, &path) {
-                continue;
-            }
-            if error.class() == Outcome::Invalid {
-                return Some(error);
-            }
-            if unverifiable.is_none() {
-                unverifiable = Some(error);
-            }
-        }
-        unverifiable
+        let mut candidates: Vec<Tolerated> = self
+            .deferred
+            .into_iter()
+            .filter(|(assertion, path, _)| counts_toward_result(*assertion, path))
+            .collect();
+        candidates.sort_by(|(left, left_path, _), (right, right_path, _)| {
+            left_path.cmp(right_path).then_with(|| left.cmp(right))
+        });
+        let invalid = candidates.iter().position(|(_, _, error)| error.class() == Outcome::Invalid);
+        let chosen = invalid.or(if candidates.is_empty() { None } else { Some(0) })?;
+        Some(candidates.swap_remove(chosen).2)
     }
 
     const fn spend(&mut self, units: u64) -> Result<()> {
@@ -6672,7 +6736,7 @@ fn verify_embedded(
         // finding for every required assertion of the receipt it embeds, and a second
         // occurrence of one receipt is a second place a reader looks for them.
         for finding in findings {
-            run.record(finding.assertion, finding.outcome, finding.detail);
+            run.record(finding.assertion, finding.outcome, finding.detail, finding.rests_on);
         }
         verdict
     } else {

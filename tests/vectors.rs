@@ -2023,6 +2023,120 @@ fn an_unused_manifest_chain_key_entry_is_validated_anyway() {
     assert!(verify_receipt(&clean, &policy).is_ok());
 }
 
+/// The dominating finding is the CAUSE, not whatever the report happens to list first.
+///
+/// I-D §7.8: "A verifier MUST report WHICH budget was exhausted and the value that was in
+/// force." I-D §7.7: "a reader cannot act on `unverifiable` without knowing what was missing."
+/// A run that ends on an exhausted budget reports every assertion it never settled as resting
+/// on `resource-limits`, and those findings sort ahead of it — so the finding that carries the
+/// budget and its value is the one `Report::dominating` must return.
+#[test]
+fn the_dominating_finding_names_the_budget_that_was_exhausted() {
+    let (_, receipt) = read_receipt("disposition-effective-valid.ahl");
+
+    for (limits, budget, value) in [
+        (Limits { max_work_units: 2, ..Limits::default() }, "verification work units", "2"),
+        (Limits { max_decoded_bytes: 1024, ..Limits::default() }, "decoded size in bytes", "1024"),
+    ] {
+        let policy = TrustPolicy { limits, ..trust_policy() };
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(report.result, Outcome::Unverifiable, "{budget}");
+
+        let dominating = report.dominating().expect("a non-verified result has a cause");
+        assert_eq!(dominating.assertion, Assertion::ResourceLimits, "{budget}");
+        assert_eq!(dominating.rests_on, None, "the cause rests on nothing");
+        let detail = dominating.detail.as_ref().expect("the rule that fired");
+        assert!(detail.contains(budget), "the finding must name the budget: {detail}");
+        assert!(detail.contains(value), "the finding must carry the value in force: {detail}");
+
+        // Every OTHER unverifiable finding is a derivation, and says so structurally rather
+        // than only in prose — including the ones that sort ahead of the cause.
+        for finding in &report.findings {
+            if finding.outcome == Outcome::Unverifiable
+                && finding.assertion != Assertion::ResourceLimits
+            {
+                assert_eq!(
+                    finding.rests_on,
+                    Some(Assertion::ResourceLimits),
+                    "{finding:?} inherited the gap and must name it"
+                );
+            }
+        }
+        // The single-value form agrees with the report.
+        let error = verify_receipt(&receipt, &policy).expect_err("the budget is exhausted");
+        assert!(matches!(error, ReceiptError::BudgetExhausted { .. }), "{error}");
+    }
+}
+
+/// The same rule where the gap is a capability rather than a budget, and where a defect sits
+/// beside one: `invalid` dominates, and among `unverifiable` findings the cause wins.
+#[test]
+fn the_dominating_finding_is_the_cause_and_invalid_wins() {
+    let policy = trust_policy();
+
+    // I-D §7.4's declared-mode gap: the subject's envelope names a key the mode does not carry.
+    let (_, uncarried) = read_receipt("statement-anchored-uncarried-key-transition-must-fail.ahl");
+    let report = verify_receipt_report(&uncarried, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+    let dominating = report.dominating().expect("a non-verified result has a cause");
+    assert_eq!(dominating.assertion, Assertion::EnvelopeValidity);
+    assert_eq!(dominating.rests_on, None);
+
+    // An authority-dependent claim type over the same gap: its claim material rests on the
+    // envelope, and says which assertion it rests on rather than only saying so in prose.
+    let mut gapped = trust_policy();
+    gapped.adaptor_profiles.clear();
+    let (_, rotating) = read_receipt("trigger-effective-co-signed-by-authority.ahl");
+    let report = verify_receipt_report(&rotating, &gapped).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+    assert_eq!(
+        report.dominating().map(|finding| finding.assertion),
+        Some(Assertion::AdaptorProfile),
+        "the capability the verifier lacks is the cause: {:#?}",
+        report.findings
+    );
+    let claim_material = report.finding(Assertion::ClaimMaterial).expect("claim-material finding");
+    assert_eq!(claim_material.outcome, Outcome::Unverifiable);
+    assert!(
+        claim_material.rests_on.is_some(),
+        "a derived finding names the assertion it inherited from: {claim_material:?}"
+    );
+
+    // A defect beside a capability gap: `invalid` dominates (I-D §7.7's reduction).
+    let (_, defective) = read_receipt("record-ingested-content-mismatch-must-fail.ahl");
+    let report = verify_receipt_report(&defective, &gapped).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    let dominating = report.dominating().expect("an invalid result has a cause");
+    assert_eq!(dominating.outcome, Outcome::Invalid);
+    assert_eq!(dominating.assertion, Assertion::ContentBinding);
+    assert!(report.findings.iter().any(|finding| finding.outcome == Outcome::Unverifiable));
+}
+
+/// Every non-verified vector's dominating finding is a cause, never a derivation — the fallback
+/// arm of `Report::dominating` is unreachable across the corpus.
+#[test]
+fn every_non_verified_vector_has_a_dominating_cause() {
+    let policy = trust_policy();
+    for entry in receipt_index()["vectors"].as_array().expect("vectors") {
+        let expect = field_str(entry, "expect").expect("expect");
+        if expect == "verified" {
+            continue;
+        }
+        let name = field_str(entry, "file").expect("file");
+        let (_, receipt) = read_receipt(name);
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        let dominating =
+            report.dominating().unwrap_or_else(|| panic!("{name}: a result comes from a finding"));
+        assert_eq!(dominating.outcome, report.result, "{name}");
+        assert_eq!(dominating.rests_on, None, "{name}: the dominating finding is the cause");
+        assert_eq!(
+            dominating.assertion.name(),
+            field_str(entry, "finding").expect("finding"),
+            "{name}: the index names the dominating finding"
+        );
+    }
+}
+
 /// §7.6's `subject.manifest` rules hold whether or not the induction stopped.
 ///
 /// §7.6: "Each of the following is a disagreement among fields the receipt itself carries,
