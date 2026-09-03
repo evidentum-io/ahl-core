@@ -59,25 +59,48 @@ its content binding if and only if its own `assurance.content_binding` is not `n
 every required assertion of each embedded receipt, WITH ONE EXCEPTION: an embedded receipt's
 content binding is never a required assertion of the receipt that embeds it. This crate names
 them `versions`, `resource-limits`, `structure`, `adaptor-profile`, `anchoring`, `governance`,
-`checkpoint-authentication`, `envelope-validity`, `cross-field`, `claim-material` and
-`content-binding`, and reports one finding per assertion per receipt, embedded receipts under
-the `claim_material` member names that reach them.
+`checkpoint-authentication`, `witnesses`, `envelope-validity`, `cross-field`, `claim-material`
+and `content-binding`, and reports one finding per assertion per receipt, embedded receipts
+under the `claim_material` member names that reach them. Which assertion a rejection belongs to
+is decided by the PHASE of the §7.5 algorithm that raised it, not by the error type the check
+reached for: a malformed member is `structure` in the container, `governance` in a governance
+statement's phase-2 validation, and `claim-material` in claim material.
 
 The result is the reduction: `invalid` if any required finding is `invalid`, otherwise
 `unverifiable` if any is `unverifiable`, otherwise `verified`. An `invalid` finding ends the run
 — the result is decided, and the assertions after it are not reported at all — while an
-`unverifiable` finding does not: the run carries on so that a defect reached later still
-dominates, and the assertions that rest on the material it was short of are reported
-`unverifiable` naming that prerequisite. Two conditions end the run even so, both ordering rules
-rather than reductions: an unsupported version, which §7.5 step 1 follows with "no further
-processing", and an exhausted verifier-local budget, which §7.8 requires to fail closed. A
-boundary is rendered only for `verified`, and no result is ever expressed by rewriting the
-receipt's own assurance fields.
+`unverifiable` finding does not: the run carries on with every assertion that does not rest on
+the missing material, so that a defect reached later still dominates the gap. What each gap
+reaches is fixed rather than left to the order of the algorithm:
+
+| Unverifiable | What rests on it | What is still checked |
+| --- | --- | --- |
+| `adaptor-profile` (no profile held, one this build cannot interpret, a capability it does not define, a policy claiming one this build cannot parse) | `checkpoint-authentication`, `witnesses` — the profile document fixes the checkpoint serialization the signature is computed over | structure, paths, governance induction, envelope validity, cross-field, claim material, content binding |
+| `governance` (the configured genesis anchor differs, or the configured genesis key fingerprints do) | `envelope-validity`, `checkpoint-authentication`, `witnesses`, and the claim material of the authority-dependent types | structure, paths, the chain walk itself, cross-field, claim-material shape checks, content binding |
+| `witnesses` (a `local-policy` witness key the verifier does not hold) | nothing | everything else, the checkpoint signature included |
+| `envelope-validity` (a declared-mode producer-key transition the mode does not carry) | the claim material of the authority-dependent types (§7.5.1 4e is applied only to envelopes valid under 4d) | everything else |
+| `content-binding` (an unimplemented canonicalization procedure, a dataset key not held) | nothing | everything else |
+
+An assertion resting on an unverifiable one is itself `unverifiable`, with a detail naming that
+prerequisite. Two conditions end the run even so, both ordering rules rather than reductions: an
+unsupported version, which §7.5 step 1 follows with "no further processing", and an exhausted
+verifier-local budget, which §7.8 requires to fail closed. A boundary is rendered only for
+`verified`, and no result is ever expressed by rewriting the receipt's own assurance fields.
 
 `verify_receipt` remains as the single-value form for callers that report one rejection: `Ok`
 if and only if the result is `verified`, and otherwise the rejection behind the finding that
-decided it. `ReceiptError::class` gives the §7.7 value of one rejection and
-`ReceiptError::assertion` the assertion it belongs to, both exhaustive over the variants.
+decided it. `ReceiptError::class` gives the §7.7 value of one rejection, exhaustive over the
+variants; `ReceiptError::assertion` is the FALLBACK for a rejection examined outside a run,
+since inside one the assertion is the phase that raised it.
+
+The §7.8 FIXED limits are constants of the crate — `MAX_EMBEDDED_DEPTH` (4) and
+`MAX_EMBEDDED_RECEIPTS` (64) — and not members of the trust policy: they "are properties of the
+artifact, decided identically by every verifier in every year", and a verifier that could lower
+either would report `invalid` over a receipt another verifier verifies. `index.json`'s
+`policy.limits` therefore carries only the two VERIFIER-LOCAL budgets. Exceeding a fixed limit
+is `invalid` on the `structure` assertion, since the two "bound a receipt's STRUCTURE and not
+its size"; exhausting a budget is `unverifiable` on `resource-limits`, naming the budget and the
+value in force.
 
 Which conditions this build reports as `unverifiable` rather than `invalid`, and why:
 `UnsupportedVersion` (I-D §2.2, §7.5 step 1), `BudgetExhausted` (§7.8, naming the budget and
@@ -98,9 +121,12 @@ forecloses omission (§7.5.1 4c). The pair
 modes: the first is `unverifiable` — the corpus's one non-`invalid` negative — and the second
 verifies.
 
-Three capability gaps are exercised by `tests/vectors.rs` rather than by a vector, because what
+The capability gaps are exercised by `tests/vectors.rs` rather than by a vector, because what
 decides each of them is the verifier's own configuration rather than anything a portable vector
-can carry: a `keyed-authorized` binding under a policy holding no dataset key (I-D §7.7's own
+can carry — a policy holding no adaptor profile, another corpus's genesis anchor, no trusted
+witness key, no dataset key, or a tightened budget — and each is tested both alone (result
+`unverifiable`, the independent assertions `verified`) and together with a byte-decidable defect
+elsewhere (result `invalid`, the gap reported beside it). Among them: a `keyed-authorized` binding under a policy holding no dataset key (I-D §7.7's own
 worked example — result `unverifiable`, anchoring and claim material still `verified`, the
 content binding `unverifiable`), and each of the two verifier-local budgets of §7.8 exhausted
 under a tightened policy, which must name the budget and the value in force. The embedded-content

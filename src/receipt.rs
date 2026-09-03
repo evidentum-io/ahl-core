@@ -9,7 +9,9 @@
 //!
 //! A run that completes reaches exactly one of I-D §7.7's three values — [`Outcome::Verified`],
 //! [`Outcome::Invalid`], [`Outcome::Unverifiable`] — over the whole receipt, reduced from one
-//! [`Finding`] per required [`Assertion`]. A run that does NOT complete reaches none of them and
+//! [`Finding`] per required [`Assertion`]. Which assertion a rejection belongs to is the PHASE
+//! of the §7.5 algorithm that raised it; which assertions a capability gap reaches is
+//! [`prerequisites`], and the run carries on with the rest. A run that does NOT complete reaches none of them and
 //! is reported as [`ExecutionError`] instead, which is a statement about the verifier rather
 //! than about the receipt. [`verify_receipt`] is the single-value form of the same run, for
 //! callers that report one rejection rather than a report.
@@ -27,10 +29,10 @@
 //!
 //! Every rejection is a distinct [`ReceiptError`] variant naming the rule that fired, so a test
 //! can assert *which* rule rejected a deliberately malformed receipt rather than that "it
-//! failed somehow", and every variant carries its §7.7 value ([`ReceiptError::class`]) and the
-//! assertion it belongs to ([`ReceiptError::assertion`]). Resource exhaustion is a rejection,
-//! never a degraded acceptance (§3.1): a FIXED limit is `invalid` and a verifier-local budget is
-//! `unverifiable`, naming the budget and the value in force.
+//! failed somehow", and every variant carries its §7.7 value ([`ReceiptError::class`]).
+//! Resource exhaustion is a rejection, never a degraded acceptance (§3.1): a FIXED limit
+//! ([`MAX_EMBEDDED_DEPTH`], [`MAX_EMBEDDED_RECEIPTS`]) is `invalid` and a verifier-local budget
+//! ([`Limits`]) is `unverifiable`, naming the budget and the value in force.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -4886,10 +4888,12 @@ fn check_receipt_versions(receipt: &Value) -> Result<()> {
 /// How far the findings go depends on what stopped the run. An `invalid` finding decides the
 /// result, so the run ends there and the assertions after it are not reported at all. An
 /// `unverifiable` finding does not decide it — `invalid` still dominates — so the run carries
-/// on wherever the assertions left do not rest on the material it was short of, and where they
-/// do, each is reported `unverifiable` naming that prerequisite. Two conditions end the run
-/// even so: an unsupported version, which §7.5 step 1 follows with "no further processing", and
-/// an exhausted verifier-local budget, which §7.8 requires to fail closed.
+/// on with every assertion that does not rest on the material it was short of, which is what
+/// lets a defect reached later dominate a capability gap reached earlier. What each gap
+/// reaches is [`prerequisites`], and an assertion resting on an unverifiable one is itself
+/// `unverifiable` with a detail naming that prerequisite. Two conditions end the run even so:
+/// an unsupported version, which §7.5 step 1 follows with "no further processing", and an
+/// exhausted verifier-local budget, which §7.8 requires to fail closed.
 ///
 /// [`Report::verdict`] is present if and only if the result is [`Outcome::Verified`]: §7.7
 /// permits only that value to be "rendered in words that assert the property", and no result is
