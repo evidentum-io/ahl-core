@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 /// entry from a non-authority key alongside a non-verifying authority-named one. The two
 /// non-verifying fixtures sit at the tail so that enumerated material below them stays
 /// verifiable (I-D §7.5.1 4d).
-const STATEMENT_FILES: [&str; 41] = [
+const STATEMENT_FILES: [&str; 45] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -83,7 +83,11 @@ const STATEMENT_FILES: [&str; 41] = [
     "37-derivation-batch-defective-input-sets.json",
     "38-invalid-signature-key-add.json",
     "39-invalid-signature-manifest.json",
-    "40-key-add-foreign-revision.json",
+    "40-key-retire-producer-2-again.json",
+    "41-key-add-producer-2-verifying-copy.json",
+    "42-ingestion-customers-g-under-producer-2.json",
+    "43-manifest-foreign-revision.json",
+    "44-key-add-foreign-revision.json",
 ];
 
 /// The corpus prefix over which closure recomputation is defined.
@@ -235,10 +239,11 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
         if index == 34 {
             continue;
         }
-        // Entry 39 is a purported MANIFEST — a manifest statement declares no `manifest` member
-        // (spec §2.3.5) — carried by no chain and void for want of a verifying signature (I-D
+        // Entries 39 and 43 are purported MANIFESTS — a manifest statement declares no
+        // `manifest` member (spec §2.3.5) — carried by no chain: 39 void for want of a verifying
+        // signature, 43 verifying but declaring a revision this document does not define (I-D
         // §7.5.1 4b, 4d).
-        if index == 39 {
+        if index == 39 || index == 43 {
             continue;
         }
         // The manifest version id is the manifest statement's *statement id* (spec §2.3.5).
@@ -342,11 +347,28 @@ fn no_two_anchored_envelopes_share_a_statement_id() {
     // duplicates occur, the one with the smallest entry index governs and later ones are void."
     // A corpus that broke this could not demonstrate the rules it exists for — a vector
     // asserting that some later entry governs would be asserting the opposite of §2.1.
+    // One pair is deliberate, and it is the pair §2.1's rule does not reach: entry 38 is a
+    // purported `key` statement whose envelope does not verify and entry 41 is the same
+    // statement genuinely signed. §2.1 voids later duplicates among GOVERNING statements, and
+    // I-D §7.5.1 4b admits an enumeration-only entry to the induction "only if its envelope
+    // verifies in phase 1" — so the void copy governs nothing, occupies no statement id, and the
+    // verifying copy is inducted. Their ENTRY ids differ, since the signatures do.
+    const VOID_THEN_VERIFYING: [usize; 2] = [38, 41];
     let vectors = statement_vectors();
     let mut statements: BTreeMap<String, usize> = BTreeMap::new();
     let mut entries: BTreeMap<String, usize> = BTreeMap::new();
     for (index, vector) in vectors.iter().enumerate() {
         let sid = field_str(vector, "statement_id").expect("statement_id").to_owned();
+        if VOID_THEN_VERIFYING.contains(&index) {
+            statements.entry(sid).or_insert(index);
+            let eid = field_str(vector, "entry_id").expect("entry_id").to_owned();
+            assert!(
+                entries.insert(eid.clone(), index).is_none(),
+                "{}: even this pair carries distinct entry ids",
+                STATEMENT_FILES[index]
+            );
+            continue;
+        }
         if let Some(first) = statements.insert(sid.clone(), index) {
             panic!(
                 "{} and {} share statement id {sid}, which §2.1 voids the later of",
@@ -361,7 +383,9 @@ fn no_two_anchored_envelopes_share_a_statement_id() {
             );
         }
     }
-    assert_eq!(statements.len(), STATEMENT_FILES.len());
+    // One statement id fewer than entries: the void copy at 38 and the verifying copy at 41 are
+    // one statement, anchored twice, of which only the verifying one governs.
+    assert_eq!(statements.len(), STATEMENT_FILES.len() - 1);
     assert_eq!(entries.len(), STATEMENT_FILES.len());
 
     // The three retractions of record F that exist to exercise signature handling — the
@@ -1411,7 +1435,8 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "governance-key-statement-unsigned-common-field-must-fail.ahl" => {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
         }
-        "governance-state-foreign-revision-key-must-fail.ahl" => {
+        "governance-state-foreign-revision-key-must-fail.ahl"
+        | "governance-state-foreign-revision-manifest-must-fail.ahl" => {
             matches!(error, ReceiptError::UnsupportedVersion { field: "ahl_version", .. })
         }
         "governance-key-rotation-proof-witness-key-unlisted-must-fail.ahl" => {
@@ -2253,6 +2278,88 @@ fn every_vector_reports_the_void_entries_it_inspected() {
         assert_eq!(report.findings.len(), findings_before);
     }
     assert!(with_void >= 3, "the corpus must exercise the reliance rule, got {with_void}");
+}
+
+/// A void entry occupies no statement id, so a later verifying copy of the same statement is
+/// inducted and its effect applied.
+///
+/// I-D §2.1's first-wins rule voids "later ones" among GOVERNING statements, and §7.5.1 4b
+/// admits an enumeration-only entry to the induction "only if its envelope verifies in phase 1":
+/// a void entry never governs, so it claims nothing. The corpus anchors the same `key` statement
+/// twice — void at entry 38, genuinely signed at entry 41 — with entry 40 retiring the key in
+/// between, so the subject at entry 42 verifies only if the copy at 41 was inducted.
+#[test]
+fn a_void_entry_leaves_its_statement_id_free_for_a_verifying_copy() {
+    let policy = trust_policy();
+    let (_, receipt) = read_receipt("statement-anchored-void-then-verifying-key.ahl");
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    assert!(verify_receipt(&receipt, &policy).is_ok());
+
+    // The void copy is reported, and it is not the copy that governed.
+    assert!(
+        report.informative.iter().any(|item| item.entry_index == 38),
+        "the void copy is named by index: {:#?}",
+        report.informative
+    );
+    assert!(
+        !report.informative.iter().any(|item| item.entry_index == 41),
+        "the verifying copy is not void: {:#?}",
+        report.informative
+    );
+
+    // The two copies really are one statement, anchored twice.
+    let statements = statement_vectors();
+    assert_eq!(
+        field_str(&statements[38], "statement_id").expect("statement_id"),
+        field_str(&statements[41], "statement_id").expect("statement_id"),
+    );
+    assert_ne!(
+        field_str(&statements[38], "entry_id").expect("entry_id"),
+        field_str(&statements[41], "entry_id").expect("entry_id"),
+    );
+}
+
+/// A VERIFYING governance statement of a revision this document does not define is
+/// `unverifiable`, whichever path reaches it: the induction (a `key` statement) or the
+/// completeness check (a `manifest` absent from the chain).
+///
+/// I-D §7.5.1 4b: it "is not inducted, K is unestablished at and after its index, the governance
+/// finding is `unverifiable`". §7.4's omission rule reaches VERIFYING manifest entries OF THIS
+/// REVISION, so calling the manifest's absence an omission would report a statement this
+/// verifier cannot interpret as a defect of the receipt.
+#[test]
+fn a_verifying_foreign_revision_governance_entry_is_unverifiable_either_way() {
+    let policy = trust_policy();
+    for (name, index) in [
+        ("governance-state-foreign-revision-key-must-fail.ahl", 44usize),
+        ("governance-state-foreign-revision-manifest-must-fail.ahl", 43),
+    ] {
+        let (_, receipt) = read_receipt(name);
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(report.result, Outcome::Unverifiable, "{name}");
+        let governance = report.finding(Assertion::Governance).expect("governance finding");
+        assert_eq!(governance.outcome, Outcome::Unverifiable, "{name}");
+        assert_eq!(governance.rests_on, None, "{name}: the cause, not a derivation");
+        assert!(
+            governance.detail.as_ref().is_some_and(|detail| detail.contains("0.5")),
+            "{name}: the finding names the revision it cannot interpret: {governance:?}"
+        );
+        // Nothing is reported as a defect of the artifact.
+        assert!(
+            report.findings.iter().all(|finding| finding.outcome != Outcome::Invalid),
+            "{name}: {:#?}",
+            report.findings
+        );
+        // The statement really is at that index, and really does verify.
+        let statements = statement_vectors();
+        let keys = key_set(&statements);
+        assert!(
+            verify_envelope(&statements[index]["envelope"], |key_id| keys.get(key_id).cloned())
+                .expect("well-formed envelope"),
+            "{name}: the entry at {index} must VERIFY, or it is the void case instead"
+        );
+    }
 }
 
 /// The two vectors the erratum turns from `invalid` into `verified`, and what they now report.

@@ -418,7 +418,9 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp37 = corpus.anchor("cp37");
     let cp38 = corpus.anchor("cp38");
     let cp40 = corpus.anchor("cp40");
-    let cp41 = corpus.anchor("cp41");
+    let cp43 = corpus.anchor("cp43");
+    let cp44 = corpus.anchor("cp44");
+    let cp45 = corpus.anchor("cp45");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -2240,24 +2242,96 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Accept,
     });
 
+    // A void entry occupies no statement id, so a LATER verifying copy of the same statement is
+    // inducted and its effect applied.
+    out.push(Vector {
+        file: "statement-anchored-void-then-verifying-key.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 42,
+            anchor: cp43,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 43, cp43),
+            claim_material: json!({}),
+            producer_keys: Some(vec![
+                key_entry(&keys.producer_1, None, 25),
+                key_entry(&keys.producer_2, None, 41),
+            ]),
+            note: "The subject at entry 42 is an ingestion signed by `producer-2`, and the only \
+                   thing that puts that key in force at index 42 is the `key` statement at entry \
+                   41. Entry 40 retired it first, and entry 41 is BYTE-FOR-BYTE the statement \
+                   already anchored at entry 38 — where its envelope does not verify. I-D §2.1's \
+                   first-wins rule is about GOVERNING statements, and §7.5.1 4b admits an \
+                   enumeration-only entry to the induction \"only if its envelope verifies in \
+                   phase 1\": the void copy at 38 governs nothing and occupies nothing, so the \
+                   verifying copy at 41 is inducted and its effect applied. A verifier that \
+                   claimed the statement id when it voided the first copy would skip the second \
+                   as a duplicate, leave `producer-2` retired, and reject this receipt's subject \
+                   envelope. Four void entries are reported as informative items — 32, 33, 38 \
+                   and 39 — and none of them changes the result."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    // The manifest analogue of the foreign-revision `key` statement: a different path through
+    // the verifier — completeness (4c) rather than the induction (4b) — and the same outcome.
+    out.push(Vector {
+        file: "governance-state-foreign-revision-manifest-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "governance-state",
+            subject_index: 25,
+            anchor: cp44,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 44, cp44),
+            claim_material: json!({ "target_index": 26 }),
+            producer_keys: None,
+            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 43: a manifest \
+                   version genuinely signed by `producer-1`, absent from `governance.chain[]`, \
+                   and declaring `ahl_version: \"0.5\"`. A verifier that checked completeness \
+                   before revision would call that absence an omission and report `invalid` — a \
+                   defect of the receipt — when what it has found is a statement of a revision \
+                   this document does not define. I-D §7.5.1 4b settles it: such an entry \"is \
+                   not inducted, K is unestablished at and after its index, the governance \
+                   finding is `unverifiable`\". §7.4's omission rule reaches VERIFYING manifest \
+                   entries of THIS revision, and this is not one."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4b / §7.4 — a verifying governance entry of an unsupported \
+                   revision is not an omission",
+            matches: |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
+        },
+    });
+
     // And the entry that VERIFIES while declaring a revision this document does not define.
     out.push(Vector {
         file: "governance-state-foreign-revision-key-must-fail.ahl",
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
-            anchor: cp41,
+            anchor: cp45,
             chain: vec![0, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 41, cp41),
+            currency_material: corpus.enumeration(0, 45, cp45),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
-            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 41's \
-                   predecessor at index 40: a `key` statement genuinely signed by `producer-1` \
-                   that declares `ahl_version: \"0.5\"`. I-D §7.5.1 4b: \"A VERIFYING purported \
+            note: "MUST NOT VERIFY, and not for a defect. The range reaches the `key` statement \
+                   at entry 44: genuinely signed by `producer-1`, and declaring \
+                   `ahl_version: \"0.5\"`. I-D §7.5.1 4b: \"A VERIFYING purported \
                    governance entry that declares an `ahl_version` this revision does not define \
                    is neither: it is not inducted, K is unestablished at and after its index, \
                    the governance finding is `unverifiable` (Section 2.2), every K-dependent \

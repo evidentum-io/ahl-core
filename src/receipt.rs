@@ -3909,14 +3909,6 @@ fn read_chain<'a>(
             key_cursor += 1;
             check_merged_order(walked_index, index)?;
             walked_index = index;
-            // §2.1 again, over the other stream: a `key` statement anchored a second time
-            // governs nothing, and applying its effect twice would change the key state from
-            // the duplicate's index onward. It is still a carried envelope, and 4d verifies it
-            // where every other enumerated envelope is verified — the enumerated sweep exempts
-            // the indexes the induction WALKED, and this is not one of them.
-            if !governing_ids.insert(statement_id(envelope)?) {
-                continue;
-            }
             // I-D §7.5.1 4b: an entry the enumeration alone reveals "is selected for the walk
             // by its purported `type`, but it ENTERS the induction only if its envelope verifies
             // in phase 1 under K as established so far: a purported `manifest` or `key` entry
@@ -3941,7 +3933,17 @@ fn read_chain<'a>(
                 );
                 continue;
             }
+            // Verified here, so 4d's sweep need not verify it again: one carried envelope, one
+            // check, one charge against the §7.8 work budget.
             walked_indexes.insert(index);
+            // §2.1's first-wins rule is about GOVERNING statements, and a void entry is never
+            // one: it occupies no statement id, so a LATER verifying copy of the same statement
+            // is still inducted. The claim is therefore made only now, after phase 1 passed.
+            if !governing_ids.insert(statement_id(envelope)?) {
+                // A verifying duplicate governs nothing (§2.1) and applies no effect, but it has
+                // been verified just above, which is all 4d asks of a carried envelope.
+                continue;
+            }
             // Verifying: the version read is now due, and an unsupported one is `unverifiable`
             // for a statement this document cannot interpret — "not inducted, K is unestablished
             // at and after its index, the governance finding is `unverifiable`". So the walk
@@ -6335,11 +6337,13 @@ fn enumerated_key_statements(enumeration: &Enumeration) -> Vec<(u64, &Value)> {
 /// established under the receipt's governance mode": a chain with a manifest missing has not
 /// established that version, and reporting the omission is more honest than reporting the key
 /// binding that fails downstream of it.
+/// Returns the entry index the walk must be treated as having stopped at, where the range
+/// reveals a VERIFYING governance statement of a revision this document does not define.
 fn check_manifest_completeness(
     enumeration: &Enumeration,
     governance: &Governance<'_>,
     run: &mut Run,
-) -> Result<()> {
+) -> Result<Option<u64>> {
     // What the CHAIN carries, not what the induction applied: an element skipped as a void
     // duplicate (I-D §2.1) is carried, and 4c asks whether the chain shows the range's manifests.
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
@@ -6357,13 +6361,26 @@ fn check_manifest_completeness(
             if !evaluate_envelope_at(envelope, governance, index, run)? {
                 continue;
             }
+            // It verifies — so before its absence is called an omission, its revision decides
+            // whether this document has anything to say about it at all. 4b: "A VERIFYING
+            // purported governance entry that declares an `ahl_version` this revision does not
+            // define is neither: it is not inducted, K is unestablished at and after its index,
+            // the governance finding is `unverifiable`." A statement this verifier cannot
+            // interpret is not one it can call missing from a chain, and §7.4's omission rule
+            // reaches verifying manifest entries OF THIS REVISION.
+            if let Err(error @ ReceiptError::UnsupportedVersion { .. }) =
+                check_ahl_version(payload_of(envelope)?)
+            {
+                run.tolerate::<()>(Err(error))?;
+                return Ok(Some(index));
+            }
             return Err(ReceiptError::GovernanceChainInvalid(format!(
                 "enumeration reveals a `manifest` statement at entry index {index} that the \
                  presented chain omits"
             )));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Enforce the §3 subject rule and the §2.3 `record_subject` match.

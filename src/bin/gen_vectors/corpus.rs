@@ -34,7 +34,7 @@ use crate::scenario::{
 pub const CONFORMING_TREE_PREFIX: usize = 37;
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 41] = [
+pub const NAMES: [&str; 45] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -75,7 +75,11 @@ pub const NAMES: [&str; 41] = [
     "37-derivation-batch-defective-input-sets",
     "38-invalid-signature-key-add",
     "39-invalid-signature-manifest",
-    "40-key-add-foreign-revision",
+    "40-key-retire-producer-2-again",
+    "41-key-add-producer-2-verifying-copy",
+    "42-ingestion-customers-g-under-producer-2",
+    "43-manifest-foreign-revision",
+    "44-key-add-foreign-revision",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -979,7 +983,55 @@ impl Corpus {
             base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
         ));
 
-        // --- entry 40: a VERIFYING `key` statement of a revision this document does not define
+        // --- entries 40-42: a void statement id is free for a later verifying copy ---------
+        // I-D §7.5.1 4b admits an enumeration-only entry to the induction "only if its envelope
+        // verifies in phase 1", and §2.1's first-wins rule is about GOVERNING statements — which
+        // a void entry never becomes. So the statement at entry 38, void for want of a
+        // signature, occupies nothing: the same statement, genuinely signed at entry 41, is
+        // inducted and its effect applied. Entry 40 retires `producer-2` first, so that the
+        // re-add at 41 is what puts the key back in force, and entry 42 is a subject whose own
+        // envelope needs it.
+        let env_40 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "retire",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": "2026-08-18T00:00:00Z",
+                },
+            }),
+            &keys.producer_1,
+        );
+        // Byte-for-byte the payload of entry 38 — the same statement id — genuinely signed.
+        let env_41 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "add",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": "2026-08-17T00:00:00Z",
+                },
+            }),
+            &keys.producer_1,
+        );
+        let env_42 =
+            signed("ingestion", &m2, ingest(&r.h, "2026-08-18/customers-07"), &keys.producer_2);
+
+        // --- entry 43: a VERIFYING `manifest` of a revision this document does not define ---
+        // The manifest analogue of entry 44 below, and it takes a different path through the
+        // verifier: a manifest is not selected for the induction by `enumerated_key_statements`,
+        // so what meets it is I-D §7.5.1 4c's completeness check — which must read its revision
+        // before calling its absence from `governance.chain[]` an omission.
+        let mut foreign_manifest_payload =
+            manifest(keys, &log_id, adaptor_hash, 43, Some(&entry_id(&env_25)));
+        foreign_manifest_payload["ahl_version"] = json!("0.5");
+        let env_43 = envelope(foreign_manifest_payload, &keys.producer_1);
+
+        // --- entry 44: a VERIFYING `key` statement of a revision this document does not define
         // The other half of 4b's rule: "A VERIFYING purported governance entry that declares an
         // `ahl_version` this revision does not define is neither: it is not inducted, K is
         // unestablished at and after its index, the governance finding is `unverifiable`."
@@ -998,13 +1050,13 @@ impl Corpus {
             }),
         );
         foreign_key_payload["ahl_version"] = json!("0.5");
-        let env_40 = envelope(foreign_key_payload, &keys.producer_1);
+        let env_44 = envelope(foreign_key_payload, &keys.producer_1);
 
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
             env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32, env_33,
-            env_34, env_35, env_36, env_37, env_38, env_39, env_40,
+            env_34, env_35, env_36, env_37, env_38, env_39, env_40, env_41, env_42, env_43, env_44,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -1051,8 +1103,13 @@ impl Corpus {
             // entries 38 and 39, whose envelopes do not verify, and stops short of the
             // foreign-revision `key` statement at entry 40.
             (40, 25),
-            // cp41 reaches that one too.
-            (41, 25),
+            // cp43 reaches the re-add at entry 41 and the subject at 42, and stops short of the
+            // two foreign-revision statements.
+            (43, 25),
+            // cp44 reaches the foreign-revision MANIFEST at entry 43.
+            (44, 25),
+            // cp45 reaches the foreign-revision `key` statement at entry 44 as well.
+            (45, 25),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
@@ -1077,7 +1134,9 @@ impl Corpus {
                     37 => "cp37",
                     38 => "cp38",
                     40 => "cp40",
-                    _ => "cp41",
+                    43 => "cp43",
+                    44 => "cp44",
+                    _ => "cp45",
                 },
                 checkpoint: cp,
                 witness_id,
@@ -1305,11 +1364,28 @@ impl Corpus {
     /// asserting that some later entry governs would be asserting the opposite of §2.1, and no
     /// reader could tell the intended lesson from the accident. Entry ids are checked too — two
     /// envelopes sharing one would be one anchored entry counted twice.
+    ///
+    /// ONE pair is deliberate, and it is the one §2.1's rule does not reach: entry 38 is a
+    /// purported `key` statement whose envelope does not verify, and entry 41 is the same
+    /// statement genuinely signed. §2.1 voids "the envelope with the smallest entry index
+    /// governs and later ones are void" among GOVERNING statements, and I-D §7.5.1 4b admits an
+    /// enumeration-only entry to the induction "only if its envelope verifies in phase 1" — a
+    /// void entry never governs, so it occupies no statement id and the later verifying copy is
+    /// the one that governs. Their ENTRY ids still differ, since the signatures do.
     fn check_statement_ids_are_unique(&self) {
+        const VOID_THEN_VERIFYING: [usize; 2] = [38, 41];
         let mut statements: BTreeMap<String, usize> = BTreeMap::new();
         let mut entries: BTreeMap<String, usize> = BTreeMap::new();
         for (index, env) in self.envelopes.iter().enumerate() {
             let sid = statement_id(env).expect("well-formed envelope");
+            if VOID_THEN_VERIFYING.contains(&index) {
+                statements.entry(sid).or_insert(index);
+                let eid = entry_id(env);
+                if let Some(first) = entries.insert(eid.clone(), index) {
+                    panic!("entries {first} and {index} share entry id {eid}");
+                }
+                continue;
+            }
             if let Some(first) = statements.insert(sid.clone(), index) {
                 panic!(
                     "entries {first} and {index} share statement id {sid}: spec §2.1 voids the \

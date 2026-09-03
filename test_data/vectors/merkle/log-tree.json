@@ -246,10 +246,34 @@
       "name": "39-invalid-signature-manifest"
     },
     {
-      "entry_id": "sha256:9007fbc2e7d75a183e7a1673671c673b91984212e494a3dd9b7f0a68b3b98f3f",
+      "entry_id": "sha256:b824daee314fc503c5cf04a0033ab7e3dcc93f26f2e97f0e435eabfb4a59417c",
       "entry_index": 40,
+      "leaf_hash": "sha256:0208d3382bf4e05fbfe28336cf545f5a1070fe8308fa84867c55493d7f5f06b6",
+      "name": "40-key-retire-producer-2-again"
+    },
+    {
+      "entry_id": "sha256:9d8bb769314f2eb02c36c4d2291b65f91b4f67d899aa3e8ba986a912b565a162",
+      "entry_index": 41,
+      "leaf_hash": "sha256:e2c55e9208ce18eabb471b82f1818d791ea611dfaf20c98857d132b383b25700",
+      "name": "41-key-add-producer-2-verifying-copy"
+    },
+    {
+      "entry_id": "sha256:4b245e60c0f3162a33ae17e265c5a2ddd8c15b6ade7ee2145a23b4226d2a7a52",
+      "entry_index": 42,
+      "leaf_hash": "sha256:82875799ad72139980c7456b829a6efb002125e1df59f78531b293ec84d41690",
+      "name": "42-ingestion-customers-g-under-producer-2"
+    },
+    {
+      "entry_id": "sha256:905cb0a137ec1dc279230872dd18d55d366f4a74f83c250e5c0cc57117e29853",
+      "entry_index": 43,
+      "leaf_hash": "sha256:4bdcaa037c1ada9d6878a8665f6a148802845d06f994cb7bcb1939b4f2325515",
+      "name": "43-manifest-foreign-revision"
+    },
+    {
+      "entry_id": "sha256:9007fbc2e7d75a183e7a1673671c673b91984212e494a3dd9b7f0a68b3b98f3f",
+      "entry_index": 44,
       "leaf_hash": "sha256:c767d77373b8285f90f2cf71f6db2b0f5ce52d5b3e0cf5b01bc0cea1ee738c4f",
-      "name": "40-key-add-foreign-revision"
+      "name": "44-key-add-foreign-revision"
     }
   ],
   "inclusion": {
@@ -344,9 +368,19 @@
       "tree_size": 40
     },
     {
-      "name": "cp41",
-      "root": "sha256:f030a346e6a266dcc8d551934af317b46964e8aca871272b0efb5d24ced63bf1",
-      "tree_size": 41
+      "name": "cp43",
+      "root": "sha256:9d690ae8affd183cea7a4eedcb4398e0f5aed64988f03d14089871789ddb7264",
+      "tree_size": 43
+    },
+    {
+      "name": "cp44",
+      "root": "sha256:0a74fc40318ede02dfe06e747aa9de243c3395a5746215824ea28b9ca6ce35c7",
+      "tree_size": 44
+    },
+    {
+      "name": "cp45",
+      "root": "sha256:278e7bdbb9050d7107343f8b3e88422ef348b01199110cf2f57056c4269c0bfd",
+      "tree_size": 45
     }
   ]
 }
