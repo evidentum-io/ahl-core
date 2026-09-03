@@ -4212,12 +4212,27 @@ fn verify_content_binding(
     field: &'static str,
 ) -> Result<()> {
     let material = ctx.material()?;
+    // I-D §7.2, both record rows: the bytes and `canonicalization` are present "if and only if
+    // `content_binding` is not `none`, together with `media_type` if and only if the descriptor
+    // requires it". Presence is therefore settled from the assurance field alone, BEFORE any of
+    // the three members is read for its value. A descriptor carried under `none` is a receipt
+    // asserting evidence its own assurance says it has not got — §7.6: "a combination the type
+    // cannot satisfy is `invalid` rather than downgraded" — and ignoring it would let a
+    // receipt carry a descriptor that no check ever compares against the manifest's.
+    let has_bytes = material.get(field).is_some();
+    let has_canonicalization = material.get("canonicalization").is_some();
     if ctx.assurance.content_binding == "none" {
-        return if material.get(field).is_some() {
+        return if has_bytes || has_canonicalization || material.get("media_type").is_some() {
             Err(ReceiptError::AssuranceMismatch { field: "content_binding" })
         } else {
             Ok(())
         };
+    }
+    // Neither member is evidence without the other, so they stand or fall together: bytes with
+    // no descriptor cannot be canonicalized, and a descriptor with no bytes canonicalizes
+    // nothing. Whichever is absent is the one named.
+    if has_bytes != has_canonicalization {
+        return Err(if has_bytes { ctx.missing("canonicalization") } else { ctx.missing(field) });
     }
 
     let manifest_version_id = text(ctx.payload, "manifest")?;

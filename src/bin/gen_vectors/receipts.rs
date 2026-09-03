@@ -584,6 +584,109 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         },
     });
 
+    // --- content-evidence presence (I-D §7.2 record rows) ------------------------
+    // The bytes and `canonicalization` are carried "if and only if `content_binding` is not
+    // `none`", with `media_type` only where the descriptor requires it. Four vectors, one per
+    // way the biconditional can be broken: a descriptor or a media type carried under `none`,
+    // and either half of the pair carried without the other. None of them is a cryptographic
+    // failure — every commitment in each still matches, or would if the missing half were
+    // there — which is why the rule has to be enforced on presence rather than left to the
+    // recomputation to notice.
+    let evidence_shape = |content_binding: &'static str, material: Value, note: &str| {
+        Spec {
+            claim_type: "record-ingested",
+            subject_index: 1,
+            anchor: cp20,
+            chain: vec![0],
+            record_subject: customers(&r.c_a),
+            competing: "not-checked",
+            content_binding,
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: material,
+            producer_keys: None,
+            note: note.to_owned(),
+        }
+        .build(corpus, keys)
+    };
+
+    out.push(Vector {
+        file: "record-ingested-none-with-canonicalization-must-fail.ahl",
+        receipt: evidence_shape(
+            "none",
+            json!({ "canonicalization": CANONICALIZATION }),
+            "MUST FAIL. `assurance.content_binding` is `none`, so this receipt asserts no \
+             content evidence at all, and yet `claim_material` carries a canonicalization \
+             descriptor. I-D §7.2 makes the descriptor present IF AND ONLY IF the binding is \
+             not `none`. Nothing here is cryptographically wrong; what is wrong is that the \
+             carried descriptor is never compared against the manifest's declared one, because \
+             the `none` branch recomputes no commitment — so a verifier that ignored it would \
+             let a receipt carry an unchecked descriptor beside a claim that proves nothing \
+             about content.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.2 — `canonicalization` is present iff `content_binding` is not `none`",
+            matches: |e| matches!(e, ReceiptError::AssuranceMismatch { field: "content_binding" }),
+        },
+    });
+
+    out.push(Vector {
+        file: "record-ingested-none-with-media-type-must-fail.ahl",
+        receipt: evidence_shape(
+            "none",
+            json!({ "media_type": "application/json" }),
+            "MUST FAIL. Same rule as the descriptor case, for the descriptor's other member: \
+             `media_type` accompanies the carried descriptor and is admissible only where that \
+             descriptor requires it (I-D §2.6, §7.2). Under `content_binding: \"none\"` there \
+             is no carried descriptor for it to belong to.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.2 — `media_type` accompanies a carried descriptor, and `none` \
+                   carries none",
+            matches: |e| matches!(e, ReceiptError::AssuranceMismatch { field: "content_binding" }),
+        },
+    });
+
+    out.push(Vector {
+        file: "record-ingested-bytes-without-canonicalization-must-fail.ahl",
+        receipt: evidence_shape(
+            "keyed-authorized",
+            json!({ "record_bytes": base64(&r.c_a_bytes_as_received) }),
+            "MUST FAIL. The bytes are the genuine record A as received, and they would \
+             recompute to the anchored commitment — but no descriptor is carried, and I-D §7.2 \
+             pairs the two members. `record_bytes` carries the record AS RECEIVED, so without \
+             a descriptor there is no canonicalization procedure to apply and no `ddig` for \
+             the preimage; a verifier that fell back on the manifest's descriptor would be \
+             recomputing under a descriptor the receipt never claimed.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.2 — the bytes and `canonicalization` are carried together or not at \
+                   all",
+            matches: |e| {
+                matches!(e, ReceiptError::ClaimMaterialMissing { field: "canonicalization", .. })
+            },
+        },
+    });
+
+    out.push(Vector {
+        file: "record-ingested-canonicalization-without-bytes-must-fail.ahl",
+        receipt: evidence_shape(
+            "keyed-authorized",
+            json!({ "canonicalization": CANONICALIZATION }),
+            "MUST FAIL. The other half of the same pair: the descriptor is carried, matches \
+             the manifest's declared one exactly, and there are no bytes for it to \
+             canonicalize. The receipt asserts `keyed-authorized` content binding while \
+             carrying nothing that could be bound, which I-D §7.2 makes invalid rather than a \
+             binding silently downgraded to `none`.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.2 — a carried descriptor without the bytes proves no content binding",
+            matches: |e| {
+                matches!(e, ReceiptError::ClaimMaterialMissing { field: "record_bytes", .. })
+            },
+        },
+    });
+
     // --- record-derived (batch member, with input-set membership) ----------------
     let w1_leaf = leaf_index(corpus, &corpus.wide_outputs_root, &r.w1);
     let w2_leaf = leaf_index(corpus, &corpus.wide_outputs_root, &r.w2);

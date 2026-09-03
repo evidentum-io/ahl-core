@@ -82,6 +82,34 @@
       "rule": "I-D §2.2 / §7.6 — subject.manifest must be the manifest ACTIVE at subject.entry_index, not merely an earlier one"
     },
     {
+      "claim_type": "record-ingested",
+      "expect": "reject",
+      "file": "record-ingested-none-with-canonicalization-must-fail.ahl",
+      "reason": "assurance field `content_binding` overstates what the receipt proves",
+      "rule": "I-D §7.2 — `canonicalization` is present iff `content_binding` is not `none`"
+    },
+    {
+      "claim_type": "record-ingested",
+      "expect": "reject",
+      "file": "record-ingested-none-with-media-type-must-fail.ahl",
+      "reason": "assurance field `content_binding` overstates what the receipt proves",
+      "rule": "I-D §7.2 — `media_type` accompanies a carried descriptor, and `none` carries none"
+    },
+    {
+      "claim_type": "record-ingested",
+      "expect": "reject",
+      "file": "record-ingested-bytes-without-canonicalization-must-fail.ahl",
+      "reason": "claim material for `record-ingested` is missing `canonicalization`",
+      "rule": "I-D §7.2 — the bytes and `canonicalization` are carried together or not at all"
+    },
+    {
+      "claim_type": "record-ingested",
+      "expect": "reject",
+      "file": "record-ingested-canonicalization-without-bytes-must-fail.ahl",
+      "reason": "claim material for `record-ingested` is missing `record_bytes`",
+      "rule": "I-D §7.2 — a carried descriptor without the bytes proves no content binding"
+    },
+    {
       "boundary": "the subject derivation committed the named output record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "record-derived",
       "embedded_receipts": 0,

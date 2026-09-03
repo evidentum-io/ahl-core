@@ -1317,6 +1317,21 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl" => {
             matches!(error, ReceiptError::FormatConflict { .. })
         }
+        // I-D §7.2's record rows: the bytes and `canonicalization` are carried if and only if
+        // `content_binding` is not `none`, `media_type` only alongside a carried descriptor.
+        // Breaking the biconditional either way is `invalid`; the error distinguishes the two
+        // directions, since a member carried where the assurance forbids it overstates the
+        // claim, while a half-carried pair is material the claim type requires and lacks.
+        "record-ingested-none-with-canonicalization-must-fail.ahl"
+        | "record-ingested-none-with-media-type-must-fail.ahl" => {
+            matches!(error, ReceiptError::AssuranceMismatch { field: "content_binding" })
+        }
+        "record-ingested-bytes-without-canonicalization-must-fail.ahl" => {
+            matches!(error, ReceiptError::ClaimMaterialMissing { field: "canonicalization", .. })
+        }
+        "record-ingested-canonicalization-without-bytes-must-fail.ahl" => {
+            matches!(error, ReceiptError::ClaimMaterialMissing { field: "record_bytes", .. })
+        }
         // I-D §2.4.2 / §7.6: record identity is the `(dataset, record)` pair. Both vectors
         // carry an embedded introduction whose COMMITMENT matches the referencing material
         // exactly and whose DATASET does not, so a verifier comparing the commitment alone
