@@ -475,7 +475,7 @@
       "claim_type": "governance-state",
       "expect": "invalid",
       "file": "governance-key-rotation-proof-checkpoint-missing-log-id-must-fail.ahl",
-      "finding": "governance",
+      "finding": "structure",
       "reason": "malformed receipt: checkpoint log_id: REQUIRED, a `sha256:` family string in lowercase hex",
       "rule": "I-D §7.1 — the rotation-proof checkpoint takes the receipt-borne shape, log_id included"
     },

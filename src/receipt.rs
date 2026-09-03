@@ -4157,6 +4157,12 @@ fn check_governance_shapes(receipt: &Value) -> Result<()> {
                 &format!("governance.rotation_proofs[{position}]"),
                 &["manifest_entry_index", "checkpoint", "inclusion_path", "witnesses"],
             )?;
+            // I-D §7.1: the element's `checkpoint` is "a checkpoint in the receipt-borne form
+            // defined above", so its shape is one of "the family-string, arity, and ordering
+            // checks the container shapes of Section 7.1 require" that §7.5 step 3 settles —
+            // key-independent, decided before any induction, and reported as a structural
+            // failure rather than as a governance one. 4b(M) then reads a shape it can rely on.
+            checkpoint_object(obj(element, "checkpoint")?)?;
             let what = format!("governance.rotation_proofs[{position}].witnesses");
             for cosignature in cosignature_array(element, "witnesses", &what)? {
                 witness_cosignature_object(cosignature)?;
