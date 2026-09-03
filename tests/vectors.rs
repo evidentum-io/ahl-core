@@ -1832,19 +1832,21 @@ fn an_uncarried_key_transition_is_reported_as_the_prerequisite_it_is() {
     let envelope = report.finding(Assertion::EnvelopeValidity).expect("envelope-validity finding");
     assert_eq!(envelope.outcome, Outcome::Unverifiable);
 
-    for assertion in [Assertion::Anchoring, Assertion::Governance] {
+    // Nothing else rests on the subject's own envelope here: this claim type carries no
+    // material that tests authority (§7.5.1 4e), and every §7.6 rule is decidable from the
+    // receipt's own bytes. Reporting them as unverifiable would overstate what is missing.
+    for assertion in [
+        Assertion::Anchoring,
+        Assertion::Governance,
+        Assertion::CheckpointAuthentication,
+        Assertion::Witnesses,
+        Assertion::CrossField,
+        Assertion::ClaimMaterial,
+    ] {
         assert_eq!(
             report.finding(assertion).map(|finding| finding.outcome),
             Some(Outcome::Verified),
-            "{assertion} was settled before the gap and is unaffected"
-        );
-    }
-    for assertion in [Assertion::CrossField, Assertion::ClaimMaterial] {
-        let finding = report.finding(assertion).unwrap_or_else(|| panic!("{assertion} finding"));
-        assert_eq!(finding.outcome, Outcome::Unverifiable, "{assertion} rests on the gap");
-        assert!(
-            finding.detail.as_ref().is_some_and(|detail| detail.contains("envelope-validity")),
-            "an assertion resting on a prerequisite must name it: {finding:?}"
+            "{assertion} does not rest on the uncarried transition"
         );
     }
 }
@@ -1888,16 +1890,17 @@ fn one_variant_is_reported_under_the_assertion_whose_phase_raised_it() {
     }
 }
 
-/// A capability gap the run cannot continue past still reports the assertions it had settled,
-/// and reports the rest as resting on it rather than as having held.
+/// A capability gap does not end the run, and reaches exactly the assertions that rest on it.
 ///
 /// I-D §7.5 step 2: "If the verifier possesses NO profile under that id, it lacks a capability
-/// and the result is `unverifiable`." Nothing after step 2 can be settled without the profile —
-/// every path and every signature is read through it — so the run ends there, and §7.7's
-/// requirement to report the findings is met by saying which assertions were reached and which
-/// were not.
+/// and the result is `unverifiable`." What the profile document fixes is the checkpoint
+/// serialization, so checkpoint authentication and the witness cosignatures over it rest on it
+/// — and nothing else does. §7.5 step 3's paths are hash recomputations against the carried
+/// `root_hash`, the governance induction reads carried statements, and the §7.6 rules and the
+/// claim material are decidable from the receipt's own bytes. All of those are still checked,
+/// which is what lets a defect elsewhere still dominate the gap (§7.7's reduction).
 #[test]
-fn an_unreached_assertion_is_reported_as_resting_on_the_gap() {
+fn a_capability_gap_reaches_only_the_assertions_that_rest_on_it() {
     let mut policy = trust_policy();
     policy.adaptor_profiles.clear();
     let (_, receipt) = read_receipt("record-ingested-valid.ahl");
@@ -1908,22 +1911,8 @@ fn an_unreached_assertion_is_reported_as_resting_on_the_gap() {
         report.finding(Assertion::AdaptorProfile).map(|finding| finding.outcome),
         Some(Outcome::Unverifiable)
     );
-    // Settled before step 2, and unaffected by it.
-    assert_eq!(
-        report.finding(Assertion::Versions).map(|finding| finding.outcome),
-        Some(Outcome::Verified)
-    );
-    // Never reached, and reported as such rather than left out or claimed.
-    for assertion in [
-        Assertion::Anchoring,
-        Assertion::Governance,
-        Assertion::CheckpointAuthentication,
-        Assertion::EnvelopeValidity,
-        Assertion::CrossField,
-        Assertion::ClaimMaterial,
-        // Required here because this vector's own `assurance.content_binding` is not `none`.
-        Assertion::ContentBinding,
-    ] {
+    // What rests on it, and says so.
+    for assertion in [Assertion::CheckpointAuthentication, Assertion::Witnesses] {
         let finding = report.finding(assertion).unwrap_or_else(|| panic!("{assertion} finding"));
         assert_eq!(finding.outcome, Outcome::Unverifiable);
         assert!(
@@ -1931,12 +1920,45 @@ fn an_unreached_assertion_is_reported_as_resting_on_the_gap() {
             "{assertion} must name the prerequisite it rests on: {finding:?}"
         );
     }
+    // What does not, and was checked.
+    for assertion in [
+        Assertion::Versions,
+        Assertion::Structure,
+        Assertion::Anchoring,
+        Assertion::Governance,
+        Assertion::EnvelopeValidity,
+        Assertion::CrossField,
+        Assertion::ClaimMaterial,
+        // Required here because this vector's own `assurance.content_binding` is not `none`.
+        Assertion::ContentBinding,
+    ] {
+        assert_eq!(
+            report.finding(assertion).map(|finding| finding.outcome),
+            Some(Outcome::Verified),
+            "{assertion} does not rest on the adaptor profile and must be checked"
+        );
+    }
 
-    // An `invalid` result is the opposite case: it decides the result where it is reached, so
-    // the assertions after it are not reported at all rather than reported as unverifiable.
+    // And a defect elsewhere still dominates the gap, which is the whole reason the run carries
+    // on: `invalid` if any required finding is `invalid`, whichever was reached first.
     let (_, defective) = read_receipt("record-ingested-content-mismatch-must-fail.ahl");
     let report = verify_receipt_report(&defective, &policy).expect("the run completes");
-    assert_eq!(report.result, Outcome::Unverifiable, "no profile is held for this one either");
+    assert_eq!(report.result, Outcome::Invalid);
+    assert_eq!(
+        report.finding(Assertion::AdaptorProfile).map(|finding| finding.outcome),
+        Some(Outcome::Unverifiable),
+        "the gap is still reported beside the defect that dominates it"
+    );
+    assert_eq!(
+        report.finding(Assertion::ContentBinding).map(|finding| finding.outcome),
+        Some(Outcome::Invalid)
+    );
+}
+
+/// An `invalid` finding decides the result where it is reached, so the assertions after it are
+/// not reported at all rather than reported as unverifiable.
+#[test]
+fn an_invalid_result_reports_no_assertion_the_run_never_reached() {
     let (_, defective) =
         read_receipt("statement-anchored-continued-history-wrong-pair-must-fail.ahl");
     let report = verify_receipt_report(&defective, &trust_policy()).expect("the run completes");
@@ -1944,6 +1966,126 @@ fn an_unreached_assertion_is_reported_as_resting_on_the_gap() {
     assert!(
         report.finding(Assertion::ClaimMaterial).is_none(),
         "an assertion the run never reached under an `invalid` result is not reported: {:#?}",
+        report.findings
+    );
+}
+
+/// The genesis anchor is the trust root (I-D §7.5.1 4a), and a receipt carrying another
+/// corpus's anchor is `unverifiable` — receipt format §1 rule 1: "a configured anchor DIFFERING
+/// from the carried one is also `unverifiable`... since the receipt may be a perfectly valid
+/// receipt of another corpus".
+///
+/// The run carries on: whether each chain hop is signed under the key state its predecessors
+/// establish is decidable from the receipt's own bytes, so what the anchor decides is only
+/// whether that state is this verifier's log. Governance, envelope validity, checkpoint
+/// authentication and the witnesses rest on it; the paths, the §7.6 rules and the content
+/// binding do not.
+#[test]
+fn an_anchor_of_another_corpus_is_unverifiable_and_stops_nothing_else() {
+    let mut policy = trust_policy();
+    policy.genesis_entry_id = format!("sha256:{}", "0".repeat(64));
+    let (_, receipt) = read_receipt("record-ingested-valid.ahl");
+
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+    assert_eq!(
+        report.finding(Assertion::Governance).map(|finding| finding.outcome),
+        Some(Outcome::Unverifiable)
+    );
+    for assertion in
+        [Assertion::EnvelopeValidity, Assertion::CheckpointAuthentication, Assertion::Witnesses]
+    {
+        let finding = report.finding(assertion).unwrap_or_else(|| panic!("{assertion} finding"));
+        assert_eq!(finding.outcome, Outcome::Unverifiable);
+        assert!(
+            finding.detail.as_ref().is_some_and(|detail| detail.contains("governance")),
+            "{assertion} must name the prerequisite it rests on: {finding:?}"
+        );
+    }
+    for assertion in [Assertion::Anchoring, Assertion::CrossField, Assertion::ContentBinding] {
+        assert_eq!(
+            report.finding(assertion).map(|finding| finding.outcome),
+            Some(Outcome::Verified),
+            "{assertion} does not rest on the configured anchor and must be checked"
+        );
+    }
+
+    // The single-value form still reports the gap that decided the result.
+    assert!(matches!(verify_receipt(&receipt, &policy), Err(ReceiptError::GenesisAnchorMismatch)));
+
+    // And a defect elsewhere dominates it: the receipt is refused for what its own bytes show,
+    // with the anchor gap reported beside it rather than instead of it (I-D §7.7's reduction).
+    let (_, defective) = read_receipt("record-ingested-content-mismatch-must-fail.ahl");
+    let report = verify_receipt_report(&defective, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    assert_eq!(
+        report.finding(Assertion::Governance).map(|finding| finding.outcome),
+        Some(Outcome::Unverifiable)
+    );
+    assert_eq!(
+        report.finding(Assertion::ContentBinding).map(|finding| finding.outcome),
+        Some(Outcome::Invalid)
+    );
+}
+
+/// A witness key local policy does not hold settles the WITNESS assertion and nothing else
+/// (I-D §7.1: `local-policy` is admissible "only for witness keys the verifier already
+/// trusts"); the checkpoint signature is under a log key and is unaffected.
+#[test]
+fn an_untrusted_local_policy_witness_key_settles_only_the_witness_assertion() {
+    let policy = trust_policy();
+    let impostor = TestKey::from_seed_hex("impostor", &"ee".repeat(32)).expect("32-byte seed");
+    // Local policy holds no trusted witness key at all, so a cosignature under a key sourced
+    // `local-policy` is one this verifier cannot resolve — a gap in its own configuration.
+    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+    receipt["keys"]["witness"] = json!([{
+        "witness_id": "witness-1",
+        "key_id": impostor.key_id(),
+        "pubkey": impostor.pubkey(),
+        "source": "local-policy",
+    }]);
+    receipt["anchoring"]["witnesses"] = json!([{
+        "witness_id": "witness-1",
+        "key_id": impostor.key_id(),
+        "cosignature": impostor
+            .sign(&cosignature_bytes(&receipt["anchoring"]["checkpoint"], "witness-1")),
+        "cosigned_at": "2026-08-16T12:00:00Z",
+    }]);
+
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+    assert_eq!(
+        report.finding(Assertion::Witnesses).map(|finding| finding.outcome),
+        Some(Outcome::Unverifiable)
+    );
+    for assertion in [
+        Assertion::Governance,
+        Assertion::CheckpointAuthentication,
+        Assertion::EnvelopeValidity,
+        Assertion::CrossField,
+        Assertion::ClaimMaterial,
+    ] {
+        assert_eq!(
+            report.finding(assertion).map(|finding| finding.outcome),
+            Some(Outcome::Verified),
+            "{assertion} does not rest on a witness key the verifier holds"
+        );
+    }
+
+    // With a byte-decidable defect on the same receipt, the defect decides the result and the
+    // witness gap is reported beside it.
+    let mut defective = receipt;
+    defective["claim"]["assurance"]["governance"] = json!("enumerated");
+    let report = verify_receipt_report(&defective, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    assert_eq!(
+        report.finding(Assertion::CrossField).map(|finding| finding.outcome),
+        Some(Outcome::Invalid)
+    );
+    assert_eq!(
+        report.finding(Assertion::Witnesses).map(|finding| finding.outcome),
+        Some(Outcome::Unverifiable),
+        "the gap is still reported: {:#?}",
         report.findings
     );
 }
@@ -2415,12 +2557,18 @@ fn ahl_adaptor_atl_v1_receipts_are_refused_as_a_profile_limitation() {
     receipt["anchoring"]["adaptor"]["id"] = json!("ahl-adaptor-atl-v1");
     receipt["anchoring"]["adaptor"]["hash"] = json!(test_hash);
     policy.adaptor_profiles.insert("ahl-adaptor-atl-v1".to_owned(), atl_profile);
+    // The profile is held at the pinned hash, and this build still cannot interpret a receipt
+    // under it: that is a capability gap on the adaptor-profile assertion (I-D §7.7), reported
+    // as `unverifiable` and never as an acceptance. It does not end the run — the assertions
+    // that do not rest on the checkpoint serialization are still checked — so the assertion is
+    // what this test reads, rather than whichever finding the reduction happens to return.
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_ne!(report.result, Outcome::Verified);
+    let finding = report.finding(Assertion::AdaptorProfile).expect("adaptor-profile finding");
+    assert_eq!(finding.outcome, Outcome::Unverifiable);
     assert!(
-        matches!(
-            verify_receipt(&receipt, &policy),
-            Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-adaptor-atl-v1"
-        ),
-        "an `ahl-adaptor-atl-v1` receipt must be refused as a profile limitation, not accepted"
+        finding.detail.as_ref().is_some_and(|detail| detail.contains("ahl-adaptor-atl-v1")),
+        "the finding must name the profile this build cannot interpret: {finding:?}"
     );
 }
 
@@ -4031,18 +4179,27 @@ fn step_3_path_checks_precede_the_step_4_induction() {
         "a chain hop whose signature does not verify is caught by the induction (4b phase 1)"
     );
 
-    // A `raw` checkpoint form on the same receipt: reconciling it is step 2, so it is reported
-    // ahead of the governance signature failure of step 4. This build wires no profile's `raw`
-    // parser, so its mere presence is the profile-limitation outcome (I-D §7.5 step 2).
+    // A `raw` checkpoint form on the same receipt: reconciling it is step 2, and this build
+    // wires no profile's `raw` parser, so its mere presence is the profile-limitation outcome
+    // (I-D §7.5 step 2). That outcome is `unverifiable` and does not end the run, so the
+    // induction is still walked and its signature defect still dominates it (§7.7's reduction):
+    // both are reported, and the result is `invalid`.
     let mut with_raw = signature_only.clone();
     with_raw["anchoring"]["checkpoint"]["raw"] = json!("base64:AAAA");
+    let report = verify_receipt_report(&with_raw, &trust_policy()).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    assert_eq!(
+        report.finding(Assertion::AdaptorProfile).map(|finding| finding.outcome),
+        Some(Outcome::Unverifiable),
+        "the step-2 gap is reported: {:#?}",
+        report.findings
+    );
     assert!(
         matches!(
             verify_receipt(&with_raw, &trust_policy()),
-            Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. })
-                if id == "ahl-test-log-v1"
+            Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: 25 })
         ),
-        "a carried `raw` form is reconciled at step 2, before the step 4 induction"
+        "the induction's defect dominates the step-2 capability gap"
     );
 
     // Both defects together: the path failure is what a verifier reports, because step 3 is

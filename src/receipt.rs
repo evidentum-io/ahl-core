@@ -326,8 +326,17 @@ pub enum Assertion {
     /// The governance bootstrap of §7.5.1 4a-4c: the configured genesis anchor, the manifest
     /// lineage, the key induction, rotation proofs, and enumerated governance currency.
     Governance,
-    /// Authenticated checkpoint validation (§7.5.1 4f), witness cosignatures included.
+    /// Authenticated checkpoint validation (§7.5.1 4f): the checkpoint signature under the log
+    /// key the manifest version active for it declares.
     CheckpointAuthentication,
+    /// The witness cosignatures of §7.5.1 4f and §3.3, and the L3 rule that a checkpoint needs
+    /// one.
+    ///
+    /// Kept apart from [`Self::CheckpointAuthentication`] because the two fail for different
+    /// reasons and one of them is verifier-local: a `local-policy` witness key the verifier
+    /// does not hold makes the WITNESS assertion `unverifiable` while the checkpoint signature
+    /// is unaffected (I-D §7.1).
+    Witnesses,
     /// Envelope validity under §2.1 for the subject and every remaining carried envelope
     /// (§7.5.1 4d).
     EnvelopeValidity,
@@ -343,7 +352,7 @@ pub enum Assertion {
 
 impl Assertion {
     /// Every assertion, in the order the §7.5 algorithm reaches it.
-    pub const ORDER: [Self; 11] = [
+    pub const ORDER: [Self; 12] = [
         Self::Versions,
         Self::ResourceLimits,
         Self::Structure,
@@ -351,6 +360,7 @@ impl Assertion {
         Self::Anchoring,
         Self::Governance,
         Self::CheckpointAuthentication,
+        Self::Witnesses,
         Self::EnvelopeValidity,
         Self::CrossField,
         Self::ClaimMaterial,
@@ -368,6 +378,7 @@ impl Assertion {
             Self::Anchoring => "anchoring",
             Self::Governance => "governance",
             Self::CheckpointAuthentication => "checkpoint-authentication",
+            Self::Witnesses => "witnesses",
             Self::EnvelopeValidity => "envelope-validity",
             Self::CrossField => "cross-field",
             Self::ClaimMaterial => "claim-material",
@@ -1334,12 +1345,12 @@ impl ReceiptError {
             // members ask for at once (§7.4's enumerated range against §2.1's coverage through
             // a later checkpoint), which is the governance assertion's own subject.
             | Self::FormatConflict { .. } => Assertion::Governance,
-            Self::CheckpointSignatureInvalid
-            | Self::WitnessCosignatureInvalid { .. }
+            Self::CheckpointSignatureInvalid => Assertion::CheckpointAuthentication,
+            Self::WitnessCosignatureInvalid { .. }
             | Self::WitnessKeyNotTrusted { .. }
             | Self::WitnessNotDeclared { .. }
             | Self::WitnessIdentityMismatch { .. }
-            | Self::CheckpointUnwitnessed { .. } => Assertion::CheckpointAuthentication,
+            | Self::CheckpointUnwitnessed { .. } => Assertion::Witnesses,
             Self::EnvelopeSignatureInvalid { .. } | Self::ProducerKeyNotCarried { .. } => {
                 Assertion::EnvelopeValidity
             }
@@ -1590,13 +1601,14 @@ struct Run {
     /// variant, three assertions. Saved and restored around each embedded receipt, and left as
     /// it stands when a rejection unwinds, so the report names the phase the run stopped in.
     scope: Option<Assertion>,
-    /// The assertion of the receipt currently being verified whose `unverifiable` outcome the
-    /// assertions after it rest on, if any (I-D §7.7; see [`Run::pass`]).
+    /// The assertions of the receipt currently being verified that were settled `unverifiable`,
+    /// and which the assertions depending on them therefore rest on (I-D §7.7; see
+    /// [`Run::pass`] and [`prerequisites`]).
     ///
     /// Saved and restored around each embedded receipt, because the dependence is between the
     /// assertions of ONE receipt: an embedded receipt short of material says nothing about the
     /// assertions its parent settled before descending into it.
-    blocked: Option<Assertion>,
+    blocked: Vec<Assertion>,
     /// Rejections recorded as findings and not propagated ([`Run::tolerate`]), so that
     /// [`verify_receipt`] can still return the one that decided the result.
     deferred: Vec<Tolerated>,
@@ -1606,6 +1618,56 @@ struct Run {
 /// it was recorded under, so that whether it enters the reduction can be decided again later,
 /// and the rejection itself.
 type Tolerated = (Assertion, Vec<String>, ReceiptError);
+
+/// What each assertion RESTS ON: the assertions whose `unverifiable` outcome leaves it
+/// undecidable, so that it is itself `unverifiable` rather than reported as having held.
+///
+/// I-D §7.7 requires the run to carry on past an `unverifiable` finding — `invalid` dominates,
+/// and a run that stopped at the first capability gap could never reach the defect that
+/// dominates it — so what matters is which of the REMAINING assertions the gap actually
+/// reaches. That is this table, and nothing outside it is affected:
+///
+/// *   Nothing rests on the version read, the budgets, the container structure, the paths, or
+///     the adaptor profile ITSELF. §7.5 step 3's checks are hash recomputations against the
+///     carried `root_hash`, which need no profile and no key.
+/// *   Checkpoint authentication rests on the ADAPTOR PROFILE, whose document fixes the
+///     checkpoint serialization the signature is computed over, and on GOVERNANCE, which
+///     establishes the log key set the signature is verified under.
+/// *   The witness cosignatures rest on both of those and on the checkpoint itself, since a
+///     cosignature is over the checkpoint the log signed.
+/// *   Envelope validity rests on GOVERNANCE: §2.1 wants a key active at the envelope's own
+///     entry index, and it is the induction that establishes which keys those are.
+/// *   Claim material rests on governance and envelope validity only where the claim type's own
+///     material does — §7.5.1 4e is "applied ONLY to envelopes already valid under 4d", and
+///     only the authority-dependent types reach it. That one is decided by the claim type at
+///     the call site rather than here (see [`AUTHORITY_DEPENDENT_TYPES`]).
+/// *   Cross-field and content binding rest on nothing: every §7.6 rule is decidable from the
+///     receipt's own bytes, and a content binding resolves its descriptor from the CARRIED
+///     manifest, whose authenticity is a separate assertion from its contents.
+const fn prerequisites(assertion: Assertion) -> &'static [Assertion] {
+    match assertion {
+        Assertion::CheckpointAuthentication => &[Assertion::AdaptorProfile, Assertion::Governance],
+        Assertion::Witnesses => {
+            &[Assertion::AdaptorProfile, Assertion::Governance, Assertion::CheckpointAuthentication]
+        }
+        Assertion::EnvelopeValidity => &[Assertion::Governance],
+        Assertion::Versions
+        | Assertion::ResourceLimits
+        | Assertion::Structure
+        | Assertion::AdaptorProfile
+        | Assertion::Anchoring
+        | Assertion::Governance
+        | Assertion::CrossField
+        | Assertion::ClaimMaterial
+        | Assertion::ContentBinding => &[],
+    }
+}
+
+/// The claim types whose §7.2 material rests on the governance state and on the subject's own
+/// envelope: the ones that test AUTHORITY (§7.5.1 4e), or whose claim is about the governance
+/// state itself.
+const AUTHORITY_DEPENDENT_TYPES: [&str; 4] =
+    ["trigger-effective", "disposition-effective", "propagation-complete", "governance-state"];
 
 /// Whether a finding for `assertion` at `path` enters the reduction of the receipt the run is
 /// over — the free-standing form of [`Finding::counts_toward_result`], for deciding it before a
@@ -1624,7 +1686,7 @@ impl Run {
             findings: Vec::new(),
             path: Vec::new(),
             scope: None,
-            blocked: None,
+            blocked: Vec::new(),
             deferred: Vec::new(),
         }
     }
@@ -1681,13 +1743,24 @@ impl Run {
     /// which is what §7.7's own example requires: a receipt whose content binding is
     /// `unverifiable` still reports its anchoring and introduction findings as `verified`.
     fn pass(&mut self, assertion: Assertion) {
-        match self.blocked {
-            Some(prerequisite) if prerequisite < assertion => self.record(
+        self.pass_resting_on(assertion, &[]);
+    }
+
+    /// As [`Self::pass`], with prerequisites the call site knows and [`prerequisites`] cannot:
+    /// the claim material of an authority-dependent claim type rests on assertions the same
+    /// step does not touch for any other type.
+    fn pass_resting_on(&mut self, assertion: Assertion, also: &[Assertion]) {
+        let unmet = prerequisites(assertion)
+            .iter()
+            .chain(also)
+            .find(|prerequisite| self.blocked.contains(prerequisite));
+        match unmet {
+            Some(prerequisite) => self.record(
                 assertion,
                 Outcome::Unverifiable,
                 Some(format!("rests on `{prerequisite}`, which is unverifiable (I-D §7.7)")),
             ),
-            _ => self.record(assertion, Outcome::Verified, None),
+            None => self.record(assertion, Outcome::Verified, None),
         }
     }
 
@@ -1728,11 +1801,10 @@ impl Run {
         let settled = self.attribute(&error);
         self.record(settled, error.class(), Some(error.to_string()));
         self.deferred.push((settled, self.path.clone(), error));
-        // A content binding is a leaf: I-D §7.2 rests no other assertion on it, and §7.7's own
-        // example has the assertions around it reported `verified`. Every other assertion the
-        // algorithm settles later does rest on the material this one was short of.
-        if !matches!(settled, Assertion::ContentBinding) {
-            self.blocked = Some(settled);
+        // What this gap reaches is [`prerequisites`], and nothing else: I-D §7.7 wants the run
+        // to carry on with every assertion that does not depend on the missing material.
+        if !self.blocked.contains(&settled) {
+            self.blocked.push(settled);
         }
         Ok(None)
     }
@@ -3283,7 +3355,7 @@ fn validate_key_statement(
 fn read_chain<'a>(
     receipt: &'a Value,
     policy: &TrustPolicy,
-    profile: &AdaptorProfile,
+    profile: Option<&AdaptorProfile>,
     profile_id: &str,
     key_statements: &[(u64, &Value)],
     mode: &'a str,
@@ -3348,9 +3420,20 @@ fn read_chain<'a>(
             "`genesis_entry_id` does not digest the carried genesis envelope".to_owned(),
         ));
     }
-    if carried_anchor != policy.genesis_entry_id {
-        return Err(ReceiptError::GenesisAnchorMismatch);
-    }
+    // I-D §7.7 and receipt format §1 rule 1: an anchor that does not match local policy is
+    // `unverifiable`, "since the receipt may be a perfectly valid receipt of another corpus" —
+    // and `unverifiable` does not end a run. The induction below still walks the CARRIED chain:
+    // whether each hop is signed under the key state its predecessors establish is decidable
+    // from the receipt's own bytes, and a defect there is `invalid` whichever corpus the
+    // receipt belongs to. What the anchor decides is whether that state is THIS verifier's log,
+    // so the assertions resting on it — this one, envelope validity, checkpoint authentication
+    // and the witnesses — are settled `unverifiable` rather than verified.
+    let configured_anchor = if carried_anchor == policy.genesis_entry_id {
+        Ok(())
+    } else {
+        Err(ReceiptError::GenesisAnchorMismatch)
+    };
+    run.tolerate(configured_anchor)?;
     // I-D §7.5.1 4a: the fingerprint comparison is optional local policy — WHERE `policy`
     // holds no configured set, the comparison does not arise at all, and that absence is not
     // itself a defect. WHERE it holds one, the genesis manifest's producer key ids MUST match
@@ -3358,9 +3441,12 @@ fn read_chain<'a>(
     if let Some(configured) = &policy.genesis_key_ids {
         let genesis_key_ids: BTreeSet<String> =
             producer_key_objects(genesis_payload)?.into_iter().map(|(id, _)| id).collect();
-        if &genesis_key_ids != configured {
-            return Err(ReceiptError::GenesisAnchorMismatch);
-        }
+        let configured_fingerprints = if &genesis_key_ids == configured {
+            Ok(())
+        } else {
+            Err(ReceiptError::GenesisAnchorMismatch)
+        };
+        run.tolerate(configured_fingerprints)?;
     }
     if statement_type(genesis_payload)? != "manifest" {
         return Err(ReceiptError::GovernanceChainInvalid(
@@ -3546,21 +3632,30 @@ fn read_chain<'a>(
                             ),
                         });
                     }
-                    verify_rotation_proof(
-                        element,
-                        envelope,
-                        index,
-                        payload,
-                        &RotationContext {
-                            receipt,
-                            policy,
-                            manifests: &manifests,
-                            outgoing: (previous_manifest_index, previous_manifest_payload),
-                            profile,
-                            profile_id,
-                        },
-                        run,
-                    )?;
+                    // The element's own collection rules (I-D §7.1: required iff a rotation is
+                    // present, one per rotation, ascending, no extras) are governance facts and
+                    // ran above. What the element PROVES is a checkpoint under the outgoing key,
+                    // and a checkpoint cannot be authenticated without the profile that fixes
+                    // its serialization — so where the profile is not resolved, that half rests
+                    // on `adaptor-profile` and is reported through checkpoint authentication
+                    // rather than silently passed.
+                    if let Some(profile) = profile {
+                        verify_rotation_proof(
+                            element,
+                            envelope,
+                            index,
+                            payload,
+                            &RotationContext {
+                                receipt,
+                                policy,
+                                manifests: &manifests,
+                                outgoing: (previous_manifest_index, previous_manifest_payload),
+                                profile,
+                                profile_id,
+                            },
+                            run,
+                        )?;
+                    }
                     rotation_cursor += 1;
                 }
                 // Phase 3: effect — replaces the log, witness, and producer key state in full.
@@ -3625,7 +3720,10 @@ fn read_chain<'a>(
 /// range recomputation that needs them already runs; nothing after 4f reaches for them again,
 /// so they are deliberately not carried forward here.
 struct Anchoring {
-    witnessed: bool,
+    /// Whether a witness cosignature verified — `None` where the witness keys could not be
+    /// resolved at all, which is the witness assertion's `unverifiable` outcome and not the
+    /// same fact as "none verified" (I-D §7.1, §7.7).
+    witnessed: Option<bool>,
     continued_history: bool,
 }
 
@@ -4256,6 +4354,63 @@ fn bind_keys_by_group(
     Ok((bound, attempted_index))
 }
 
+/// I-D §7.5 step 2, in one place: the pinned profile is held, at the pinned hash, this build
+/// can interpret it, it defines what the receipt asks of it, and any carried `raw` form
+/// reconciles.
+///
+/// The `unverifiable` outcomes and the `invalid` one are deliberately separated: "If the
+/// verifier possesses NO profile under that id, it lacks a capability and the result is
+/// `unverifiable`. If it possesses a profile under that id whose HASH DIFFERS from the
+/// receipt's, the receipt and the profile it names disagree, which is decidable from the bytes
+/// in hand, and the result is `invalid`."
+fn resolve_adaptor_profile<'a>(
+    policy: &'a TrustPolicy,
+    anchoring: &Value,
+    adaptor_id: &str,
+    adaptor: &Value,
+) -> Result<&'a AdaptorProfile> {
+    let profile = policy
+        .adaptor_profiles
+        .get(adaptor_id)
+        .ok_or_else(|| ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() })?;
+    if profile.hash() != text(adaptor, "hash")? {
+        return Err(ReceiptError::AdaptorHashMismatch { id: adaptor_id.to_owned() });
+    }
+    // The held document is the one the receipt names; whether this build can INTERPRET a
+    // receipt under that profile is the next question, and it is answered from the id alone
+    // (see [`check_profile_supported`]) — before the governance induction, never after it.
+    check_profile_supported(adaptor_id)?;
+    // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values" — a
+    // capability boolean is not itself reconciliation. This build wires NO profile's `raw`
+    // parser into the verifier ([`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment), so a policy
+    // asserting `checkpoint_raw: true` for ANY profile can never make good on that claim, and
+    // is refused here, once, as a POLICY defect — never silently downgraded to "accept `raw`
+    // unparsed" for every receipt this policy verifies.
+    if profile.capabilities.checkpoint_raw {
+        return Err(ReceiptError::AdaptorProfileMisconfigured {
+            id: adaptor_id.to_owned(),
+            capability: "a binary checkpoint framing for `checkpoint.raw`",
+        });
+    }
+    // I-D §7.1, §7.5 step 2: `continued_history` needs a consistency proof, and a profile
+    // that defines no serialization for one cannot supply it. That is a fact about the pinned
+    // profile and the receipt's own members, so it belongs to profile resolution — decided
+    // before step 3 reads the path it would have to recompute, and reported as unverifiable
+    // under that profile rather than as a defect in the proof.
+    if (anchoring.get("later_checkpoint").is_some() || anchoring.get("consistency_path").is_some())
+        && !profile.capabilities.consistency_proofs
+    {
+        return Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: adaptor_id.to_owned(),
+            capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
+        });
+    }
+    // I-D §7.5 step 2: "Where a raw checkpoint form is carried… verify that it parses to the
+    // same values as the JSON members."
+    reconcile_anchoring_raw(anchoring, adaptor_id)?;
+    Ok(profile)
+}
+
 fn verify_checkpoint(
     receipt: &Value,
     policy: &TrustPolicy,
@@ -4285,8 +4440,18 @@ fn verify_checkpoint(
 
     let (log_keys, log_attempted) =
         bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log")?;
-    let (witness_keys, witness_attempted) =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness")?;
+    // A `local-policy` witness key the verifier does not hold is a gap in the VERIFIER's
+    // configuration (I-D §7.1, §7.7), so it settles the witness assertion `unverifiable` and
+    // stops nothing else: the checkpoint signature below is under a log key and is unaffected.
+    run.phase(Assertion::Witnesses);
+    let witness_key_binding = run.tolerate(bind_keys_by_group(
+        receipt,
+        policy,
+        &governance.manifests,
+        active_index,
+        "witness",
+    ))?;
+    run.phase(Assertion::CheckpointAuthentication);
 
     let signing_key = log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| {
         let key_id = text(checkpoint, "key_id").unwrap_or_default().to_owned();
@@ -4302,15 +4467,25 @@ fn verify_checkpoint(
         return Err(ReceiptError::CheckpointSignatureInvalid);
     }
 
+    let Some((resolved_witness_keys, witness_attempted)) = witness_key_binding else {
+        // No witness key resolved, so no cosignature over this checkpoint can be evaluated and
+        // the L3 rule below cannot be decided either. Both are the witness assertion's own
+        // `unverifiable` outcome, already recorded; `None` keeps "not evaluated" apart from
+        // "none verified", which §7.6 would otherwise read as an assurance disagreement.
+        return Ok(Anchoring { witnessed: None, continued_history });
+    };
+
+    run.phase(Assertion::Witnesses);
     let mut witnessed = false;
     for cosignature in cosignature_array(anchoring, "witnesses", "anchoring.witnesses")? {
         let cosignature = witness_cosignature_object(cosignature)?;
         let witness_id = text(cosignature, "witness_id")?.to_owned();
         let key_id = text(cosignature, "key_id")?;
-        let resolved = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
-            key_id: key_id.to_owned(),
-            entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
-        })?;
+        let resolved =
+            resolved_witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
+                key_id: key_id.to_owned(),
+                entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
+            })?;
         check_witness_identity(resolved, key_id, &witness_id)?;
         check_witness_declared(active_manifest, &witness_id, tree_size)?;
         run.spend(1)?;
@@ -4330,6 +4505,7 @@ fn verify_checkpoint(
     if active_manifest.get("level").and_then(Value::as_str) == Some("L3") && !witnessed {
         return Err(ReceiptError::CheckpointUnwitnessed { tree_size });
     }
+    run.phase(Assertion::CheckpointAuthentication);
 
     // 4f applies to `later_checkpoint` on the same terms, against the manifest version active
     // for ITS tree size. Its consistency path was recomputed in step 3, unauthenticated; this
@@ -4340,7 +4516,7 @@ fn verify_checkpoint(
         )?;
     }
 
-    Ok(Anchoring { witnessed, continued_history })
+    Ok(Anchoring { witnessed: Some(witnessed), continued_history })
 }
 
 /// The key-independent half of `continued_history` (I-D §7.5 step 3: "`consistency_path`
@@ -4816,7 +4992,7 @@ fn verify_nested(
     // this one's verdict is returned. The enclosing PHASE goes back with it: an embedded
     // receipt is verified inside its parent's claim-material step, and the parent's remaining
     // phases are its own.
-    let enclosing_block = run.blocked.take();
+    let enclosing_block = std::mem::take(&mut run.blocked);
     let enclosing_phase = run.scope.take();
     run.phase(Assertion::Versions);
     check_receipt_versions(receipt)?;
@@ -4859,52 +5035,17 @@ fn verify_nested(
     run.phase(Assertion::AdaptorProfile);
     let adaptor = obj(obj(receipt, "anchoring")?, "adaptor")?;
     let adaptor_id = text(adaptor, "id")?;
-    let profile = policy
-        .adaptor_profiles
-        .get(adaptor_id)
-        .ok_or_else(|| ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() })?;
-    if profile.hash() != text(adaptor, "hash")? {
-        return Err(ReceiptError::AdaptorHashMismatch { id: adaptor_id.to_owned() });
-    }
-    // The held document is the one the receipt names; whether this build can INTERPRET a
-    // receipt under that profile is the next question, and it is answered from the id alone
-    // (see [`check_profile_supported`]) — before the governance induction, never after it.
-    check_profile_supported(adaptor_id)?;
-    // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values" — a
-    // capability boolean is not itself reconciliation. This build wires NO profile's `raw`
-    // parser into the verifier ([`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment), so a policy
-    // asserting `checkpoint_raw: true` for ANY profile can never make good on that claim, and
-    // is refused here, once, as a POLICY defect — never silently downgraded to "accept `raw`
-    // unparsed" for every receipt this policy verifies.
-    if profile.capabilities.checkpoint_raw {
-        return Err(ReceiptError::AdaptorProfileMisconfigured {
-            id: adaptor_id.to_owned(),
-            capability: "a binary checkpoint framing for `checkpoint.raw`",
-        });
-    }
-
-    // I-D §7.1, §7.5 step 2: `continued_history` needs a consistency proof, and a profile
-    // that defines no serialization for one cannot supply it. That is a fact about the pinned
-    // profile and the receipt's own members, so it belongs to profile resolution — decided
-    // before step 3 reads the path it would have to recompute, and reported as unverifiable
-    // under that profile rather than as a defect in the proof.
     let anchoring_block = obj(receipt, "anchoring")?;
-    if (anchoring_block.get("later_checkpoint").is_some()
-        || anchoring_block.get("consistency_path").is_some())
-        && !profile.capabilities.consistency_proofs
-    {
-        return Err(ReceiptError::AdaptorCapabilityUnsupported {
-            id: adaptor_id.to_owned(),
-            capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
-        });
+    // A capability gap here does not end the run (I-D §7.7): what the profile document fixes is
+    // the checkpoint serialization, so the assertions that rest on it are exactly checkpoint
+    // authentication and the witness cosignatures over it ([`prerequisites`]). Step 3's paths,
+    // the governance induction, envelope validity, the cross-field rules, claim material and
+    // the content binding are all decided without it, and are checked.
+    let resolution = resolve_adaptor_profile(policy, anchoring_block, adaptor_id, adaptor);
+    let profile = run.tolerate(resolution)?;
+    if profile.is_some() {
+        run.pass(Assertion::AdaptorProfile);
     }
-
-    // I-D §7.5 step 2: "Where a raw checkpoint form is carried… verify that it parses to the
-    // same values as the JSON members." Profile-dependent and key-independent, so it belongs
-    // with profile resolution — decided before step 3 reads a path and long before any
-    // signature is checked.
-    reconcile_anchoring_raw(anchoring_block, adaptor_id)?;
-    run.pass(Assertion::AdaptorProfile);
 
     // --- §7.5 step 3: key-independent structural and path checks --------------------
     // "No signature and no cosignature is verified in this step." The checkpoint's own members
@@ -4988,16 +5129,21 @@ fn verify_nested(
     // Only on passing this do step 3's path results become claims about the log's state
     // rather than about carried bytes.
     run.phase(Assertion::CheckpointAuthentication);
-    let anchoring = verify_checkpoint(
-        receipt,
-        policy,
-        &governance,
-        profile,
-        adaptor_id,
-        continued_history,
-        run,
-    )?;
+    let anchoring = match profile {
+        Some(profile) => Some(verify_checkpoint(
+            receipt,
+            policy,
+            &governance,
+            profile,
+            adaptor_id,
+            continued_history,
+            run,
+        )?),
+        None => None,
+    };
     run.pass(Assertion::CheckpointAuthentication);
+    run.phase(Assertion::Witnesses);
+    run.pass(Assertion::Witnesses);
 
     // --- §7.5.1 4d: the remaining carried envelopes ---------------------------------
     // The subject's own envelope is verified separately, against K FINAL at ITS OWN entry
@@ -5035,11 +5181,21 @@ fn verify_nested(
     if assurance.governance != mode {
         return Err(ReceiptError::AssuranceMismatch { field: "governance" });
     }
-    if assurance.witnessed != anchoring.witnessed {
-        return Err(ReceiptError::AssuranceMismatch { field: "witnessed" });
-    }
-    if assurance.continued_history != anchoring.continued_history {
-        return Err(ReceiptError::AssuranceMismatch { field: "continued_history" });
+    // §7.6 compares these two assurance members against what 4f ESTABLISHED, so each is
+    // decidable only where 4f ran. Where the profile that fixes the checkpoint serialization
+    // was not resolved, or where the witness keys could not be resolved from local policy, the
+    // comparison is not a cross-field disagreement the receipt's bytes settle — it is the
+    // checkpoint or witness assertion, already reported `unverifiable`, and asserting a
+    // mismatch here would report a verifier-local gap as a defect of the artifact.
+    if let Some(anchoring) = &anchoring {
+        if let Some(witnessed) = anchoring.witnessed {
+            if assurance.witnessed != witnessed {
+                return Err(ReceiptError::AssuranceMismatch { field: "witnessed" });
+            }
+        }
+        if assurance.continued_history != anchoring.continued_history {
+            return Err(ReceiptError::AssuranceMismatch { field: "continued_history" });
+        }
     }
 
     // §7.5.1 4d over the currency material. The decode and the range checks already ran at
@@ -5141,7 +5297,18 @@ fn verify_nested(
     // The content-binding step inside claim material sets its own phase; put this receipt's
     // claim material back before the assertion is recorded.
     run.phase(Assertion::ClaimMaterial);
-    run.pass(Assertion::ClaimMaterial);
+    // §7.5.1 4e is "applied ONLY to envelopes already valid under 4d", and only these types
+    // reach it, so only for them does the claim's own material rest on the governance state and
+    // on the subject's envelope. Every other type's material is paths, shapes and commitments,
+    // which are decidable without either.
+    if AUTHORITY_DEPENDENT_TYPES.contains(&claim_type.as_str()) {
+        run.pass_resting_on(
+            Assertion::ClaimMaterial,
+            &[Assertion::Governance, Assertion::EnvelopeValidity],
+        );
+    } else {
+        run.pass(Assertion::ClaimMaterial);
+    }
     // I-D §7.7: the content binding is a required assertion "if and only if its own
     // `assurance.content_binding` is not `none`". Where it is required and the run reached the
     // end of claim material without recording it, it held.
@@ -5455,7 +5622,11 @@ struct ClaimCtx<'a> {
     /// The checkpoint this receipt already verified in §5 step 3 — signature, witness
     /// cosignature and inclusion path. Claim checkpoints bind to it (§3).
     anchoring_checkpoint: &'a Value,
-    profile: &'a AdaptorProfile,
+    /// The pinned adaptor profile, where local policy resolved one (§7.5 step 2). `None` makes
+    /// every checkpoint this claim's material carries unauthenticatable, which is the
+    /// checkpoint-authentication assertion's own `unverifiable` outcome rather than a defect in
+    /// the claim material.
+    profile: Option<&'a AdaptorProfile>,
     profile_id: &'a str,
     payload: &'a Value,
     subject_index: u64,
@@ -6570,15 +6741,23 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> 
     // checkpoint or recomputation of D's prefix root from the enumerated prefix" — no
     // cosignature requirement on D at all, unlike `anchoring.later_checkpoint`
     // ([`verify_later_witnesses`]).
-    authenticate_checkpoint(
-        ctx.receipt,
-        ctx.policy,
-        ctx.governance,
-        carried_d,
-        ctx.profile,
-        ctx.profile_id,
-        run,
-    )?;
+    // Authenticating D is checkpoint authentication, and rests on the profile that fixes the
+    // checkpoint serialization exactly as the receipt's own checkpoint does. Where none was
+    // resolved, the assertion is already reported `unverifiable`; the prefix work below is
+    // structural and still runs.
+    if let Some(profile) = ctx.profile {
+        run.phase(Assertion::CheckpointAuthentication);
+        authenticate_checkpoint(
+            ctx.receipt,
+            ctx.policy,
+            ctx.governance,
+            carried_d,
+            profile,
+            ctx.profile_id,
+            run,
+        )?;
+        run.phase(Assertion::ClaimMaterial);
+    }
 
     // The prefix is `[0, tree_size(D))`, and its range proof is checked against **A's** root:
     // A is the checkpoint this verifier signature-checked and saw witness-cosigned. Verifying
