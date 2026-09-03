@@ -458,6 +458,23 @@ fn every_statement_signature_verifies() {
         } else {
             assert!(ok, "{}: signature did not verify", STATEMENT_FILES[index]);
         }
+        // The published `INTENTIONALLY NON-VERIFYING` warning must sit on exactly the entries
+        // that do not verify. The generator attaches it by entry index, so a corpus reordering
+        // moves the fixtures and leaves the note behind — which is how entries 30 and 31, two
+        // genuine `key` statements, came to be labelled as forgeries while the real fixtures
+        // carried no warning at all. Pinning the note to the same set the assertions above use
+        // makes the two impossible to separate again.
+        let labelled = vector
+            .get("note")
+            .and_then(Value::as_str)
+            .is_some_and(|note| note.contains("INTENTIONALLY NON-VERIFYING"));
+        assert_eq!(
+            labelled,
+            NON_VERIFYING.contains(&index),
+            "{}: the INTENTIONALLY NON-VERIFYING note must be carried by exactly the entries \
+             whose signatures do not verify",
+            STATEMENT_FILES[index]
+        );
     }
 }
 

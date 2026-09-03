@@ -1649,7 +1649,7 @@ impl Corpus {
                 "entry_id": entry_id(env),
                 "envelope": env,
             });
-            if index == 30 {
+            if index == 32 {
                 // Structurally a well-formed AHL statement (statement_id/entry_id are ordinary
                 // digests of it), anchored like any other entry — but its `sig` is garbage, not
                 // a signature `producer-1` ever produced, even though `signatures[0].key_id`
@@ -1664,7 +1664,7 @@ impl Corpus {
                      trigger-effective-non-verifying-candidate-must-fail.ahl."
                 );
             }
-            if index == 31 {
+            if index == 33 {
                 // Structurally well-formed, carrying two signature entries: a genuinely valid
                 // one from `producer-2` (not the `customers` authority) and one naming
                 // `producer-1`'s real key_id (the genuine authority) whose `sig` is garbage. It

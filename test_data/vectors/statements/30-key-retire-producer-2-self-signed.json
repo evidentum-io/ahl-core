@@ -23,6 +23,5 @@
       }
     ]
   },
-  "note": "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against `signatures[0].key_id`'s real public key. See trigger-effective-non-verifying-candidate-must-fail.ahl.",
   "statement_id": "sha256:36b9084b60d048c74b5c16f02ab646e54e0ab72fa9f1a1081c6e871da80f3a0a"
 }

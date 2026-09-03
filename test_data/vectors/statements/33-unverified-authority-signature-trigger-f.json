@@ -28,5 +28,6 @@
       }
     ]
   },
+  "note": "INTENTIONALLY NON-VERIFYING: `signatures[1].sig` (the entry naming the dataset authority's real key_id) does not verify against that key_id's real public key, even though `signatures[0]` is a genuine signature from a non-authority producer key. See trigger-effective-unverified-authority-signature-must-fail.ahl.",
   "statement_id": "sha256:d708fc37b84966c685539b01e26539832b4f7aa87c9f7e9c92f93721aad53c08"
 }
