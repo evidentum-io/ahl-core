@@ -25,10 +25,11 @@ use ahl_core::receipt::{
 };
 use ahl_core::tree::ValidatedLeafSet;
 use ahl_core::{
-    checkpoint, checkpoint_signing_bytes, cosignature_bytes, decode_pubkey, entry_id, field_str,
-    hash_hex, inclusion_proof, jcs, leaf_hash, parse_hash_hex, proof_from_hex, proof_path_hex,
-    range_proof, sha256_hex, statement_id, tree_root, verify_envelope, verify_inclusion_proof,
-    verify_signature, AhlError, TestKey,
+    atl_checkpoint_blob_from_json, checkpoint, checkpoint_signing_bytes, cosignature_bytes,
+    decode_pubkey, entry_id, field_str, hash_hex, inclusion_proof, jcs, leaf_hash, parse_hash_hex,
+    proof_from_hex, proof_path_hex, range_proof, reconcile_atl_checkpoint_raw, sha256_hex,
+    statement_id, tree_root, verify_envelope, verify_inclusion_proof, verify_signature, AhlError,
+    TestKey,
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -3453,194 +3454,6 @@ fn the_adaptor_profile_hash_is_pinned_by_both_manifest_versions_and_by_receipts(
     }
 }
 
-/// Smallest work budget at which `receipt` stops failing with `LimitExceeded`.
-///
-/// The work counter increments once per signature check, proof check and tree opening, so this
-/// is a deterministic measure of how much verification a receipt actually cost.
-fn work_cost(receipt: &Value, policy: &TrustPolicy) -> u64 {
-    for budget in 1..2000u64 {
-        let scoped = TrustPolicy {
-            limits: Limits { max_work_units: budget, ..policy.limits },
-            ..policy.clone()
-        };
-        match verify_receipt(receipt, &scoped) {
-            Err(ReceiptError::BudgetExhausted { budget: "verification work units", .. }) => {}
-            _ => return budget,
-        }
-    }
-    panic!("receipt did not complete within the probe range");
-}
-
-#[test]
-fn a_duplicated_embedded_receipt_is_verified_exactly_once() {
-    let policy = trust_policy();
-    let (_, receipt) = read_receipt("trigger-declared-valid.ahl");
-
-    // The valid receipt embeds two *distinct* introduction receipts.
-    let introduction = receipt["claim_material"]["introduction"].clone();
-    let replacement = receipt["claim_material"]["replacement_introduction"].clone();
-    assert_ne!(introduction["subject"]["entry_id"], replacement["subject"]["entry_id"]);
-    let distinct_cost = work_cost(&receipt, &policy);
-
-    // Point both slots at the same embedded receipt. Format §3.1: "Duplicate embedded receipts
-    // (same entry id) MUST be verified once and referenced thereafter."
-    let mut duplicated = receipt;
-    duplicated["claim_material"]["replacement_introduction"] = introduction.clone();
-    let duplicate_cost = work_cost(&duplicated, &policy);
-
-    assert!(
-        duplicate_cost < distinct_cost,
-        "the duplicate must be served from the cache, not re-verified \
-         (distinct {distinct_cost} units, duplicated {duplicate_cost})"
-    );
-
-    // Verifying the embedded receipt on its own costs the difference, which is exactly the
-    // work the duplicate would have cost a verifier without the cache.
-    let embedded_cost = work_cost(&introduction, &policy);
-    assert_eq!(
-        distinct_cost - duplicate_cost,
-        embedded_cost,
-        "the saving must equal one full verification of the embedded receipt"
-    );
-
-    // It is still rejected — by the §2.3 record rule, reached only *after* the cached lookup,
-    // which is what proves the cache short-circuited the recursion rather than the checks.
-    assert!(matches!(
-        verify_receipt(&duplicated, &policy),
-        Err(ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. })
-    ));
-}
-
-#[test]
-fn adaptor_capability_gaps_are_reported_as_profile_limitations() {
-    let policy = trust_policy();
-    let (_, valid) = read_receipt("statement-anchored-valid.ahl");
-
-    // The corpus profile defines no binary checkpoint framing (adaptor profile §7), so a
-    // receipt carrying `raw` is rejected — but as a limitation of that profile, named, not as
-    // a blanket rule of the container format.
-    let mut with_raw = valid;
-    with_raw["anchoring"]["checkpoint"]["raw"] = Value::String("base64:AAAA".to_owned());
-    assert!(matches!(
-        verify_receipt(&with_raw, &policy),
-        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
-    ));
-
-    // I-D §7.1: a rotation-proof element's `checkpoint` is "in the receipt-borne form defined
-    // above" — the SAME strict shape as `anchoring.checkpoint`, `raw` included, so the SAME
-    // profile-capability gate applies to it. `governance-state-valid.ahl` carries a genuine
-    // `governance.rotation_proofs[0]`, and this profile defines no binary framing either.
-    let (_, governance_state) = read_receipt("governance-state-valid.ahl");
-    let mut rotation_with_raw = governance_state;
-    rotation_with_raw["governance"]["rotation_proofs"][0]["checkpoint"]["raw"] =
-        Value::String("base64:AAAA".to_owned());
-    assert!(matches!(
-        verify_receipt(&rotation_with_raw, &policy),
-        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
-    ));
-
-    // Consistency proofs ARE defined by this profile (§9), so the same material verifies here.
-    let (_, continued) = read_receipt("statement-anchored-continued-history.ahl");
-    let verdict = verify_receipt(&continued, &policy).expect("consistency proof verifies");
-    assert!(verdict.assurance.continued_history);
-
-    // Under a profile that does NOT define the serialization — `AdaptorProfile::minimal`, the
-    // shape the corpus profile had before §9 existed — the identical receipt is rejected, and
-    // the rejection names the profile rather than the format. That guard is the reason a
-    // verifier may not quietly accept unverifiable material from a profile that never defined
-    // how to verify it.
-    let mut restricted = trust_policy();
-    restricted.adaptor_profiles.insert(
-        "ahl-test-log-v1".to_owned(),
-        AdaptorProfile::minimal(policy.adaptor_profiles["ahl-test-log-v1"].document.clone()),
-    );
-    assert!(matches!(
-        verify_receipt(&continued, &restricted),
-        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
-    ));
-    assert!(!restricted.adaptor_profiles["ahl-test-log-v1"].capabilities.consistency_proofs);
-    assert!(!restricted.adaptor_profiles["ahl-test-log-v1"].capabilities.checkpoint_raw);
-}
-
-#[test]
-fn checkpoint_raw_capability_requires_a_known_parser() {
-    // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values as the
-    // JSON members" — a capability BOOLEAN is not itself reconciliation. A policy claiming
-    // `checkpoint_raw: true` for a profile this build has no wire-format parser for — every
-    // profile, currently (see `ReceiptError::AdaptorProfileMisconfigured`'s own doc comment) —
-    // is refused as a POLICY defect, before any receipt content — `raw`'s own presence
-    // included — is even read.
-    let mut policy = trust_policy();
-    let document = policy.adaptor_profiles["ahl-test-log-v1"].document.clone();
-    policy.adaptor_profiles.insert(
-        "ahl-test-log-v1".to_owned(),
-        AdaptorProfile {
-            document,
-            capabilities: AdaptorCapabilities { checkpoint_raw: true, consistency_proofs: true },
-        },
-    );
-    let (_, receipt) = read_receipt("statement-anchored-valid.ahl");
-    assert!(
-        matches!(
-            verify_receipt(&receipt, &policy),
-            Err(ReceiptError::AdaptorProfileMisconfigured { ref id, .. }) if id == "ahl-test-log-v1"
-        ),
-        "`checkpoint_raw: true` for a profile this build cannot parse must be a policy error, \
-         not silent acceptance"
-    );
-}
-
-#[test]
-fn ahl_adaptor_atl_v1_receipts_are_refused_as_a_profile_limitation() {
-    // Adaptor `ahl-adaptor-atl-v1` §4.2 (leaf construction), §7.1 (origin-derived `log_id`)
-    // and §14 ("Until this document is released as an immutable, openly published artifact…
-    // no manifest may pin it") together mean this crate cannot yet vouch for a receipt under
-    // that profile end to end, even though its checkpoint-blob mechanism is implemented and
-    // unit-tested (`ahl_core::checkpoint_signing_bytes_for`, `lib.rs`). A receipt naming it —
-    // even under a policy that HOLDS the profile — is refused as
-    // `AdaptorCapabilityUnsupported`, never accepted.
-    // A receipt carrying SIGNED, non-genesis governance hops (entry 9's `key` statement and
-    // entry 25's manifest v2): repinning the genesis manifest below breaks their lineage, so
-    // if the refusal were deferred until the signing bytes are first needed, the induction
-    // would report a broken chain instead — material this verifier has declined to interpret
-    // deciding what it reports. The refusal at §7.5 step 2 is what keeps that from happening.
-    let (_, mut receipt) = read_receipt("governance-state-valid.ahl");
-    let mut policy = trust_policy();
-    let document = policy.adaptor_profiles["ahl-test-log-v1"].document.clone();
-    let atl_profile = AdaptorProfile {
-        document,
-        capabilities: AdaptorCapabilities { checkpoint_raw: false, consistency_proofs: false },
-    };
-    let test_hash = atl_profile.hash();
-
-    // Repin the chain's OWN genesis manifest to `ahl-adaptor-atl-v1` too (I-D §3.2's binding
-    // check would otherwise fire first, on a receipt whose manifest still pins the OTHER
-    // profile) — the entry id changes, so `governance.genesis_entry_id` and policy are
-    // refreshed to match, exactly as `reject_by_manifest_schema` does for a schema mutation.
-    receipt["governance"]["chain"][0]["envelope"]["payload"]["log"]["adaptor"]["id"] =
-        json!("ahl-adaptor-atl-v1");
-    let anchor = entry_id(&receipt["governance"]["chain"][0]["envelope"]);
-    receipt["governance"]["genesis_entry_id"] = json!(&anchor);
-    policy.genesis_entry_id = anchor;
-
-    receipt["anchoring"]["adaptor"]["id"] = json!("ahl-adaptor-atl-v1");
-    receipt["anchoring"]["adaptor"]["hash"] = json!(test_hash);
-    policy.adaptor_profiles.insert("ahl-adaptor-atl-v1".to_owned(), atl_profile);
-    // The profile is held at the pinned hash, and this build still cannot interpret a receipt
-    // under it: that is a capability gap on the adaptor-profile assertion (I-D §7.7), reported
-    // as `unverifiable` and never as an acceptance. It does not end the run — the assertions
-    // that do not rest on the checkpoint serialization are still checked — so the assertion is
-    // what this test reads, rather than whichever finding the reduction happens to return.
-    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
-    assert_ne!(report.result, Outcome::Verified);
-    let finding = report.finding(Assertion::AdaptorProfile).expect("adaptor-profile finding");
-    assert_eq!(finding.outcome, Outcome::Unverifiable);
-    assert!(
-        finding.detail.as_ref().is_some_and(|detail| detail.contains("ahl-adaptor-atl-v1")),
-        "the finding must name the profile this build cannot interpret: {finding:?}"
-    );
-}
-
 #[test]
 fn continued_history_requires_both_members_and_a_later_checkpoint_of_its_own() {
     // Receipt §2.3 states the equivalence: `continued_history` is true iff `later_checkpoint`
@@ -6279,4 +6092,344 @@ fn a_log_key_rotation_is_proven_under_the_outgoing_key_state() {
             report.findings
         );
     }
+}
+
+/// Smallest work budget at which `receipt` stops failing with `LimitExceeded`.
+///
+/// The work counter increments once per signature check, proof check and tree opening, so this
+/// is a deterministic measure of how much verification a receipt actually cost.
+fn work_cost(receipt: &Value, policy: &TrustPolicy) -> u64 {
+    for budget in 1..2000u64 {
+        let scoped = TrustPolicy {
+            limits: Limits { max_work_units: budget, ..policy.limits },
+            ..policy.clone()
+        };
+        match verify_receipt(receipt, &scoped) {
+            Err(ReceiptError::BudgetExhausted { budget: "verification work units", .. }) => {}
+            _ => return budget,
+        }
+    }
+    panic!("receipt did not complete within the probe range");
+}
+
+#[test]
+fn a_duplicated_embedded_receipt_is_verified_exactly_once() {
+    let policy = trust_policy();
+    let (_, receipt) = read_receipt("trigger-declared-valid.ahl");
+
+    // The valid receipt embeds two *distinct* introduction receipts.
+    let introduction = receipt["claim_material"]["introduction"].clone();
+    let replacement = receipt["claim_material"]["replacement_introduction"].clone();
+    assert_ne!(introduction["subject"]["entry_id"], replacement["subject"]["entry_id"]);
+    let distinct_cost = work_cost(&receipt, &policy);
+
+    // Point both slots at the same embedded receipt. Format §3.1: "Duplicate embedded receipts
+    // (same entry id) MUST be verified once and referenced thereafter."
+    let mut duplicated = receipt;
+    duplicated["claim_material"]["replacement_introduction"] = introduction.clone();
+    let duplicate_cost = work_cost(&duplicated, &policy);
+
+    assert!(
+        duplicate_cost < distinct_cost,
+        "the duplicate must be served from the cache, not re-verified \
+         (distinct {distinct_cost} units, duplicated {duplicate_cost})"
+    );
+
+    // Verifying the embedded receipt on its own costs the difference, which is exactly the
+    // work the duplicate would have cost a verifier without the cache.
+    let embedded_cost = work_cost(&introduction, &policy);
+    assert_eq!(
+        distinct_cost - duplicate_cost,
+        embedded_cost,
+        "the saving must equal one full verification of the embedded receipt"
+    );
+
+    // It is still rejected — by the §2.3 record rule, reached only *after* the cached lookup,
+    // which is what proves the cache short-circuited the recursion rather than the checks.
+    assert!(matches!(
+        verify_receipt(&duplicated, &policy),
+        Err(ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. })
+    ));
+}
+
+#[test]
+fn adaptor_capability_gaps_are_reported_as_profile_limitations() {
+    let policy = trust_policy();
+    let (_, valid) = read_receipt("statement-anchored-valid.ahl");
+
+    // The corpus profile defines no binary checkpoint framing (adaptor profile §7), so a
+    // receipt carrying `raw` is rejected — but as a limitation of that profile, named, not as
+    // a blanket rule of the container format.
+    let mut with_raw = valid;
+    with_raw["anchoring"]["checkpoint"]["raw"] = Value::String("base64:AAAA".to_owned());
+    assert!(matches!(
+        verify_receipt(&with_raw, &policy),
+        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
+    ));
+
+    // I-D §7.1: a rotation-proof element's `checkpoint` is "in the receipt-borne form defined
+    // above" — the SAME strict shape as `anchoring.checkpoint`, `raw` included, so the SAME
+    // profile-capability gate applies to it. `governance-state-valid.ahl` carries a genuine
+    // `governance.rotation_proofs[0]`, and this profile defines no binary framing either.
+    let (_, governance_state) = read_receipt("governance-state-valid.ahl");
+    let mut rotation_with_raw = governance_state;
+    rotation_with_raw["governance"]["rotation_proofs"][0]["checkpoint"]["raw"] =
+        Value::String("base64:AAAA".to_owned());
+    assert!(matches!(
+        verify_receipt(&rotation_with_raw, &policy),
+        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
+    ));
+
+    // Consistency proofs ARE defined by this profile (§9), so the same material verifies here.
+    let (_, continued) = read_receipt("statement-anchored-continued-history.ahl");
+    let verdict = verify_receipt(&continued, &policy).expect("consistency proof verifies");
+    assert!(verdict.assurance.continued_history);
+
+    // Under a profile that does NOT define the serialization — `AdaptorProfile::minimal`, the
+    // shape the corpus profile had before §9 existed — the identical receipt is rejected, and
+    // the rejection names the profile rather than the format. That guard is the reason a
+    // verifier may not quietly accept unverifiable material from a profile that never defined
+    // how to verify it.
+    let mut restricted = trust_policy();
+    restricted.adaptor_profiles.insert(
+        "ahl-test-log-v1".to_owned(),
+        AdaptorProfile::minimal(policy.adaptor_profiles["ahl-test-log-v1"].document.clone()),
+    );
+    assert!(matches!(
+        verify_receipt(&continued, &restricted),
+        Err(ReceiptError::AdaptorCapabilityUnsupported { ref id, .. }) if id == "ahl-test-log-v1"
+    ));
+    assert!(!restricted.adaptor_profiles["ahl-test-log-v1"].capabilities.consistency_proofs);
+    assert!(!restricted.adaptor_profiles["ahl-test-log-v1"].capabilities.checkpoint_raw);
+}
+
+#[test]
+fn checkpoint_raw_capability_requires_a_known_parser() {
+    // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values as the
+    // JSON members" — a capability BOOLEAN is not itself reconciliation. A policy claiming
+    // `checkpoint_raw: true` for a profile this build has no wire-format parser for — every
+    // profile, currently (see `ReceiptError::AdaptorProfileMisconfigured`'s own doc comment) —
+    // is refused as a POLICY defect, before any receipt content — `raw`'s own presence
+    // included — is even read.
+    let mut policy = trust_policy();
+    let document = policy.adaptor_profiles["ahl-test-log-v1"].document.clone();
+    policy.adaptor_profiles.insert(
+        "ahl-test-log-v1".to_owned(),
+        AdaptorProfile {
+            document,
+            capabilities: AdaptorCapabilities { checkpoint_raw: true, consistency_proofs: true },
+        },
+    );
+    let (_, receipt) = read_receipt("statement-anchored-valid.ahl");
+    assert!(
+        matches!(
+            verify_receipt(&receipt, &policy),
+            Err(ReceiptError::AdaptorProfileMisconfigured { ref id, .. }) if id == "ahl-test-log-v1"
+        ),
+        "`checkpoint_raw: true` for a profile this build cannot parse must be a policy error, \
+         not silent acceptance"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The ATL-bound corpus (adaptor profile `ahl-adaptor-atl-v1`)
+// ---------------------------------------------------------------------------
+
+fn atl_dir() -> PathBuf {
+    test_data().join("receipts").join("atl")
+}
+
+fn atl_index() -> Value {
+    read_json(&atl_dir().join("index.json"))
+}
+
+/// The ATL corpus's own trust policy, read from its own index.
+///
+/// It is a SECOND policy because a trust policy names one published genesis anchor (I-D §7.5.1
+/// 4a) and this is a second log. As with the main one, the adaptor document is read from disk
+/// and its digest recomputed, never taken from the index's recorded hash string.
+fn atl_trust_policy() -> TrustPolicy {
+    let index = atl_index();
+    let policy = &index["policy"];
+    TrustPolicy {
+        genesis_entry_id: field_str(policy, "genesis_entry_id").expect("genesis anchor").to_owned(),
+        genesis_key_ids: Some(strings(&policy["genesis_key_ids"]).into_iter().collect()),
+        adaptor_profiles: policy["adaptor_profiles"]
+            .as_object()
+            .expect("adaptor profiles")
+            .iter()
+            .map(|(id, profile)| {
+                let capabilities = &profile["capabilities"];
+                let document = std::fs::read(test_data().join("adaptor").join(format!("{id}.md")))
+                    .unwrap_or_else(|e| panic!("read held adaptor document for `{id}`: {e}"));
+                (
+                    id.clone(),
+                    AdaptorProfile {
+                        document,
+                        capabilities: AdaptorCapabilities {
+                            checkpoint_raw: capabilities["checkpoint_raw"] == Value::Bool(true),
+                            consistency_proofs: capabilities["consistency_proofs"]
+                                == Value::Bool(true),
+                        },
+                    },
+                )
+            })
+            .collect(),
+        dataset_keys: BTreeMap::new(),
+        trusted_witness_keys: BTreeMap::new(),
+        limits: Limits::default(),
+    }
+}
+
+fn read_atl_receipt(name: &str) -> (Vec<u8>, Value) {
+    let path = atl_dir().join(name);
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let value: Value = serde_json::from_slice(&bytes).expect("receipt parses");
+    (bytes, value)
+}
+
+/// Every ATL vector reaches the result its own index records.
+#[test]
+fn every_atl_vector_reaches_its_recorded_result() {
+    let policy = atl_trust_policy();
+    let mut listed = BTreeSet::new();
+    for entry in atl_index()["vectors"].as_array().expect("vectors") {
+        let name = field_str(entry, "file").expect("file");
+        listed.insert(name.to_owned());
+        let (bytes, receipt) = read_atl_receipt(name);
+        assert_eq!(bytes, jcs(&receipt), "{name}: file is not its own JCS serialization");
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(
+            report.result.name(),
+            field_str(entry, "expect").expect("expect"),
+            "{name}: {:#?}",
+            report.findings
+        );
+        if let Some(finding) = entry.get("finding").and_then(Value::as_str) {
+            let dominating = report.dominating().expect("a non-verified result has a cause");
+            assert_eq!(dominating.assertion.name(), finding, "{name}");
+        }
+    }
+    let on_disk: BTreeSet<String> = std::fs::read_dir(atl_dir())
+        .expect("ATL receipts directory")
+        .map(|e| e.expect("directory entry").file_name().to_string_lossy().into_owned())
+        .filter(|name| Path::new(name).extension().is_some_and(|ext| ext == "ahl"))
+        .collect();
+    assert_eq!(listed, on_disk, "the ATL index and its directory must agree");
+}
+
+/// Adaptor `ahl-adaptor-atl-v1` §4.2, §6, §7.1 in the verifier, over a real second log.
+///
+/// The profile differs from `ahl-test-log-v1` in exactly three serializations — the log leaf,
+/// the checkpoint signing bytes, and the `raw` framing — and this asserts each is dispatched
+/// rather than assumed.
+#[test]
+fn the_atl_profile_is_dispatched_end_to_end() {
+    let policy = atl_trust_policy();
+    let (_, receipt) = read_atl_receipt("statement-anchored-atl-profile.ahl");
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    assert_eq!(
+        field_str(&receipt["anchoring"]["adaptor"], "id").expect("adaptor id"),
+        "ahl-adaptor-atl-v1"
+    );
+
+    let tree = read_json(&test_data().join("vectors").join("atl").join("log-tree.json"));
+    let checkpoint = &receipt["anchoring"]["checkpoint"];
+
+    // §4.2: the log leaf is NOT the anchored entry bytes, and the ATL geometry's root is the one
+    // the checkpoint commits. A verifier applying the other profile's leaf rule would recompute
+    // a different root for the same entries, which is what the metadata negative turns on.
+    let entries = tree["entries"].as_array().expect("entries");
+    let atl_leaves: Vec<Vec<u8>> = entries
+        .iter()
+        .map(|entry| {
+            let mut preimage = Vec::with_capacity(64);
+            preimage.extend_from_slice(
+                &parse_hash_hex(field_str(entry, "entry_id").expect("entry_id")).expect("entry id"),
+            );
+            preimage.extend_from_slice(
+                &parse_hash_hex(field_str(&tree, "metadata_hash").expect("metadata_hash"))
+                    .expect("metadata hash"),
+            );
+            preimage
+        })
+        .collect();
+    assert_eq!(
+        hash_hex(&tree_root(&atl_leaves)),
+        field_str(checkpoint, "root_hash").expect("root_hash"),
+        "the checkpoint must commit the ATL-geometry root"
+    );
+    assert_eq!(
+        field_str(&tree, "metadata_hash").expect("metadata_hash"),
+        "sha256:bb4f98461f062d897980c9050f8f859c3b83c84486c5e6857262f6dfa97468a4",
+        "§4.2 pins the metadata digest as a constant of the profile"
+    );
+
+    // §6.1/§6.3/§6.5: the signature is over the 98-byte blob assembled from the JSON members,
+    // and `checkpoint_time` renders the exact nanosecond value with nine fractional digits.
+    let time = field_str(checkpoint, "checkpoint_time").expect("checkpoint_time");
+    assert_eq!(time.len(), 30, "§6.3: exactly nine fractional digits and a `Z`");
+    let blob = atl_checkpoint_blob_from_json(checkpoint).expect("well-formed checkpoint");
+    let log_key = &receipt["keys"]["log"][0];
+    assert!(
+        verify_signature(
+            &decode_pubkey(field_str(log_key, "pubkey").expect("pubkey")).expect("pubkey"),
+            &blob,
+            field_str(checkpoint, "signature").expect("signature"),
+        )
+        .expect("well-formed signature"),
+        "the checkpoint signature is over the 98-byte blob, not over JCS(cp minus signature)"
+    );
+    assert_ne!(
+        blob.as_slice(),
+        checkpoint_signing_bytes(checkpoint).expect("checkpoint").as_slice(),
+        "the two profiles' signing bytes must actually differ"
+    );
+
+    // §7.1: `log_id` is the Origin ID, and the blob binds those same 32 octets at offset 18.
+    let log_id = field_str(checkpoint, "log_id").expect("log_id");
+    assert_eq!(&blob[18..50], &parse_hash_hex(log_id).expect("log id")[..]);
+    assert_eq!(
+        log_id,
+        sha256_hex(&hex::decode(field_str(&tree, "tree_uuid").expect("tree_uuid")).expect("uuid")),
+        "§7.1: log_id = sha256: || hex(SHA-256(the 16-byte Data Tree UUID))"
+    );
+
+    // §6.4: `raw` is carried, and it reconciles with the JSON members.
+    let raw = field_str(checkpoint, "raw").expect("§6.4 raw");
+    reconcile_atl_checkpoint_raw(checkpoint, raw).expect("the carried raw must reconcile");
+
+    // And the capability gap the profile's own release status makes real: a verifier that holds
+    // NO document under this id lacks a capability, so the result is `unverifiable` (I-D §7.5
+    // step 2) — never `invalid`, and never an acceptance. It is a fact about the verifier's
+    // configuration rather than about the artifact, which is why it is tested here and not
+    // carried as a vector.
+    let mut unheld = policy;
+    unheld.adaptor_profiles.clear();
+    let report = verify_receipt_report(&receipt, &unheld).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable, "{:#?}", report.findings);
+    let finding = report.finding(Assertion::AdaptorProfile).expect("adaptor-profile finding");
+    assert_eq!(finding.outcome, Outcome::Unverifiable);
+    assert_eq!(finding.rests_on, None, "the cause, not a derivation");
+    assert!(matches!(
+        verify_receipt(&receipt, &unheld),
+        Err(ReceiptError::AdaptorUnknown { id }) if id == "ahl-adaptor-atl-v1"
+    ));
+
+    // A policy that claims a capability the profile does define is not a misconfiguration:
+    // `checkpoint_raw` is true here and this build parses it. The main corpus's profile defines
+    // no framing at all, and a policy claiming one for THAT profile is still refused.
+    let mut claimed = trust_policy();
+    claimed
+        .adaptor_profiles
+        .get_mut("ahl-test-log-v1")
+        .expect("the test profile")
+        .capabilities
+        .checkpoint_raw = true;
+    let (_, main) = read_receipt("statement-anchored-valid.ahl");
+    assert!(matches!(
+        verify_receipt(&main, &claimed),
+        Err(ReceiptError::AdaptorProfileMisconfigured { .. })
+    ));
 }

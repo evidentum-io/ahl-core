@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+mod atl;
 mod corpus;
 mod receipts;
 mod scenario;
@@ -42,6 +43,12 @@ fn main() {
     corpus.self_check(&keys);
     corpus.write(&root, &keys);
     receipts::write_all(&corpus, &keys, &root, &dataset_key);
+
+    // A second toy log, bound to `ahl-adaptor-atl-v1` — the pieces that profile serializes
+    // differently, exercised end to end rather than at the unit level.
+    let atl = atl::AtlCorpus::build(&keys, &corpus.records, &root);
+    atl.self_check(&keys);
+    atl.write(&keys, &corpus.records, &root);
 
     println!("test_data written to {}", root.display());
 }

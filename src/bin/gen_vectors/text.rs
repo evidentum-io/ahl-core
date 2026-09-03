@@ -227,18 +227,11 @@ than silently mis-verifying wherever the gap could otherwise be mistaken for a p
     verify, and every receipt over that dataset would be built on it. The equivalent
     capability gap on the same finding — a dataset key the verifier is not authorized to hold —
     is exercised instead, in `tests/vectors.rs`.
-*   **ATL adaptor profile support in the receipt verifier.** Leaf construction (adaptor
-    `ahl-adaptor-atl-v1` §4.2: `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`),
-    origin-derived `log_id` (§7.1: `sha256(Origin ID)`, Origin ID the SHA-256 of a 16-byte Data
-    Tree UUID), and profile release (§14: "Until this document is released as an immutable,
-    openly published artifact… no manifest may pin it") are pending — none is dispatched
-    anywhere in this crate today, so a receipt naming that profile is refused as
-    `ReceiptError::AdaptorCapabilityUnsupported`, never accepted. The checkpoint-level
-    mechanism (§6.1-§6.5: assembling and signing the 98-byte blob, and reconciling a carried
-    `raw` byte-for-byte against it) exists as `pub` helpers in `lib.rs` —
-    `checkpoint_signing_bytes_for`, `atl_checkpoint_blob`/`atl_checkpoint_blob_from_json`,
-    `reconcile_atl_checkpoint_raw`, `atl_checkpoint_time`/`atl_checkpoint_time_nanos` — and is
-    unit-tested there over a synthetic checkpoint, for a client integrating ATL directly.
+*   **Adaptor profiles beyond the two this build implements.** A receipt pinning any profile
+    id other than `ahl-test-log-v1` or `ahl-adaptor-atl-v1` is refused as
+    `ReceiptError::AdaptorCapabilityUnsupported` — a limitation of this BUILD, named as such,
+    never `invalid`. Core spec §3 item 6 makes that the right shape: another verifier holding
+    that profile's document would verify the same receipt without any change to the format.
 
 Also not yet in the corpus: no vector carries a witness key sourced `local-policy` (I-D §7.1).
 The corpus trust policy holds no trusted witness key at all, so every witness key in every
@@ -298,13 +291,15 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 | Path | Contents |
 | --- | --- |
-| `adaptor/` | The test adaptor profile document, content-addressed and pinned in both manifest versions |
+| `adaptor/` | Both adaptor profile documents, content-addressed: `ahl-test-log-v1.md`, pinned by the main corpus's manifest versions, and `ahl-adaptor-atl-v1.md`, pinned by the ATL-bound corpus's — see the release note below |
 | `vectors/statements/` | The toy corpus's anchored envelopes, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
 | `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 34, 35, 37 and 38, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
 | `vectors/closure/` | Six closure scenarios (see below) |
 | `vectors/witness/` | Signed witness refusal evidence carrying two conflicting checkpoints (spec §3.3 step 3) |
 | `receipts/` | One positive and at least one negative receipt per claim-type registry entry, plus `index.json` naming the I-D §7.7 result each must reach, the assertion whose finding produces a non-verified one, the rule each negative must trip, and the trust policy those outcomes assume |
+| `vectors/atl/` | The ATL-bound toy corpus: its four anchored envelopes and its log tree, whose leaves are adaptor §4.2's two-digest construction |
+| `receipts/atl/` | Receipt vectors over that corpus, with an `index.json` of their own — a trust policy names ONE published genesis anchor (I-D §7.5.1 4a) and this is a second log |
 | `keys/` | Committed test key seeds — **see the warning below** |
 
 ## The scenarios
@@ -549,6 +544,55 @@ ordinary artifact of a real log rather than something a producer must manufactur
    passes over a void entry and over a later duplicate of a governing statement. Counting
    either would report a current state as stale, which is the opposite of what first-wins says.
 
+## The ATL-bound corpus
+
+`ahl-test-log-v1` and `ahl-adaptor-atl-v1` differ in exactly three serializations, and
+`vectors/atl/` exists so each is dispatched end to end rather than assumed. Everything else
+about a log tree — node hashing, the splitting rule, inclusion and consistency proofs, the
+range-proof byte layout, the receipt container, the governance rules — is shared, and the AHL
+trees the log never sees (batch outputs, input sets, dispositions) take plain leaf hashing under
+both, which adaptor §9 states expressly: an implementation "MUST NOT apply the payload/metadata
+leaf construction to them".
+
+1.  **The log leaf** (adaptor §4.2). ATL combines two digests, so the leaf is
+    `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)` where the metadata object is the
+    fixed `{"ahl_adaptor":"ahl-adaptor-atl-v1"}` and the first digest is the raw form of the AHL
+    entry id — which is what keeps the entry id derivable from the entry bytes alone. The
+    constant is recomputed in `lib.rs` rather than transcribed, and
+    `statement-anchored-atl-metadata-hash-must-fail.ahl` is a genuinely signed, genuinely
+    cosigned checkpoint over the same entries hashed with a metadata digest the profile does not
+    pin: every signature verifies and the inclusion path is correct in THAT geometry, so only a
+    verifier using the pinned constant rejects it.
+2.  **The checkpoint signing bytes** (§6.1, §6.5). The log signs the fixed 98-byte blob, not
+    `JCS(cp minus "signature")`, and `checkpoint_time` renders the exact nanosecond value with
+    exactly nine fractional digits (§6.3) because the blob binds it. `log_id` is origin-derived
+    (§7.1): its 32 octets ARE the Origin ID the blob carries at offset 18, so the corpus states
+    the 16-byte Data Tree UUID it came from rather than treating the identifier as free-form.
+3.  **`checkpoint.raw`** (§6.4). This profile DEFINES a binary framing, so receipts under it MAY
+    carry `raw` — and where they do it "MUST parse to the same values as the JSON members, the
+    JSON members govern, and a mismatch is `invalid`".
+    `statement-anchored-atl-raw-mismatch-must-fail.ahl` carries a well-formed blob of a
+    different tree size: the checkpoint's own signature still verifies, since it is computed over
+    the blob assembled from the JSON members, which is exactly why an unreconciled `raw` could
+    present values the log never signed. `ahl-test-log-v1` defines no framing at all, so `raw`
+    under it stays a profile limitation and a policy claiming `checkpoint_raw` for it is still a
+    configuration error.
+
+`statement-anchored-atl-profile.ahl` and `record-ingested-atl-profile.ahl` are the positives.
+`statement-anchored-atl-profile-digest-must-fail.ahl` pins a digest the held document does not
+recompute to — §14 requires resolution by `{id, digest}` with the digest recomputed over the
+artifact, and I-D §7.5 step 2 makes that disagreement `invalid` rather than a capability gap.
+The gap itself — a verifier holding NO document under that id, which is `unverifiable` — is
+exercised in `tests/vectors.rs`, since what decides it is the verifier's configuration rather
+than anything a portable vector can carry.
+
+**The ATL profile is PRE-RELEASE, and the pin here is test-only.** Adaptor §14: "Until this
+document is released as an immutable, openly published artifact at a stable location, its digest
+is not stable and no manifest may pin it." The digest this corpus pins is the CURRENT DRAFT's,
+held so the serialization can be exercised; a production manifest MUST NOT pin the profile until
+that release obligation is met, and the digest will change when it is. `receipts/atl/index.json`
+records the same caveat beside the pin.
+
 ## Regenerating
 
 ```
@@ -622,6 +666,16 @@ check.
 "#;
 
 /// `test_data/adaptor/ahl-test-log-v1.md` — the content-addressed adaptor profile.
+/// The ATL adaptor profile document, as published in the AHL documentation repository and
+/// committed here so the corpus is self-contained.
+///
+/// It is carried verbatim rather than restated: adaptor §14 makes the profile digest the
+/// SHA-256 over the exact bytes of the artifact, "with no normalization of any kind", so any
+/// paraphrase would be a different profile. The generator writes these bytes back and pins
+/// their digest, which is the CURRENT DRAFT's — a test-only pin (§14: "no manifest may pin it"
+/// until release).
+pub const ATL_ADAPTOR_DOC: &str = include_str!("../../../test_data/adaptor/ahl-adaptor-atl-v1.md");
+
 pub const ADAPTOR_DOC: &str = r#"# Adaptor profile `ahl-test-log-v1`
 
 **Status:** test profile for the AHL Protocol conformance corpus.

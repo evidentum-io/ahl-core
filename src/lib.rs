@@ -658,8 +658,8 @@ pub fn atl_checkpoint_blob_from_json(checkpoint: &Value) -> AhlResult<[u8; 98]> 
 /// Returns [`AhlError::Field`] for any profile id other than the two named above.
 pub fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> AhlResult<Vec<u8>> {
     match profile_id {
-        "ahl-test-log-v1" => checkpoint_signing_bytes(checkpoint),
-        "ahl-adaptor-atl-v1" => Ok(atl_checkpoint_blob_from_json(checkpoint)?.to_vec()),
+        TEST_PROFILE_ID => checkpoint_signing_bytes(checkpoint),
+        ATL_PROFILE_ID => Ok(atl_checkpoint_blob_from_json(checkpoint)?.to_vec()),
         other => Err(AhlError::Field(format!(
             "no checkpoint signing-bytes procedure for adaptor profile `{other}`"
         ))),
@@ -754,6 +754,77 @@ pub fn cosignature_bytes(signed_checkpoint: &Value, witness_id: &str) -> Vec<u8>
 // ---------------------------------------------------------------------------
 // AHL trees (spec §2.5)
 // ---------------------------------------------------------------------------
+
+/// The fixed ATL metadata object adaptor profile `ahl-adaptor-atl-v1` §4.2 pins.
+///
+/// "The ATL metadata object is FIXED and carries no AHL data... Its JCS form is the 36 bytes
+/// shown." Pinning it rather than using it keeps a log leaf a pure function of the anchored
+/// entry: ATL metadata is operator-supplied and covered by no AHL signature, so AHL data placed
+/// there would make an entry's leaf depend on bytes outside the signed envelope.
+pub const ATL_METADATA: &str = r#"{"ahl_adaptor":"ahl-adaptor-atl-v1"}"#;
+
+/// `SHA-256(JCS(ATL metadata))` — the constant second digest of every ATL log leaf (§4.2).
+///
+/// Recomputed here rather than transcribed; the profile document publishes the same value, and
+/// a unit test holds the two together.
+#[must_use]
+pub fn atl_metadata_hash() -> Hash {
+    Sha256::digest(ATL_METADATA.as_bytes()).into()
+}
+
+/// Adaptor profile id of the corpus's own minimal test profile.
+pub const TEST_PROFILE_ID: &str = "ahl-test-log-v1";
+
+/// Adaptor profile id of the ATL binding.
+pub const ATL_PROFILE_ID: &str = "ahl-adaptor-atl-v1";
+
+/// `log_id` for an ATL-bound corpus: `"sha256:" || hex(Origin ID)`, where the Origin ID is
+/// ATL's SHA-256 over the 16-byte Data Tree UUID (adaptor §7.1).
+///
+/// A verifier never needs the UUID — the Origin ID is what the 98-byte checkpoint blob binds
+/// and what the manifest pins — so this exists for the producer side, and to state in one place
+/// that an ATL `log_id` is not a free-form identifier.
+#[must_use]
+pub fn atl_log_id(tree_uuid: &[u8; 16]) -> String {
+    sha256_hex(tree_uuid)
+}
+
+/// The leaf PREIMAGE of one anchored log entry under `profile_id` — the bytes
+/// [`leaf_hash`] prefixes with `0x00`.
+///
+/// The two profiles this crate implements build a log leaf differently, and nothing else about
+/// a log tree differs:
+///
+/// * `ahl-test-log-v1` (its §2.1) hashes the anchored entry bytes directly, so the preimage is
+///   `JCS(envelope)`;
+/// * `ahl-adaptor-atl-v1` (its §4.2) combines two digests, so the preimage is
+///   `SHA-256(JCS(envelope)) || METADATA_HASH` and the leaf is
+///   `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`. The first digest is the raw
+///   form of the AHL entry id, which is why the entry id stays derivable from the entry bytes
+///   alone.
+///
+/// The asymmetry stops at the log tree. Batch output, input-set and disposition trees are AHL
+/// constructs the log never sees, so they take plain leaf hashing under BOTH profiles (ATL
+/// adaptor §9: "An implementation MUST NOT apply the payload/metadata leaf construction to
+/// them").
+///
+/// # Errors
+///
+/// Returns [`AhlError::Field`] for a profile id this crate has no log-leaf construction for.
+pub fn log_leaf_bytes_for(envelope: &Value, profile_id: &str) -> AhlResult<Vec<u8>> {
+    match profile_id {
+        TEST_PROFILE_ID => Ok(jcs(envelope)),
+        ATL_PROFILE_ID => {
+            let mut preimage = Vec::with_capacity(64);
+            preimage.extend_from_slice(&Sha256::digest(jcs(envelope)));
+            preimage.extend_from_slice(&atl_metadata_hash());
+            Ok(preimage)
+        }
+        other => {
+            Err(AhlError::Field(format!("no log-leaf construction for adaptor profile `{other}`")))
+        }
+    }
+}
 
 /// AHL leaf hash — `SHA-256(0x00 || bytes)`.
 #[must_use]
@@ -959,6 +1030,39 @@ pub(crate) fn strip_prefix<'a>(value: &'a str, prefix: &'static str) -> AhlResul
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_atl_metadata_digest_is_the_constant_the_profile_publishes() {
+        // Adaptor profile `ahl-adaptor-atl-v1` §4.2 publishes both the object and its digest.
+        // Recomputing the digest here is what keeps a transcription error from silently
+        // changing every ATL log leaf this crate builds.
+        assert_eq!(ATL_METADATA.len(), 36, "§4.2: \"its JCS form is the 36 bytes shown\"");
+        assert_eq!(
+            hash_hex(&atl_metadata_hash()),
+            "sha256:bb4f98461f062d897980c9050f8f859c3b83c84486c5e6857262f6dfa97468a4"
+        );
+    }
+
+    #[test]
+    fn the_two_profiles_build_a_log_leaf_differently() {
+        let key = TestKey::from_seed_hex("t", &"01".repeat(32)).expect("seed");
+        let env = envelope(json!({ "type": "ingestion" }), &key);
+
+        // `ahl-test-log-v1` §2.1: the preimage IS the anchored entry bytes.
+        let test_leaf = log_leaf_bytes_for(&env, TEST_PROFILE_ID).expect("test profile");
+        assert_eq!(test_leaf, jcs(&env));
+
+        // `ahl-adaptor-atl-v1` §4.2: `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`,
+        // and the first digest is the raw form of the AHL entry id.
+        let atl_leaf = log_leaf_bytes_for(&env, ATL_PROFILE_ID).expect("atl profile");
+        assert_eq!(atl_leaf.len(), 64);
+        assert_eq!(sha256_hex(&jcs(&env)), entry_id(&env));
+        assert_eq!(&atl_leaf[..32], &parse_hash_hex(&entry_id(&env)).expect("entry id")[..]);
+        assert_eq!(&atl_leaf[32..], &atl_metadata_hash()[..]);
+        assert_ne!(hash_hex(&leaf_hash(&atl_leaf)), hash_hex(&leaf_hash(&test_leaf)));
+
+        assert!(log_leaf_bytes_for(&env, "ahl-adaptor-something-else").is_err());
+    }
     use super::*;
 
     const SEED: &str = "0101010101010101010101010101010101010101010101010101010101010101";

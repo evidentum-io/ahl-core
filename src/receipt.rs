@@ -2605,39 +2605,64 @@ fn checkpoint_object(value: &Value) -> Result<&Value> {
     Ok(value)
 }
 
-/// The corpus's own minimal test profile — the ONE profile this VERIFIER has a checkpoint
-/// signing-bytes procedure for.
+/// The two adaptor profiles this verifier implements end to end.
 ///
-/// `ahl-adaptor-atl-v1` is deliberately NOT dispatched here even though
-/// `ahl_core::checkpoint_signing_bytes_for`/`ahl_core::reconcile_atl_checkpoint_raw` implement
-/// its checkpoint-blob mechanism and are unit-tested in `lib.rs`: that profile's leaf
-/// construction (adaptor §4.2, `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`) and
-/// origin-derived `log_id` (§7.1, the SHA-256 of a 16-byte Data Tree UUID) are not yet
-/// profile-dispatched anywhere ELSE in this crate — inclusion proofs and entry ids still use
-/// the one generic form every corpus here shares — so a checkpoint whose SIGNATURE verified
-/// correctly would still rest on entries hashed the wrong way. And adaptor §14: "Until this
-/// document is released as an immutable, openly published artifact… no manifest may pin it."
-/// A receipt naming `ahl-adaptor-atl-v1` is therefore refused as
-/// [`ReceiptError::AdaptorCapabilityUnsupported`] — a profile-limitation outcome, never
-/// `invalid` — regardless of what local policy holds for it.
-const TEST_ADAPTOR_PROFILE_ID: &str = "ahl-test-log-v1";
+/// Core spec §3 item 6 forbids verification from depending on knowledge outside the profile
+/// document, so "which profiles a build implements" is a property of the BUILD, named here, and
+/// a receipt pinning any other id is refused as a profile limitation rather than as a defect.
+///
+/// * [`TEST_ADAPTOR_PROFILE_ID`] is the corpus's own minimal profile: `JCS(envelope)` log
+///   leaves (its §2.1), `JCS(cp minus "signature")` checkpoint signing bytes (its §5), and no
+///   binary checkpoint framing at all (its §7).
+/// * [`ATL_ADAPTOR_PROFILE_ID`] is the ATL binding: two-digest log leaves (its §4.2), the
+///   98-byte checkpoint blob (its §6.1, §6.5), and a `raw` framing that MUST reconcile with the
+///   JSON members where carried (its §6.4). Its `log_id` is origin-derived (its §7.1), which
+///   this verifier sees as the requirement that `log_id` be a 32-octet `sha256:` family string
+///   — the Origin ID itself — since the 98-byte blob it reconstructs binds exactly those bytes.
+///
+/// Everything else about a log tree is shared: node hashing, the splitting rule, inclusion and
+/// consistency proofs, and the range-proof serialization. The AHL trees the log never sees —
+/// batch outputs, input sets, dispositions — take plain leaf hashing under BOTH (ATL adaptor
+/// §9: an implementation "MUST NOT apply the payload/metadata leaf construction to them").
+///
+/// **The ATL profile is PRE-RELEASE.** Its own §14 makes release a precondition for use:
+/// "Until this document is released as an immutable, openly published artifact at a stable
+/// location, its digest is not stable and no manifest may pin it." The digest this crate's
+/// corpus pins is the CURRENT DRAFT's, which is a test-only pin; a production manifest MUST NOT
+/// pin the profile until that release obligation is met. Nothing about that is a verifier rule
+/// — §14 binds the corpus operator — so the verifier implements the profile and the corpus
+/// documents the pin.
+const TEST_ADAPTOR_PROFILE_ID: &str = crate::TEST_PROFILE_ID;
 
-/// The bytes a checkpoint's own log signature is verified over.
-///
-/// Narrower than the crate-level, profile-string-dispatched
-/// `ahl_core::checkpoint_signing_bytes_for`: this verifier only ever trusts the ONE profile
-/// procedure it actually stands behind ([`TEST_ADAPTOR_PROFILE_ID`]'s own, I-D §3.2). Any other
-/// profile id — `ahl-adaptor-atl-v1` included — is the profile-limitation outcome rather than
-/// a silent fallback to a form this crate cannot yet vouch for end to end (see
-/// [`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment).
+/// See [`TEST_ADAPTOR_PROFILE_ID`].
+const ATL_ADAPTOR_PROFILE_ID: &str = crate::ATL_PROFILE_ID;
+
+/// The bytes a checkpoint's own log signature is verified over, dispatched on the pinned
+/// profile (I-D §3.2: the checkpoint's signing form is profile-defined).
 fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> Result<Vec<u8>> {
     check_profile_supported(profile_id)?;
-    Ok(crate::checkpoint_signing_bytes(checkpoint)?)
+    Ok(crate::checkpoint_signing_bytes_for(checkpoint, profile_id)?)
 }
 
-/// Refuse a profile id this verifier has no checkpoint procedure for, at the point I-D §7.5
-/// step 2 resolves the profile — after the recomputed-hash comparison and before any carried
-/// material is verified.
+/// The leaf preimage of one anchored LOG entry under the pinned profile
+/// ([`crate::log_leaf_bytes_for`]).
+fn log_leaf_bytes(envelope: &Value, profile_id: &str) -> Result<Vec<u8>> {
+    check_profile_supported(profile_id)?;
+    Ok(crate::log_leaf_bytes_for(envelope, profile_id)?)
+}
+
+/// Whether this build reconciles a carried `checkpoint.raw` under `profile_id`.
+///
+/// A profile that defines no binary framing has nothing to reconcile against, so `raw` under it
+/// is material the profile does not define; a profile that defines one this build has no parser
+/// for would be a build limitation. Today the two coincide with the two profile ids.
+const fn parses_checkpoint_raw(profile_id: &str) -> bool {
+    matches!(profile_id.as_bytes(), b"ahl-adaptor-atl-v1")
+}
+
+/// Refuse a profile id this verifier has no procedures for, at the point I-D §7.5 step 2
+/// resolves the profile — after the recomputed-hash comparison and before any carried material
+/// is verified.
 ///
 /// The refusal is a capability outcome about the receipt's own pinned profile, so it is
 /// decidable from the id alone and nothing in the receipt can change it. Deciding it here,
@@ -2647,7 +2672,7 @@ fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> Result<
 /// Ordering that work ahead of a decided refusal would let material this verifier has already
 /// declined to interpret drive it.
 fn check_profile_supported(profile_id: &str) -> Result<()> {
-    if profile_id == TEST_ADAPTOR_PROFILE_ID {
+    if profile_id == TEST_ADAPTOR_PROFILE_ID || profile_id == ATL_ADAPTOR_PROFILE_ID {
         return Ok(());
     }
     Err(ReceiptError::AdaptorCapabilityUnsupported {
@@ -2656,26 +2681,32 @@ fn check_profile_supported(profile_id: &str) -> Result<()> {
     })
 }
 
-/// Reject a receipt-borne checkpoint's optional `raw` framing (I-D §7.1, §7.5 step 2: "WHERE
-/// `raw` is carried it MUST parse to the same values as the JSON members").
+/// Reconcile a receipt-borne checkpoint's optional `raw` framing (I-D §7.1, §7.5 step 2:
+/// "WHERE `raw` is carried it MUST parse to the same values as the JSON members").
 ///
-/// This build wires NO profile's `raw` parser into the verifier — `ahl-test-log-v1` defines no
-/// binary framing at all (its own §5), and `ahl-adaptor-atl-v1`'s is deliberately not reachable
-/// here either (see [`TEST_ADAPTOR_PROFILE_ID`]'s doc comment: leaf/origin construction for
-/// that profile is not yet dispatched anywhere in this crate, and the profile document is not
-/// yet released, adaptor §14). So `raw`'s mere presence is always the profile-limitation
-/// outcome, unconditionally — `verify_nested`'s policy-level check already refuses a policy
-/// that claims `checkpoint_raw: true` for ANY profile before a receipt is even read, so
-/// `profile`/`profile_id` are accepted here only to name the profile in the error, never to
-/// branch on what the policy claims.
+/// Under `ahl-adaptor-atl-v1` that is the profile's own §6.4/§6.5 step 3: parse the 98 octets,
+/// require the `ATL-Protocol-v1-CP` magic, and compare byte for byte with the blob assembled
+/// from the JSON members — the JSON members govern, and a mismatch is `invalid`. Under a
+/// profile that defines no binary framing there is nothing to parse `raw` against, so its mere
+/// presence is the profile-limitation outcome: `ahl-test-log-v1`'s own §7 says a receipt
+/// carrying `raw` under it "MUST be rejected — there is no framing to parse it against".
 fn reconcile_checkpoint_raw(checkpoint: &Value, profile_id: &str) -> Result<()> {
-    if checkpoint.get("raw").is_some() {
+    let Some(raw) = checkpoint.get("raw") else { return Ok(()) };
+    if !parses_checkpoint_raw(profile_id) {
         return Err(ReceiptError::AdaptorCapabilityUnsupported {
             id: profile_id.to_owned(),
             capability: "a binary checkpoint framing for `checkpoint.raw`",
         });
     }
-    Ok(())
+    let raw = raw.as_str().ok_or_else(|| {
+        ReceiptError::Malformed(
+            "checkpoint raw: MUST be a `base64:` family string (adaptor profile \
+             `ahl-adaptor-atl-v1` §6.4)"
+                .to_owned(),
+        )
+    })?;
+    crate::reconcile_atl_checkpoint_raw(checkpoint, raw)
+        .map_err(|source| ReceiptError::Malformed(source.to_string()))
 }
 
 /// Reconcile the `raw` form of every checkpoint the `anchoring` block carries (I-D §7.5
@@ -3478,7 +3509,7 @@ fn verify_rotation_proof(
 
     let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
     check_inclusion(
-        &jcs(rotating_envelope),
+        &log_leaf_bytes(rotating_envelope, profile_id)?,
         manifest_entry_index,
         tree_size,
         &path_strings(element, "inclusion_path")?,
@@ -4487,6 +4518,7 @@ fn check_key_independent_paths(
     subject_index: u64,
     tree_size: u64,
     root: &Hash,
+    profile_id: &str,
     run: &mut Run,
 ) -> Result<()> {
     if subject_index >= tree_size {
@@ -4496,7 +4528,7 @@ fn check_key_independent_paths(
         });
     }
     check_inclusion(
-        &jcs(envelope),
+        &log_leaf_bytes(envelope, profile_id)?,
         subject_index,
         tree_size,
         &path_strings(obj(receipt, "anchoring")?, "inclusion_path")?,
@@ -4532,7 +4564,7 @@ fn check_key_independent_paths(
             )));
         }
         check_inclusion(
-            &jcs(hop_envelope),
+            &log_leaf_bytes(hop_envelope, profile_id)?,
             index,
             tree_size,
             &path_strings(hop, "inclusion_path")?,
@@ -4991,12 +5023,11 @@ fn resolve_adaptor_profile<'a>(
     // (see [`check_profile_supported`]) — before the governance induction, never after it.
     check_profile_supported(adaptor_id)?;
     // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values" — a
-    // capability boolean is not itself reconciliation. This build wires NO profile's `raw`
-    // parser into the verifier ([`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment), so a policy
-    // asserting `checkpoint_raw: true` for ANY profile can never make good on that claim, and
-    // is refused here, once, as a POLICY defect — never silently downgraded to "accept `raw`
-    // unparsed" for every receipt this policy verifies.
-    if profile.capabilities.checkpoint_raw {
+    // capability boolean is not itself reconciliation. A policy asserting `checkpoint_raw:
+    // true` for a profile this build has no `raw` parser for could never make good on that
+    // claim, and is refused here, once, as a POLICY defect — never silently downgraded to
+    // "accept `raw` unparsed" for every receipt this policy verifies.
+    if profile.capabilities.checkpoint_raw && !parses_checkpoint_raw(adaptor_id) {
         return Err(ReceiptError::AdaptorProfileMisconfigured {
             id: adaptor_id.to_owned(),
             capability: "a binary checkpoint framing for `checkpoint.raw`",
@@ -5365,6 +5396,7 @@ fn decode_enumeration(
     root: &Hash,
     tree_size: u64,
     what: &'static str,
+    profile_id: &str,
     run: &mut Run,
 ) -> Result<Enumeration> {
     let range = obj(material, "range")?;
@@ -5422,7 +5454,13 @@ fn decode_enumeration(
         });
     }
     run.spend(u64::try_from(envelopes.len()).unwrap_or(u64::MAX).saturating_add(1))?;
-    let leaves: Vec<Vec<u8>> = envelopes.iter().map(jcs).collect();
+    // Adaptor §10.4/§8.2 for ATL, §8.2/§2.1 for the test profile: the byte layout of a range
+    // proof is identical under both, and "the leaf hashing differs, because the log leaf
+    // construction differs".
+    let leaves = envelopes
+        .iter()
+        .map(|envelope| log_leaf_bytes(envelope, profile_id))
+        .collect::<Result<Vec<_>>>()?;
     if !range_proof::verify_over_leaves(&proof, &leaves, root)? {
         return Err(ReceiptError::RangeProofInvalid {
             what,
@@ -5566,9 +5604,10 @@ fn verify_enumeration(
     root: &Hash,
     tree_size: u64,
     what: &'static str,
+    profile_id: &str,
     run: &mut Run,
 ) -> Result<Enumeration> {
-    let enumeration = decode_enumeration(material, root, tree_size, what, run)?;
+    let enumeration = decode_enumeration(material, root, tree_size, what, profile_id, run)?;
     // No direct-sweep exemption here: these are the CLAIM's own ranges (competing triggers, the
     // completeness prefix), each verified as its own carried material. What the governance path
     // exempts is the one duty discharged twice over one envelope — the 4d sweep over the void
@@ -5800,7 +5839,15 @@ fn verify_nested(
     let checkpoint = checkpoint_object(obj(anchoring_block, "checkpoint")?)?;
     let tree_size = number(checkpoint, "tree_size")?;
     let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
-    check_key_independent_paths(receipt, envelope, subject_index, tree_size, &root, run)?;
+    check_key_independent_paths(
+        receipt,
+        envelope,
+        subject_index,
+        tree_size,
+        &root,
+        adaptor_id,
+        run,
+    )?;
     let continued_history = check_continued_history_paths(anchoring_block, tree_size, &root, run)?;
     run.pass(Assertion::Anchoring);
 
@@ -5849,7 +5896,9 @@ fn verify_nested(
         });
     }
     let currency_enumeration = match mode {
-        "enumerated" => Some(decode_governance_enumeration(currency, &root, tree_size, run)?),
+        "enumerated" => {
+            Some(decode_governance_enumeration(currency, &root, tree_size, adaptor_id, run)?)
+        }
         // I-D §7.4: "`governance.chain[]` carries manifest statements; producer-key transitions
         // are `key` statements, and those reach a verifier only through enumeration material."
         // Declared mode carries none, so the induction's second stream is empty and the key
@@ -6380,10 +6429,11 @@ fn decode_governance_enumeration(
     currency: &Value,
     root: &Hash,
     tree_size: u64,
+    profile_id: &str,
     run: &mut Run,
 ) -> Result<Enumeration> {
     let material = obj(currency, "material")?;
-    let enumeration = decode_enumeration(material, root, tree_size, "governance", run)?;
+    let enumeration = decode_enumeration(material, root, tree_size, "governance", profile_id, run)?;
     if enumeration.from_index != 0 || enumeration.to_index != tree_size {
         return Err(ReceiptError::GovernanceRangeNotComplete {
             got_from: enumeration.from_index,
@@ -7350,6 +7400,7 @@ fn verify_competing_triggers(
         &root,
         tree_size,
         "competing triggers",
+        ctx.profile_id,
         run,
     )?;
 
@@ -7663,6 +7714,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> 
         &root,
         anchor_size,
         "corpus prefix",
+        ctx.profile_id,
         run,
     )?;
     if prefix.from_index != 0 || prefix.to_index != tree_size {
@@ -7675,7 +7727,12 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> 
             ),
         });
     }
-    let recomputed_d = hash_hex(&tree_root(&prefix.entries.iter().map(jcs).collect::<Vec<_>>()));
+    let prefix_leaves = prefix
+        .entries
+        .iter()
+        .map(|envelope| log_leaf_bytes(envelope, ctx.profile_id))
+        .collect::<Result<Vec<_>>>()?;
+    let recomputed_d = hash_hex(&tree_root(&prefix_leaves));
     if recomputed_d != text(carried_d, "root_hash")? {
         return Err(ReceiptError::CheckpointNotBound {
             field: "claim_material.corpus_checkpoint",
