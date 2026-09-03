@@ -122,14 +122,20 @@ The corpus is 33 anchored entries carrying these interlocking scenarios:
 5. **Challenge.** Entry 23 retracts a record under a key that is *not* the dataset authority, so
    it anchors as a challenge (spec §2.3.3); entry 24 propagates over it anyway. No
    `propagation-complete` receipt over that propagation can verify, which is the point.
-6. **Signature handling on competing triggers.** Entries 28, 29 and 31 all retract record F.
-   Entry 28 names the real authority's `key_id` with a signature that does not verify; entry 29
-   carries a genuine signature from a non-authority key alongside a non-verifying one that names
-   the authority; entry 31 is genuinely co-signed by the authority and a second active producer
-   key. Spec §2.1 forbids two envelopes sharing a statement id, and the statement id digests the
-   payload alone, so the three carry different `reason_code` values — otherwise they would be
-   one statement anchored three times, of which only entry 28 would govern and the other two
-   would be void.
+6. **Signature handling on competing triggers.** Entries 29, 30 and 31 all retract record F.
+   Entry 29 is genuinely co-signed by the authority and a second active producer key (entry 28
+   re-adds it after manifest v2 dropped it); entry 30 names the real authority's `key_id` with a
+   signature that does not verify; entry 31 carries a genuine signature from a non-authority key
+   alongside a non-verifying one that names the authority. Spec §2.1 forbids two envelopes
+   sharing a statement id, and the statement id digests the payload alone, so the three carry
+   different `reason_code` values — otherwise they would be one statement anchored three times,
+   of which only entry 29 would govern and the other two would be void. The two non-verifying
+   fixtures sit at the TAIL of the corpus on purpose. I-D §7.5.1 4d requires every carried
+   envelope to verify, enumerated material included, and enumerated governance currency covers
+   exactly `[0, tree_size(C))` (§7.4), so a non-verifying envelope anchored at index *i* makes
+   every enumerated claim at a tree size greater than *i* invalid. Placing the fixtures before
+   the genuinely co-signed trigger would leave no checkpoint at which that trigger's own
+   effectiveness could be enumerated.
 7. **Continued history.** A consistency proof from cp20 to cp24 backs
    `assurance.continued_history` on a receipt, and a proof generated for a different pair of
    sizes — genuine, correctly built, about the wrong fact — is rejected. `anchoring.checkpoint`

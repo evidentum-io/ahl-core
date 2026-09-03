@@ -30,11 +30,13 @@ use ahl_core::{
 };
 use serde_json::{json, Value};
 
-/// The statement vectors, in entry-index order. Entry 28 is an intentional non-verifying-
-/// signature fixture: well-formed shape, real authority `key_id`, garbage `sig`. Entry 29 adds
-/// a second, genuinely valid signature entry from a non-authority key alongside a non-verifying
-/// authority-named one. Entry 30 re-adds `producer-2` to the producer snapshot; entry 31 is a
-/// trigger genuinely CO-SIGNED by both the authority and `producer-2`.
+/// The statement vectors, in entry-index order. Entry 28 re-adds `producer-2` to the producer
+/// snapshot and entry 29 is a trigger genuinely CO-SIGNED by both the authority and
+/// `producer-2`. Entry 30 is an intentional non-verifying-signature fixture: well-formed shape,
+/// real authority `key_id`, garbage `sig`. Entry 31 adds a second, genuinely valid signature
+/// entry from a non-authority key alongside a non-verifying authority-named one. The two
+/// non-verifying fixtures sit at the tail so that enumerated material below them stays
+/// verifiable (I-D §7.5.1 4d).
 const STATEMENT_FILES: [&str; 33] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
@@ -64,10 +66,10 @@ const STATEMENT_FILES: [&str; 33] = [
     "25-manifest-v2-rotate-witness-drop-key.json",
     "26-ingestion-customers-d-under-v2.json",
     "27-derivation-z-from-affected-descendant.json",
-    "28-invalid-signature-trigger-f.json",
-    "29-unverified-authority-signature-trigger-f.json",
-    "30-key-readd-producer-2.json",
-    "31-retraction-f-co-signed-authority-and-producer-2.json",
+    "28-key-readd-producer-2.json",
+    "29-retraction-f-co-signed-authority-and-producer-2.json",
+    "30-invalid-signature-trigger-f.json",
+    "31-unverified-authority-signature-trigger-f.json",
     "32-ingestion-customers-e-stale-manifest.json",
 ];
 
@@ -334,9 +336,9 @@ fn no_two_anchored_envelopes_share_a_statement_id() {
     assert_eq!(entries.len(), STATEMENT_FILES.len());
 
     // The three retractions of record F that exist to exercise signature handling — the
-    // non-verifying one, the one whose authority-named entry does not verify, and the genuinely
-    // co-signed one — are distinct statements, not one statement anchored three times.
-    let f_triggers: Vec<&Value> = [28usize, 29, 31].iter().map(|i| &vectors[*i]).collect();
+    // genuinely co-signed one, the non-verifying one, and the one whose authority-named entry
+    // does not verify — are distinct statements, not one statement anchored three times.
+    let f_triggers: Vec<&Value> = [29usize, 30, 31].iter().map(|i| &vectors[*i]).collect();
     let records: BTreeSet<&str> = f_triggers
         .iter()
         .map(|v| field_str(&v["envelope"]["payload"], "record").expect("record"))
@@ -384,11 +386,11 @@ fn the_manifest_chain_links_by_entry_id_and_rotates_the_witness_set() {
 
 #[test]
 fn every_statement_signature_verifies() {
-    // Entries 28 and 29 are intentional non-verifying-signature fixtures: well-formed shape,
-    // real authority `key_id`, garbage `sig` (entry 29 also carries a second, genuinely valid
+    // Entries 30 and 31 are intentional non-verifying-signature fixtures: well-formed shape,
+    // real authority `key_id`, garbage `sig` (entry 31 also carries a second, genuinely valid
     // entry from a non-authority key). Every other entry must genuinely verify; these two must
     // not.
-    const NON_VERIFYING: [usize; 2] = [28, 29];
+    const NON_VERIFYING: [usize; 2] = [30, 31];
     let vectors = statement_vectors();
     let keys = key_set(&vectors);
     for (index, vector) in vectors.iter().enumerate() {
@@ -1184,7 +1186,7 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             matches!(error, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. })
         }
         "trigger-effective-unverified-authority-signature-must-fail.ahl" => {
-            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 29 })
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 31 })
         }
         "propagation-complete-past-declared-checkpoint-must-fail.ahl" => matches!(
             error,
@@ -3616,11 +3618,11 @@ fn a_later_challenge_cannot_unseat_an_authorized_trigger() {
     assert!(!authority.contains(&signer(23)), "entry 23 must be the challenge");
 
     // Bounded to [0, 25): entries 22 (authorized) and 23 (challenge) are what this test
-    // illustrates. Entry 28 also names F — it is the non-verifying-signature fixture, covered
-    // end to end by `trigger-effective-non-verifying-signature-ignored.ahl` — and is
-    // deliberately out of scope here: a `key_id`-only "authority" filter, as used below, cannot
-    // tell it apart from a genuine signature, which is exactly why `is_authorized_trigger` in
-    // the verifier checks the signature cryptographically rather than reusing this shortcut.
+    // illustrates. Entries 29, 30 and 31 also name F — the genuinely co-signed trigger and the
+    // two non-verifying fixtures — and are deliberately out of scope here: a `key_id`-only
+    // "authority" filter, as used below, cannot tell a non-verifying signature apart from a
+    // genuine one, which is exactly why the verifier checks each candidate's signature
+    // cryptographically rather than reusing this shortcut.
     let mut scope = 0..25;
 
     // Selecting by greatest entry index *first* would pick the challenge — the pre-fix bug.

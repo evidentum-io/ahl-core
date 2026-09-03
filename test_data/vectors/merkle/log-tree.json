@@ -174,28 +174,28 @@
       "name": "27-derivation-z-from-affected-descendant"
     },
     {
-      "entry_id": "sha256:7c5ff0d0c7e88ccdaa5f7b32debeb44244ae4b4cd547ebbfd04240faf2e0a407",
-      "entry_index": 28,
-      "leaf_hash": "sha256:1ab2f8c8d5cd983e31bf8baf24312963b1bcaf88659df95fd34f1b3804c69e42",
-      "name": "28-invalid-signature-trigger-f"
-    },
-    {
-      "entry_id": "sha256:cf7bada16206c64904cc5274c331e4e04335206d20b243f95d9fccdcd5f7d0e1",
-      "entry_index": 29,
-      "leaf_hash": "sha256:450e92997a24a450138f3d7928e98e89923b5b09f16ffeaf7d7b264aa0a13835",
-      "name": "29-unverified-authority-signature-trigger-f"
-    },
-    {
       "entry_id": "sha256:04a4aa35ff09e9ba808432711aaa3ace7e4d19d8aeec7ccd1dc2f361273bfa94",
-      "entry_index": 30,
+      "entry_index": 28,
       "leaf_hash": "sha256:f6be0485b6680bb6eaf2b2d1641eb22de9f274d953f147490e47f9fe28c56946",
-      "name": "30-key-readd-producer-2"
+      "name": "28-key-readd-producer-2"
     },
     {
       "entry_id": "sha256:b1687efe995ceaa98b8ca7e7c2b75ff70acefbb73afc7a2cd49a9166eacbd1bb",
-      "entry_index": 31,
+      "entry_index": 29,
       "leaf_hash": "sha256:b2f76adebe5c8fda83abef9327eb4d9ed51ad15836b4f1476c65e258998d746c",
-      "name": "31-retraction-f-co-signed-authority-and-producer-2"
+      "name": "29-retraction-f-co-signed-authority-and-producer-2"
+    },
+    {
+      "entry_id": "sha256:7c5ff0d0c7e88ccdaa5f7b32debeb44244ae4b4cd547ebbfd04240faf2e0a407",
+      "entry_index": 30,
+      "leaf_hash": "sha256:1ab2f8c8d5cd983e31bf8baf24312963b1bcaf88659df95fd34f1b3804c69e42",
+      "name": "30-invalid-signature-trigger-f"
+    },
+    {
+      "entry_id": "sha256:cf7bada16206c64904cc5274c331e4e04335206d20b243f95d9fccdcd5f7d0e1",
+      "entry_index": 31,
+      "leaf_hash": "sha256:450e92997a24a450138f3d7928e98e89923b5b09f16ffeaf7d7b264aa0a13835",
+      "name": "31-unverified-authority-signature-trigger-f"
     },
     {
       "entry_id": "sha256:3deb6a6fcc07352c1607d024b1d93378fc77c5b28468ba5138f6491fda911716",
@@ -257,22 +257,22 @@
     },
     {
       "name": "cp29",
-      "root": "sha256:fd4293e0d2d2e54871461784f42a2a7af77e7ae97bf2a0dc902e4dbcf73ba125",
+      "root": "sha256:7681375a9c4bc0f72ce8289de1f72dbfdb0fc85f119d570a4ef3c2c9768a440f",
       "tree_size": 29
     },
     {
       "name": "cp30",
-      "root": "sha256:af8730c2bfcd6f0aec793029f340cb2dcecb346b0c80c8436863b8116b078cb1",
+      "root": "sha256:1858cde5ebd977a179ba21db0ea6bbf3cc8d61bf151836d394c2cd87e0dbbffb",
       "tree_size": 30
     },
     {
       "name": "cp32",
-      "root": "sha256:a2bc9157534c779358cb52b1b5f377deee6d387c0af0029d201c83773a4035ea",
+      "root": "sha256:4ece275b1544ab27f1a95b17dab24e52f312c70ddc025aa352b04d5beb77a39c",
       "tree_size": 32
     },
     {
       "name": "cp33",
-      "root": "sha256:af07beca78e3d261ed86fe09b5e196196d1ba76d799df30d22f3f1019e146111",
+      "root": "sha256:48167d95ab6c3515479866c60853a73c3db226842587db044ca7d07216ee1a0d",
       "tree_size": 33
     }
   ]

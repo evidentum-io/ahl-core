@@ -52,10 +52,10 @@ pub const NAMES: [&str; 33] = [
     "25-manifest-v2-rotate-witness-drop-key",
     "26-ingestion-customers-d-under-v2",
     "27-derivation-z-from-affected-descendant",
-    "28-invalid-signature-trigger-f",
-    "29-unverified-authority-signature-trigger-f",
-    "30-key-readd-producer-2",
-    "31-retraction-f-co-signed-authority-and-producer-2",
+    "28-key-readd-producer-2",
+    "29-retraction-f-co-signed-authority-and-producer-2",
+    "30-invalid-signature-trigger-f",
+    "31-unverified-authority-signature-trigger-f",
     "32-ingestion-customers-e-stale-manifest",
 ];
 
@@ -592,83 +592,12 @@ impl Corpus {
             &keys.producer_1,
         );
 
-        // --- entry 28: a NON-VERIFYING trigger on F, claiming the real authority's key_id ---
-        // Structurally this is a well-formed retraction of F, naming `producer-1`'s real
-        // `key_id` — the genuine `customers` dataset authority — so `key_id`-only matching would
-        // accept it. Its `sig` is garbage, not a signature `producer-1` ever produced. The log
-        // anchors opaque bytes (spec §3 contract item 1) and does not itself validate AHL
-        // signatures, so a statement like this really can get anchored; only cryptographic
-        // verification of the candidate's own signature — not a claimed-`key_id` lookup — can
-        // catch it. Anchored after entry 22's genuine, authorized retraction, this is what the
-        // competing-trigger selection at cp29 must NOT let govern.
-        // The three retractions of F at entries 28, 29 and 31 carry DIFFERENT `reason_code`
-        // values for one reason: spec §2.1 forbids anchoring two envelopes with the same
-        // statement id, and the statement id is the digest of the payload alone. Identical
-        // payloads under different signature sets would be one statement anchored three times,
-        // of which only the smallest entry index governs and the later two are void — so the
-        // two negative fixtures below could not be reasoned about, and the positive one at
-        // entry 31 could never govern. The reason code is the payload member that carries no
-        // verification weight, so it is the honest place to make them distinct.
-        let mut env_28 = signed(
-            "retraction",
-            &m2,
-            json!({
-                "dataset": DS_CUSTOMERS,
-                "record": r.c_f,
-                "scope": { "effective_from": T0, "retroactive": true },
-                "reason_code": "fraud",
-            }),
-            &keys.producer_1,
-        );
-        env_28["signatures"][0]["sig"] = json!(format!(
-            "base64:{}",
-            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
-        ));
-
-        // --- entry 29: a trigger on F whose OWN envelope carries two signature entries ---
-        // One entry is a genuinely valid signature from `producer-2` — a real, in-force
-        // producer key that is NOT the `customers` dataset authority. The other names
-        // `producer-1`'s real `key_id` — the genuine authority — but its `sig` is garbage, not
-        // a signature `producer-1` ever produced. Anchored as its own subject (not merely as a
-        // competing candidate), this entry exists to exercise `verify_trigger_authority`
-        // directly: a signer set that merely *contains* the authority's `key_id` is not
-        // sufficient grounds for effectiveness — that specific signature entry must itself
-        // cryptographically verify (receipt format §3).
-        let f_retraction_2 = payload(
-            "retraction",
-            &m2,
-            json!(T0),
-            json!({
-                "dataset": DS_CUSTOMERS,
-                "record": r.c_f,
-                "scope": { "effective_from": T0, "retroactive": true },
-                "reason_code": "error",
-            }),
-        );
-        let producer_2_sig = keys.producer_2.sign(&jcs(&f_retraction_2));
-        let mut env_29_map = serde_json::Map::new();
-        env_29_map.insert("payload".to_owned(), f_retraction_2);
-        env_29_map.insert(
-            "signatures".to_owned(),
-            json!([
-                { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig },
-                {
-                    "key_id": keys.producer_1.key_id(),
-                    "sig": format!(
-                        "base64:{}",
-                        base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
-                    ),
-                },
-            ]),
-        );
-        let env_29 = Value::Object(env_29_map);
-
-        // --- entry 30: re-add producer-2 to the producer snapshot after manifest v2 dropped
+        // --- entry 28: re-add producer-2 to the producer snapshot after manifest v2 dropped
         // it (spec §7.2, §2.3.6). This is what makes a genuinely CO-SIGNED trigger reachable:
         // a signer must be an active producer key at the co-signed statement's entry index,
         // and manifest v2 (entry 25) discarded producer-2. A fresh `key` "add" event brings it
         // back into force from this entry onward, exactly as entry 9 originally added it.
-        let env_30 = signed(
+        let env_28 = signed(
             "key",
             &m2,
             json!({
@@ -682,14 +611,32 @@ impl Corpus {
             &keys.producer_1,
         );
 
-        // --- entry 31: a trigger on F CO-SIGNED by both the `customers` authority and
+        // --- entry 29: a trigger on F CO-SIGNED by both the `customers` authority and
         // producer-2 --- Both signature entries are genuinely valid: `producer-1` (the
         // authority) and `producer-2` (another producer key active as of this entry, following
-        // entry 30's re-add). Receipt format §5 step 3a: authorization requires AT LEAST ONE
+        // entry 28's re-add). Receipt format §5 step 3a: authorization requires AT LEAST ONE
         // verified signer to be the authority, never signing EXCLUSIVELY by authority keys — a
         // legitimately co-signed trigger like this one must still classify as authorized and
         // must still govern.
-        let f_retraction_3 = payload(
+        //
+        // It is anchored BEFORE the two non-verifying fixtures below, and that ordering is
+        // load-bearing rather than incidental. I-D §7.5.1 4d requires every carried envelope —
+        // enumerated material included — to verify under K at its own entry index, and
+        // enumerated governance currency covers exactly `[0, tree_size(C))` (§7.4). A
+        // non-verifying envelope anchored at index i therefore makes every enumerated claim at
+        // a tree size greater than i invalid, so a corpus that placed the deliberately
+        // non-verifying fixtures before this one could carry no enumerated receipt about it at
+        // all. The fixtures sit at the tail for that reason.
+        //
+        // The three retractions of F at entries 29, 30 and 31 carry DIFFERENT `reason_code`
+        // values for one reason: spec §2.1 forbids anchoring two envelopes with the same
+        // statement id, and the statement id is the digest of the payload alone. Identical
+        // payloads under different signature sets would be one statement anchored three times,
+        // of which only the smallest entry index governs and the later two are void — so the
+        // two non-verifying fixtures below could not be reasoned about, and this positive one
+        // could never govern. The reason code is the payload member that carries no
+        // verification weight, so it is the honest place to make them distinct.
+        let f_retraction_29 = payload(
             "retraction",
             &m2,
             json!(T0),
@@ -700,15 +647,80 @@ impl Corpus {
                 "reason_code": "superseded",
             }),
         );
-        let producer_1_sig_31 = keys.producer_1.sign(&jcs(&f_retraction_3));
-        let producer_2_sig_31 = keys.producer_2.sign(&jcs(&f_retraction_3));
+        let producer_1_sig_29 = keys.producer_1.sign(&jcs(&f_retraction_29));
+        let producer_2_sig_29 = keys.producer_2.sign(&jcs(&f_retraction_29));
+        let mut env_29_map = serde_json::Map::new();
+        env_29_map.insert("payload".to_owned(), f_retraction_29);
+        env_29_map.insert(
+            "signatures".to_owned(),
+            json!([
+                { "key_id": keys.producer_1.key_id(), "sig": producer_1_sig_29 },
+                { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig_29 },
+            ]),
+        );
+        let env_29 = Value::Object(env_29_map);
+
+        // --- entry 30: a NON-VERIFYING trigger on F, claiming the real authority's key_id ---
+        // Structurally this is a well-formed retraction of F, naming `producer-1`'s real
+        // `key_id` — the genuine `customers` dataset authority — so `key_id`-only matching would
+        // accept it. Its `sig` is garbage, not a signature `producer-1` ever produced. The log
+        // anchors opaque bytes (spec §3 contract item 1) and does not itself validate AHL
+        // signatures, so a statement like this really can get anchored; only cryptographic
+        // verification of the candidate's own signature — not a claimed-`key_id` lookup — can
+        // catch it. Anchored after entry 22's genuine, authorized retraction and after the
+        // genuinely co-signed one at entry 29, it is what an enumeration reaching it must
+        // refuse outright (I-D §7.5.1 4d).
+        let mut env_30 = signed(
+            "retraction",
+            &m2,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_f,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "fraud",
+            }),
+            &keys.producer_1,
+        );
+        env_30["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
+
+        // --- entry 31: a trigger on F whose OWN envelope carries two signature entries ---
+        // One entry is a genuinely valid signature from `producer-2` — a real, in-force
+        // producer key (entry 28 re-added it) that is NOT the `customers` dataset authority.
+        // The other names `producer-1`'s real `key_id` — the genuine authority — but its `sig`
+        // is garbage, not a signature `producer-1` ever produced. Anchored as its own subject
+        // (not merely as a competing candidate), this entry exists to exercise the subject
+        // envelope rule directly: a signer set that merely *contains* the authority's `key_id`
+        // is not enough — that specific signature entry must itself cryptographically verify,
+        // and one non-verifying entry invalidates the envelope however many others verify
+        // (I-D §7.5.1 4d, §8.4).
+        let f_retraction_31 = payload(
+            "retraction",
+            &m2,
+            json!(T0),
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_f,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "error",
+            }),
+        );
+        let producer_2_sig_31 = keys.producer_2.sign(&jcs(&f_retraction_31));
         let mut env_31_map = serde_json::Map::new();
-        env_31_map.insert("payload".to_owned(), f_retraction_3);
+        env_31_map.insert("payload".to_owned(), f_retraction_31);
         env_31_map.insert(
             "signatures".to_owned(),
             json!([
-                { "key_id": keys.producer_1.key_id(), "sig": producer_1_sig_31 },
                 { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig_31 },
+                {
+                    "key_id": keys.producer_1.key_id(),
+                    "sig": format!(
+                        "base64:{}",
+                        base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+                    ),
+                },
             ]),
         );
         let env_31 = Value::Object(env_31_map);
@@ -1010,14 +1022,14 @@ impl Corpus {
     }
 
     fn check_signatures(&self, keys: &Keys) {
-        // Entries 28 and 29 are intentionally non-verifying vector fixtures: well-formed
-        // retractions naming the real authority's `key_id` with garbage `sig` bytes (entry 29
+        // Entries 30 and 31 are intentionally non-verifying vector fixtures: well-formed
+        // retractions naming the real authority's `key_id` with garbage `sig` bytes (entry 31
         // also carries a second, genuinely valid entry from a non-authority key). Every OTHER
         // entry must genuinely verify; these two must genuinely NOT — both are asserted below,
         // so a generator bug that accidentally produced a valid signature (defeating the
         // vector's purpose) or an invalid one elsewhere (a real regression) would each be
         // caught.
-        const NON_VERIFYING_ENTRIES: [usize; 2] = [28, 29];
+        const NON_VERIFYING_ENTRIES: [usize; 2] = [30, 31];
         for (index, env) in self.envelopes.iter().enumerate() {
             if NON_VERIFYING_ENTRIES.contains(&index) {
                 continue;
@@ -1409,22 +1421,22 @@ impl Corpus {
                 "entry_id": entry_id(env),
                 "envelope": env,
             });
-            if index == 28 {
+            if index == 30 {
                 // Structurally a well-formed AHL statement (statement_id/entry_id are ordinary
                 // digests of it), anchored like any other entry — but its `sig` is garbage, not
                 // a signature `producer-1` ever produced, even though `signatures[0].key_id`
                 // names `producer-1`'s real key. The log anchors opaque bytes and does not
                 // itself validate AHL signatures (core spec §3 contract item 1), so this is what
                 // a real non-verifying statement anchored in the log looks like. It exists to
-                // prove that competing-trigger selection verifies each candidate's signature
-                // cryptographically rather than trusting a claimed `key_id` (receipt format §3).
+                // prove that enumerated material is verified envelope by envelope rather than
+                // trusted on a claimed `key_id` (I-D §7.5.1 4d).
                 vector["note"] = json!(
                     "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against \
                      `signatures[0].key_id`'s real public key. See \
-                     trigger-effective-non-verifying-signature-ignored.ahl."
+                     trigger-effective-non-verifying-candidate-must-fail.ahl."
                 );
             }
-            if index == 29 {
+            if index == 31 {
                 // Structurally well-formed, carrying two signature entries: a genuinely valid
                 // one from `producer-2` (not the `customers` authority) and one naming
                 // `producer-1`'s real key_id (the genuine authority) whose `sig` is garbage. It
@@ -1556,7 +1568,7 @@ impl Corpus {
         let cp28 = self.anchor("cp28");
         // The `inclusion` block below is claimed against cp28's own root, so its proof must be
         // computed over exactly cp28's 28 leaves — the corpus has since grown further entries
-        // (the non-verifying-signature fixtures) that cp28 never committed.
+        // that cp28 never committed.
         let leaves = &self.log_leaves()[..at(cp28.tree_size())];
         let proof_3 = inclusion_proof(leaves, 3).expect("entry 3 is in the log");
         write_json(
@@ -1698,9 +1710,9 @@ impl Corpus {
 
     fn range_proof_vector(&self) -> Value {
         let cp28 = self.anchor("cp28");
-        // Scoped to cp28's own tree size (28): the corpus grows further entries past it (the
-        // non-verifying-signature fixtures), and this vector's proofs must stay over exactly the
-        // leaf set cp28 actually commits, not whatever the log has grown to since.
+        // Scoped to cp28's own tree size (28): the corpus grows further entries past it, and
+        // this vector's proofs must stay over exactly the leaf set cp28 actually commits, not
+        // whatever the log has grown to since.
         let leaves = &self.log_leaves()[..at(cp28.tree_size())];
         let hashes: Vec<_> = leaves.iter().map(|l| leaf_hash(l)).collect();
         let cases = [

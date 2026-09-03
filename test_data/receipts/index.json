@@ -155,8 +155,8 @@
       "claim_type": "trigger-effective",
       "expect": "reject",
       "file": "trigger-effective-unverified-authority-signature-must-fail.ahl",
-      "reason": "envelope signature at entry index 29 did not verify",
-      "rule": "receipt §5 step 4 — every subject envelope signature entry must verify"
+      "reason": "envelope signature at entry index 31 did not verify",
+      "rule": "I-D §7.5.1 4d — every subject envelope signature entry must verify"
     },
     {
       "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
