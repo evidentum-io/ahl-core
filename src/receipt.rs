@@ -1,9 +1,31 @@
 //! Offline verification of AHL Evidence Receipts (`.ahl`).
 //!
-//! [`verify_receipt`] implements the normative algorithm outline of Evidence Receipt format
-//! §5, the assurance semantics of §2.1, the key-binding rules of §2.2, the cross-field
+//! [`verify_receipt_report`] implements the normative algorithm outline of Evidence Receipt
+//! format §5, the assurance semantics of §2.1, the key-binding rules of §2.2, the cross-field
 //! consistency rules of §2.3, the claim-type registry of §3, the resource limits of §3.1 and
 //! the governance-currency modes of §4.
+//!
+//! # The result
+//!
+//! A run that completes reaches exactly one of I-D §7.7's three values — [`Outcome::Verified`],
+//! [`Outcome::Invalid`], [`Outcome::Unverifiable`] — over the whole receipt, reduced from one
+//! [`Finding`] per required [`Assertion`]. Which assertion a rejection belongs to is the PHASE
+//! of the §7.5 algorithm that raised it; which assertions a capability gap reaches is
+//! [`prerequisites`], and the run carries on with the rest.
+//!
+//! Not every non-verifying envelope is a defect of the receipt that carries it. §7.5.1 4d
+//! decides that by RELIANCE: the subject's envelope, an embedded receipt's subject and every
+//! `governance.chain[]` element are what a receipt rests on, and a failure there is `invalid`;
+//! every other carried envelope — a purported competing-trigger envelope, an entry of a
+//! propagation prefix, any entry an enumeration reveals — is VOID instead, "excluded before any
+//! authority comparison... never effective and never traversed", reported as an
+//! [`InformativeItem`] and consequential nowhere. The reason is the log contract: a log anchors
+//! opaque bytes and validates none, so were a void entry a defect of every later receipt, any
+//! party able to anchor one envelope could disable every enumerated claim of that log from that
+//! index on. A run that does NOT complete reaches none of them and
+//! is reported as [`ExecutionError`] instead, which is a statement about the verifier rather
+//! than about the receipt. [`verify_receipt`] is the single-value form of the same run, for
+//! callers that report one rejection rather than a report.
 //!
 //! # What "offline" means here
 //!
@@ -18,7 +40,10 @@
 //!
 //! Every rejection is a distinct [`ReceiptError`] variant naming the rule that fired, so a test
 //! can assert *which* rule rejected a deliberately malformed receipt rather than that "it
-//! failed somehow". Resource exhaustion is a rejection, never a degraded acceptance (§3.1).
+//! failed somehow", and every variant carries its §7.7 value ([`ReceiptError::class`]).
+//! Resource exhaustion is a rejection, never a degraded acceptance (§3.1): a FIXED limit
+//! ([`MAX_EMBEDDED_DEPTH`], [`MAX_EMBEDDED_RECEIPTS`]) is `invalid` and a verifier-local budget
+//! ([`Limits`]) is `unverifiable`, naming the budget and the value in force.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,31 +53,48 @@ use serde_json::Value;
 
 use crate::bitemporal::Scope;
 use crate::closure::{affected_set, TreeMaterial};
+use crate::descriptor::CanonicalizationDescriptor;
 use crate::range_proof;
 use crate::tree::ValidatedLeafSet;
 use crate::{
-    checkpoint_signing_bytes, commit_keyed, commit_plain, cosignature_bytes, decode_pubkey,
-    entry_id, hash_hex, jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id, tree_root,
-    verify_signature, AhlError, B64,
+    commit_keyed, commit_plain, cosignature_bytes, decode_pubkey, descriptor, entry_id, hash_hex,
+    jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id, tree_root, verify_signature,
+    AhlError, B64,
 };
 
-/// Receipt container version this verifier implements.
-pub const RECEIPT_VERSION: &str = "1";
+/// Receipt container version this verifier implements (I-D §7.1: `ahl_receipt_version`).
+pub const RECEIPT_VERSION: &str = "2";
 
-/// Core specification version this verifier implements.
-pub const SPEC_VERSION: &str = "0.3.0";
+/// Core specification version this verifier implements (I-D §7.1: `spec_version`).
+pub const SPEC_VERSION: &str = "0.4.0";
 
 // ---------------------------------------------------------------------------
 // Policy and limits
 // ---------------------------------------------------------------------------
 
-/// Resource limits (format §3.1). A verifier MUST fail closed on exhaustion.
+/// Maximum embedded-receipt nesting depth (I-D §7.8).
+///
+/// A FIXED limit, not policy: §7.8 puts it among the limits that "are properties of the
+/// artifact, decided identically by every verifier in every year, so a receipt exceeding either
+/// is `invalid`". A verifier that could lower it would report `invalid` over a receipt another
+/// verifier verifies, which §7.7 forbids; one that could raise it would accept a receipt the
+/// document says is invalid. It is therefore a constant of this crate rather than a member of
+/// [`Limits`].
+pub const MAX_EMBEDDED_DEPTH: usize = 4;
+
+/// Maximum embedded receipts per file (I-D §7.8). Fixed, for the reason [`MAX_EMBEDDED_DEPTH`]
+/// gives.
+pub const MAX_EMBEDDED_RECEIPTS: usize = 64;
+
+/// The VERIFIER-LOCAL budgets of I-D §7.8. A verifier MUST fail closed on exhaustion.
+///
+/// Only the two budgets live here. The §7.8 fixed limits are [`MAX_EMBEDDED_DEPTH`] and
+/// [`MAX_EMBEDDED_RECEIPTS`], and they are deliberately not configurable: "This document defines
+/// no receipt member, manifest field, or other declaration source that sets them, states no
+/// value for them" applies to the BUDGETS, while the fixed limits get values stated in the
+/// document itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// Maximum embedded-receipt nesting depth. Normative maximum: 4.
-    pub max_depth: usize,
-    /// Maximum embedded receipts per file. Normative maximum: 64.
-    pub max_embedded: usize,
     /// Decoded-size budget in bytes, over the JCS serialization of the whole receipt.
     pub max_decoded_bytes: usize,
     /// Verification-work budget: one unit per signature check, proof check or tree opening.
@@ -61,12 +103,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self {
-            max_depth: 4,
-            max_embedded: 64,
-            max_decoded_bytes: 8 * 1024 * 1024,
-            max_work_units: 100_000,
-        }
+        Self { max_decoded_bytes: 8 * 1024 * 1024, max_work_units: 100_000 }
     }
 }
 
@@ -87,24 +124,58 @@ pub struct AdaptorCapabilities {
     pub consistency_proofs: bool,
 }
 
-/// A locally possessed adaptor profile: the hash of the document plus what it defines.
+/// A locally possessed adaptor profile: the exact bytes of the held document plus what it
+/// defines.
+///
+/// I-D §3.2, §7.5 step 2: a verifier "MUST recompute the digest over the artifact rather than
+/// trusting any value carried with it, and MUST reject a receipt whose pinned digest does not
+/// match the artifact held." This crate therefore stores the ARTIFACT itself — never a
+/// caller-asserted hash string, which a caller could get wrong (or leave stale after the held
+/// document changed) with nothing left to catch it — and computes the digest FROM it at
+/// resolution time ([`AdaptorProfile::hash`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AdaptorProfile {
-    /// SHA-256 of the published profile document, as `sha256:<hex>`.
-    pub hash: String,
+    /// The exact bytes of the published profile document, held locally (core spec §3 item 6:
+    /// versioned, immutable, content-addressed).
+    pub document: Vec<u8>,
     /// What the document defines. Anything not listed here is unusable *under this profile*.
     pub capabilities: AdaptorCapabilities,
 }
 
 impl AdaptorProfile {
-    /// A profile that defines only what the corpus adaptor `ahl-test-log-v1` defines.
+    /// The SHA-256 digest of the held document, as `sha256:<hex>` — recomputed from
+    /// [`Self::document`] every time, never cached from or trusted as a value supplied
+    /// alongside it.
     #[must_use]
-    pub const fn minimal(hash: String) -> Self {
+    pub fn hash(&self) -> String {
+        sha256_hex(&self.document)
+    }
+
+    /// A profile that defines only what the corpus adaptor `ahl-test-log-v1` defines, over the
+    /// given held document.
+    #[must_use]
+    pub const fn minimal(document: Vec<u8>) -> Self {
         Self {
-            hash,
+            document,
             capabilities: AdaptorCapabilities { checkpoint_raw: false, consistency_proofs: false },
         }
     }
+}
+
+/// One witness key local policy holds, under the identity it holds it for (I-D §7.1).
+///
+/// `witness_id` is part of the entry rather than free-standing configuration because the
+/// identity is inside the cosignature preimage: a key trusted for one witness is not thereby a
+/// key trusted to cosign as another. The identity must ALSO be one the manifest version active
+/// for the checkpoint declares — that check is on the receipt's material, not on this entry,
+/// and lives in [`ReceiptError::WitnessNotDeclared`]'s call site.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrustedWitnessKey {
+    /// The public key cosignatures under this key are verified with, as a `base64:` family
+    /// string in the form the receipt carries it.
+    pub pubkey: String,
+    /// The witness identity policy trusts this key to cosign under.
+    pub witness_id: String,
 }
 
 /// The verifier's locally configured trust policy (format §1 design rule 1).
@@ -116,14 +187,26 @@ impl AdaptorProfile {
 pub struct TrustPolicy {
     /// The published genesis entry id of the corpus this verifier accepts.
     pub genesis_entry_id: String,
-    /// The published producer key fingerprints of the genesis manifest.
-    pub genesis_key_ids: BTreeSet<String>,
+    /// The published producer key fingerprints of the genesis manifest, WHERE local policy
+    /// holds them (I-D §7.5.1 4a: "WHERE LOCAL POLICY HOLDS initial key fingerprints... which
+    /// is optional... where it holds none, this comparison does not arise and its absence is
+    /// not a defect"). `None` — not held, no comparison; `Some(set)` — held, and MUST match.
+    pub genesis_key_ids: Option<BTreeSet<String>>,
     /// Locally possessed adaptor profiles, by profile id.
     pub adaptor_profiles: BTreeMap<String, AdaptorProfile>,
     /// Dataset HMAC keys this verifier is authorized to hold (`keyed-authorized` binding only).
     pub dataset_keys: BTreeMap<String, Vec<u8>>,
-    /// Witness key ids trusted by local policy rather than through the manifest chain.
-    pub trusted_witness_key_ids: BTreeSet<String>,
+    /// Witness keys trusted by local policy rather than through the manifest chain, by
+    /// `key_id` (I-D §7.1: "`source: \"local-policy\"` is an acceptable source only for
+    /// witness keys the verifier ALREADY TRUSTS").
+    ///
+    /// Every member of the entry is compared, never the id alone: a receipt supplies the
+    /// `pubkey` a cosignature is verified under and the `witness_id` that goes into its
+    /// preimage, so accepting a trusted `key_id` carrying either of its own would let an
+    /// unauthorized party choose the verification key or the identity. A policy holding none —
+    /// the default — makes every `local-policy` witness key unacceptable, which is the correct
+    /// reading of "already trusts" for a verifier that trusts none.
+    pub trusted_witness_keys: BTreeMap<String, TrustedWitnessKey>,
     /// Resource limits.
     pub limits: Limits,
 }
@@ -145,6 +228,16 @@ pub struct Assurance {
     pub continued_history: bool,
     /// `none`, `plain-verified` or `keyed-authorized`.
     pub content_binding: String,
+    /// `public` or `private-use` (I-D §7.3), present exactly where
+    /// [`Self::content_binding`] is not `none`.
+    ///
+    /// It names the NAMESPACE the dataset's canonicalization identifier is drawn from and
+    /// nothing else: `private-use` where that identifier begins `x-`, so the binding "holds
+    /// only for a verifier configured for this corpus and never across corpora", and `public`
+    /// otherwise. `public` "asserts nothing about registration, and nothing in a receipt
+    /// does" — a receipt cannot establish that an identifier was registered, only which
+    /// namespace it was taken from, which is computable from the receipt alone.
+    pub canonicalization_namespace: Option<String>,
 }
 
 /// An accepted receipt, with the boundary the verifier renders for it.
@@ -166,6 +259,356 @@ pub struct Verdict {
 }
 
 // ---------------------------------------------------------------------------
+// The three-valued result model (I-D §7.7)
+// ---------------------------------------------------------------------------
+
+/// One of the three values a completed verification run reaches (I-D §7.7).
+///
+/// The value is scalar for a whole receipt and it is also the value of each per-assertion
+/// [`Finding`]: I-D §7.7 gives the findings "the same meanings as above". A run that does NOT
+/// complete yields none of these — see [`ExecutionError`].
+///
+/// The ordering is the reduction of I-D §7.7: "`invalid` if any required finding is `invalid`;
+/// otherwise `unverifiable` if any required finding is `unverifiable`; otherwise `verified`."
+/// That is the maximum under `Verified < Unverifiable < Invalid`, and [`Ord`] is derived in
+/// that order so the reduction is `max` and cannot drift from the sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Outcome {
+    /// The verifier established the asserted property from the presented material.
+    Verified,
+    /// The presented material neither establishes the asserted property nor contradicts it:
+    /// the verifier lacks material, a capability, a local configuration, or a local budget.
+    Unverifiable,
+    /// The presented material does not verify.
+    Invalid,
+}
+
+impl Outcome {
+    /// The token this value is reported under, as I-D §7.7 spells it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Unverifiable => "unverifiable",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
+impl core::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// One assertion a receipt requires, as I-D §7.7 defines the required set.
+///
+/// §7.7: "The required assertions of a receipt are exactly: every assertion its claim type's
+/// material requires under Section 7.2, together with the anchoring, envelope-validity,
+/// governance, and cross-field checks of Section 7.5 steps 1 through 4 and Section 7.6; its
+/// content binding, if and only if its own `assurance.content_binding` is not `none`; and for
+/// each embedded receipt, every required assertion of THAT receipt."
+///
+/// The variants name those assertions at the granularity of the §7.5 algorithm's own steps
+/// rather than one per check: every check this crate performs maps to exactly one of them,
+/// through [`ReceiptError::assertion`], and every rejection therefore names both the assertion
+/// it belongs to and — through [`ReceiptError::class`] — the §7.7 value it produces.
+/// The variants are DECLARED in the order the §7.5 algorithm reaches them, so the derived
+/// [`Ord`] is that order: an assertion greater than another is settled later, which is what
+/// decides how far a prerequisite's `unverifiable` outcome reaches. [`Self::ORDER`] lists them
+/// in the same order, and a [`Report`] is sorted by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Assertion {
+    /// `ahl_receipt_version`, `spec_version` and every carried statement's `ahl_version`
+    /// (I-D §7.5 step 1, §2.2).
+    Versions,
+    /// The verifier-local budgets of §7.8: decoded size, and verification work. The §7.8 FIXED
+    /// limits belong to [`Self::Structure`] — they "bound a receipt's STRUCTURE and not its
+    /// size" — and are `invalid`, while an exhausted budget is `unverifiable`.
+    ResourceLimits,
+    /// The container schema of §7.1, the identifier recomputation of §7.5 step 1, and the
+    /// FIXED limits of §7.8 (nesting depth, embedded-receipt count), which bound the receipt's
+    /// structure.
+    Structure,
+    /// Adaptor-profile resolution from local possession (§7.5 step 2).
+    AdaptorProfile,
+    /// The key-independent path checks of §7.5 step 3: inclusion, the governance chain's own
+    /// paths, and the consistency path where `continued_history` is asserted.
+    Anchoring,
+    /// The governance bootstrap of §7.5.1 4a-4c: the configured genesis anchor, the manifest
+    /// lineage, the key induction, rotation proofs, and enumerated governance currency.
+    Governance,
+    /// Authenticated checkpoint validation (§7.5.1 4f): the checkpoint signature under the log
+    /// key the manifest version active for it declares.
+    CheckpointAuthentication,
+    /// The witness cosignatures of §7.5.1 4f and §3.3, and the L3 rule that a checkpoint needs
+    /// one.
+    ///
+    /// Kept apart from [`Self::CheckpointAuthentication`] because the two fail for different
+    /// reasons and one of them is verifier-local: a `local-policy` witness key the verifier
+    /// does not hold makes the WITNESS assertion `unverifiable` while the checkpoint signature
+    /// is unaffected (I-D §7.1).
+    Witnesses,
+    /// Envelope validity under §2.1 for the subject and every remaining carried envelope
+    /// (§7.5.1 4d).
+    EnvelopeValidity,
+    /// The cross-field consistency rules of §7.6.
+    CrossField,
+    /// The claim type's own material under §7.2 (§7.5 step 5), authority under 4e included.
+    ClaimMaterial,
+    /// This receipt's content binding (§7.3, §6.3, §2.6). Required if and only if its own
+    /// `assurance.content_binding` is not `none`, and — for an EMBEDDED receipt — never a
+    /// required assertion of the receipt that embeds it (§7.7).
+    ContentBinding,
+}
+
+impl Assertion {
+    /// Every assertion, in the order the §7.5 algorithm reaches it.
+    pub const ORDER: [Self; 12] = [
+        Self::Versions,
+        Self::ResourceLimits,
+        Self::Structure,
+        Self::AdaptorProfile,
+        Self::Anchoring,
+        Self::Governance,
+        Self::CheckpointAuthentication,
+        Self::Witnesses,
+        Self::EnvelopeValidity,
+        Self::CrossField,
+        Self::ClaimMaterial,
+        Self::ContentBinding,
+    ];
+
+    /// The name this assertion is reported under.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Versions => "versions",
+            Self::ResourceLimits => "resource-limits",
+            Self::Structure => "structure",
+            Self::AdaptorProfile => "adaptor-profile",
+            Self::Anchoring => "anchoring",
+            Self::Governance => "governance",
+            Self::CheckpointAuthentication => "checkpoint-authentication",
+            Self::Witnesses => "witnesses",
+            Self::EnvelopeValidity => "envelope-validity",
+            Self::CrossField => "cross-field",
+            Self::ClaimMaterial => "claim-material",
+            Self::ContentBinding => "content-binding",
+        }
+    }
+}
+
+impl core::fmt::Display for Assertion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The outcome of one required assertion, with what produced it (I-D §7.7).
+///
+/// I-D §7.7 requires the findings to be reported alongside the scalar result, "because the
+/// result alone does not say which assertion produced it, and a reader cannot act on
+/// `unverifiable` without knowing what was missing" — and a verifier "MUST NOT present a
+/// finding as though it were the result".
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Finding {
+    /// The assertion this finding is about.
+    pub assertion: Assertion,
+    /// Its outcome.
+    pub outcome: Outcome,
+    /// Where the assertion lives: empty for the receipt itself, otherwise the `claim_material`
+    /// member names of the embedded receipts leading to it, outermost first (for example
+    /// `["trigger", "introduction"]`).
+    pub receipt_path: Vec<String>,
+    /// For an outcome other than [`Outcome::Verified`], what produced it: the rendered rule
+    /// that fired, or the prerequisite assertion this one rests on.
+    pub detail: Option<String>,
+    /// The assertion whose gap this finding INHERITS, where it has one.
+    ///
+    /// `None` — the finding is what its own check produced, and is therefore a CAUSE: the rule
+    /// that fired, the budget that ran out, the capability that was missing. `Some(assertion)`
+    /// — the check was not run, or could not be settled, because that other assertion was
+    /// `unverifiable`; the same fact is in [`Self::detail`] in prose, and here as a fact a
+    /// consumer can act on rather than parse.
+    ///
+    /// The distinction is what makes a report actionable. §7.8: "A verifier MUST report WHICH
+    /// budget was exhausted and the value that was in force"; §7.7: "a reader cannot act on
+    /// `unverifiable` without knowing what was missing". A reader taking the first
+    /// `unverifiable` finding in report order would be told "`versions` rests on
+    /// `resource-limits`", where the fact it needs — the budget and its value — is on the
+    /// `resource-limits` finding. [`Report::dominating`] uses this field to pick the cause.
+    pub rests_on: Option<Assertion>,
+}
+
+impl Finding {
+    /// Whether this finding enters the reduction of the receipt that was verified.
+    ///
+    /// Every finding does, with the single exception I-D §7.7 states: "for each embedded
+    /// receipt, every required assertion of THAT receipt... with one exception: an embedded
+    /// receipt's CONTENT BINDING is never a required assertion of the receipt that embeds it."
+    /// The exception holds "because no claim type in Section 7.2 rests on an embedded receipt's
+    /// record bytes", and it applies at every level, so a content-binding finding at any
+    /// non-empty path is outside the reduction of the receipt the run was over.
+    #[must_use]
+    pub const fn counts_toward_result(&self) -> bool {
+        !matches!(self.assertion, Assertion::ContentBinding) || self.receipt_path.is_empty()
+    }
+}
+
+/// Why a carried entry was VOID (I-D §2.1, §7.5.1 4d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum VoidReason {
+    /// An entry of the envelope's `signatures` array did not verify over JCS(payload).
+    SignatureInvalid,
+    /// An entry named a key that is not active at that envelope's own entry index.
+    KeyNotActive,
+}
+
+impl VoidReason {
+    /// The token this reason is reported under.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SignatureInvalid => "signature-invalid",
+            Self::KeyNotActive => "key-not-active",
+        }
+    }
+}
+
+impl core::fmt::Display for VoidReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// One entry the run inspected and found VOID (I-D §2.1, §7.5.1 4d, §7.7).
+///
+/// §7.5.1 4d decides what a non-verifying envelope means by RELIANCE: for an envelope the
+/// receipt rests on — its subject, an embedded receipt's subject, a `governance.chain[]`
+/// element — failure is `invalid`; "for every other carried envelope — a purported
+/// competing-trigger envelope, an entry of a propagation prefix, any entry an enumeration
+/// reveals — a non-verifying envelope is VOID: it is excluded before any authority comparison,
+/// it is never effective and never traversed, it does not affect the result, and the verifier
+/// reports it as an informative item naming its entry index."
+///
+/// §7.7: "Informative items are not findings: they belong to no required assertion, carry no
+/// result value, and never enter the reduction. Their number is the number of void entries
+/// inspected."
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InformativeItem {
+    /// The entry index of the void entry.
+    pub entry_index: u64,
+    /// Why it is void.
+    pub reason: VoidReason,
+    /// The receipt whose material carried it, in [`Finding::receipt_path`]'s terms.
+    pub receipt_path: Vec<String>,
+}
+
+/// What a completed verification run produced: one scalar result, and the findings it reduces
+/// from (I-D §7.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Report {
+    /// The scalar result: "one receipt, one value."
+    pub result: Outcome,
+    /// One finding per required assertion the run reached, ordered by receipt path and then by
+    /// [`Assertion::ORDER`].
+    pub findings: Vec<Finding>,
+    /// The void entries the run inspected (I-D §7.5.1 4d), in the order it inspected them.
+    ///
+    /// Not findings: they belong to no required assertion, carry no result value, never enter
+    /// the reduction and never appear in [`Self::dominating`]. A run whose only unusual feature
+    /// is a void entry is `verified` — "a log anchors opaque bytes and validates none, so were a
+    /// void entry a defect of every later receipt, any party able to anchor one envelope could
+    /// disable every enumerated claim of that log from that index on."
+    pub informative: Vec<InformativeItem>,
+    /// The rendered claim boundary, present if and only if [`Self::result`] is
+    /// [`Outcome::Verified`].
+    ///
+    /// I-D §7.7: "Only `verified` MAY be rendered in words that assert the property. Neither
+    /// `invalid` nor `unverifiable` may be rendered as asserting OR denying it."
+    pub verdict: Option<Verdict>,
+}
+
+impl Report {
+    /// The finding that decided the result — the one to lead a report with.
+    ///
+    /// §7.8: "A verifier MUST report WHICH budget was exhausted and the value that was in
+    /// force." §7.7: "a reader cannot act on `unverifiable` without knowing what was missing."
+    /// So the finding a consumer wants is the CAUSE, not a finding that merely inherited the
+    /// gap: the first `invalid` finding in report order, since `invalid` dominates the
+    /// reduction; otherwise the first `unverifiable` finding that its own check produced
+    /// ([`Finding::rests_on`] is `None`).
+    ///
+    /// Embedded receipts' findings are candidates on the same terms and in the order the report
+    /// lists them, except the ones that do not enter the reduction at all — an embedded
+    /// receipt's content binding (§7.7) cannot decide a result and so cannot be what decided
+    /// one.
+    ///
+    /// The final fallback — the first `unverifiable` finding whatever it rests on — should be
+    /// unreachable: an `unverifiable` result is reduced from at least one finding a check
+    /// produced, and every derived finding names a prerequisite that is itself in the report.
+    /// It is kept so that this function is total rather than silently returning `None` for a
+    /// non-`verified` result, and a test asserts that no corpus vector reaches it.
+    #[must_use]
+    pub fn dominating(&self) -> Option<&Finding> {
+        let counting = || self.findings.iter().filter(|finding| finding.counts_toward_result());
+        counting()
+            .find(|finding| finding.outcome == Outcome::Invalid)
+            .or_else(|| {
+                counting().find(|finding| {
+                    finding.outcome == Outcome::Unverifiable && finding.rests_on.is_none()
+                })
+            })
+            .or_else(|| counting().find(|finding| finding.outcome == Outcome::Unverifiable))
+    }
+
+    /// The finding for one assertion of the receipt itself.
+    #[must_use]
+    pub fn finding(&self, assertion: Assertion) -> Option<&Finding> {
+        self.finding_at(&[], assertion)
+    }
+
+    /// The finding for one assertion of the embedded receipt reached by `path` — the
+    /// `claim_material` member names leading to it, outermost first. An empty path is the
+    /// receipt itself.
+    #[must_use]
+    pub fn finding_at(&self, path: &[&str], assertion: Assertion) -> Option<&Finding> {
+        self.findings.iter().find(|finding| {
+            finding.assertion == assertion
+                && finding.receipt_path.len() == path.len()
+                && finding.receipt_path.iter().zip(path).all(|(held, want)| held == want)
+        })
+    }
+}
+
+/// A verification run that did not complete, and therefore produced no result at all
+/// (I-D §7.7).
+///
+/// §7.7: "A run that does not complete — an I/O failure, an exhausted heap, a crash — yields no
+/// result in this model. It is a local execution failure, reported as such; it says nothing
+/// about the receipt and MUST NOT be rendered as any of the three values." This type is that
+/// outcome, kept structurally incapable of carrying one of the three values.
+///
+/// This crate is handed an already-parsed receipt and an already-loaded policy, performs no
+/// I/O, and allocates nothing it does not bound, so it produces this error nowhere today:
+/// every rejection it can reach is a completed run with a §7.7 value. The type exists so that
+/// the boundary is in the signature of [`verify_receipt_report`] rather than in prose, and so
+/// that a caller that adds I/O around it — reading the receipt, fetching a policy — has the
+/// one place to report such a failure that is not a statement about the receipt.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("verification run did not complete: {detail}")]
+pub struct ExecutionError {
+    /// What stopped the run, in the verifier's own terms. Never one of the three §7.7 values.
+    pub detail: String,
+}
+
+// ---------------------------------------------------------------------------
 // Rejection reasons
 // ---------------------------------------------------------------------------
 
@@ -177,10 +620,17 @@ pub enum ReceiptError {
     #[error("malformed receipt: {0}")]
     Malformed(String),
 
-    /// `ahl_receipt_version` or `spec_version` is not one this verifier implements (§5 step 1).
-    #[error("unsupported {field}: expected `{expected}`, got `{got}`")]
+    /// `ahl_receipt_version`, `spec_version` or a carried statement's `ahl_version` is not one
+    /// this verifier implements (I-D §7.1, §7.5 step 1, §2.2).
+    ///
+    /// This is the I-D's `unverifiable` outcome, not `invalid`: an artifact issued under
+    /// earlier rules is not a defective artifact, and this document establishes nothing about
+    /// whether it verifies under the rules that produced it (I-D §7.1 "Revision and rule
+    /// selection"). `ahl_receipt_version` is read and acted on before any other check,
+    /// including schema validation (I-D §7.5 step 1, "Version first, then parse").
+    #[error("unsupported {field}: expected `{expected}`, got `{got}` (unverifiable, not invalid)")]
     UnsupportedVersion {
-        /// The version field.
+        /// The version field: `ahl_receipt_version`, `spec_version`, or `ahl_version`.
         field: &'static str,
         /// The version this verifier implements.
         expected: &'static str,
@@ -188,9 +638,38 @@ pub enum ReceiptError {
         got: String,
     },
 
-    /// A §3.1 resource limit was exhausted. Rejection, never degradation.
-    #[error("resource limit exhausted: {0}")]
+    /// A §7.8 FIXED limit was exceeded: the embedded-receipt nesting depth, or the number of
+    /// embedded receipts in the file.
+    ///
+    /// I-D §7.8: the fixed limits "are properties of the artifact, decided identically by every
+    /// verifier in every year, so a receipt exceeding either is `invalid`." Kept apart from
+    /// [`Self::BudgetExhausted`] for exactly that reason — the two classes of limit produce
+    /// different §7.7 results, and one variant for both would make the result depend on a
+    /// string.
+    #[error("fixed resource limit exceeded: {0}")]
     LimitExceeded(&'static str),
+
+    /// A VERIFIER-LOCAL budget was exhausted: the decoded-size budget, or the
+    /// verification-work budget (I-D §7.8).
+    ///
+    /// This is the I-D's `unverifiable` outcome, not `invalid`: "the artifact has not been
+    /// shown defective, and a verifier reporting `invalid` here would contradict a
+    /// better-resourced verifier's `verified` over the same bytes, which Section 7.7 forbids."
+    ///
+    /// Both members are carried because §7.8 requires both to be reported: "A verifier MUST
+    /// report WHICH budget was exhausted and the value that was in force, since `unverifiable`
+    /// without that is not actionable — the holder of the receipt cannot otherwise tell whether
+    /// the remedy is a larger budget or a smaller receipt."
+    #[error(
+        "verifier-local budget `{budget}` is exhausted; the value in force for this run is \
+         {in_force} (I-D §7.8: unverifiable, never invalid)"
+    )]
+    BudgetExhausted {
+        /// Which budget ran out, named as the verifier configures it.
+        budget: &'static str,
+        /// The value that was in force for this run.
+        in_force: u64,
+    },
 
     /// `subject.statement_id` or `subject.entry_id` disagrees with `envelope` (§5 step 1).
     #[error("`subject.{field}` does not match the carried envelope")]
@@ -199,11 +678,53 @@ pub enum ReceiptError {
         field: &'static str,
     },
 
-    /// The adaptor profile is not locally possessed, or its hash differs (§5 step 2).
-    #[error("adaptor profile `{id}` is not locally possessed at the pinned hash")]
+    /// The pinned profile id is not one local policy holds a document for at all (§5 step 2).
+    ///
+    /// I-D §7.5 step 2 distinguishes this — a capability gap, `unverifiable` — from
+    /// [`Self::AdaptorHashMismatch`], where the profile IS held but its recomputed digest
+    /// disagrees with what the receipt pins — a stronger, `invalid` claim: the receipt names a
+    /// document policy can prove is not the one it trusts, not merely one it has never heard
+    /// of.
+    #[error("adaptor profile `{id}` is not locally possessed")]
     AdaptorUnknown {
         /// The profile id the receipt pins.
         id: String,
+    },
+
+    /// The pinned profile id IS locally held, but `anchoring.adaptor.hash` does not equal the
+    /// SHA-256 digest recomputed over the document actually held for it (I-D §3.2, §7.5 step
+    /// 2: "MUST recompute the digest over the artifact rather than trusting any value carried
+    /// with it, and MUST reject a receipt whose pinned digest does not match the artifact
+    /// held").
+    ///
+    /// Distinct from [`Self::AdaptorUnknown`] — see its own doc comment for why the I-D treats
+    /// the two differently.
+    #[error(
+        "adaptor profile `{id}` is held, but its recomputed digest does not match the hash \
+         `anchoring.adaptor` pins"
+    )]
+    AdaptorHashMismatch {
+        /// The profile id the receipt pins.
+        id: String,
+    },
+
+    /// `anchoring.adaptor` names a different profile than the active manifest's own
+    /// `log.adaptor` pins for the checkpoint being verified (I-D §3.2: "the profile id and
+    /// hash are pinned in the manifest and carried in every Evidence Receipt" — the two
+    /// carriers of the SAME fact, which MUST agree).
+    ///
+    /// Checked BEFORE any profile-specific parsing or signature rule: a receipt naming one
+    /// profile in `anchoring.adaptor` while its governance chain pins another must never reach
+    /// that OTHER profile's capabilities merely because local policy happens to recognize it.
+    #[error(
+        "`anchoring.adaptor` names `{carried}`, but the manifest active for this checkpoint \
+         pins `{pinned}` (I-D §3.2)"
+    )]
+    AdaptorBindingInvalid {
+        /// What the active manifest's `log.adaptor` pins, as `id (hash)`.
+        pinned: String,
+        /// What `anchoring.adaptor` carries, as `id (hash)`.
+        carried: String,
     },
 
     /// The receipt carries material the pinned adaptor profile does not define.
@@ -215,6 +736,23 @@ pub enum ReceiptError {
         /// The pinned profile id.
         id: String,
         /// What the receipt needed the profile to define.
+        capability: &'static str,
+    },
+
+    /// Locally configured policy claims a capability this build has no implementation for
+    /// (I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values as the
+    /// JSON members" — a claim this build cannot make good on for an unimplemented wire form).
+    ///
+    /// This is distinct from [`Self::AdaptorCapabilityUnsupported`], which names a per-receipt
+    /// limitation the RECEIPT ran into. This one names a limitation of the POLICY itself,
+    /// caught once, before any receipt content is even read: a `TrustPolicy` asserting
+    /// `checkpoint_raw: true` for a profile this build has no parser for is a configuration
+    /// error, never silently downgraded to "accept `raw` unparsed" or "treat it as false".
+    #[error("adaptor profile `{id}` policy claims {capability}, which this build cannot parse")]
+    AdaptorProfileMisconfigured {
+        /// The pinned profile id.
+        id: String,
+        /// The capability the policy claims.
         capability: &'static str,
     },
 
@@ -289,6 +827,74 @@ pub enum ReceiptError {
         witness_id: String,
     },
 
+    /// A `keys.witness[]` entry sourced `local-policy` is not in the verifier's own trusted
+    /// witness set (I-D §7.1: admissible only "for witness keys the verifier already trusts").
+    ///
+    /// Distinct from [`Self::KeyNotBound`], which names a key that failed to bind to a
+    /// manifest key object: this key claims no manifest binding at all, and the set it must
+    /// appear in is local configuration rather than carried material.
+    #[error(
+        "witness key `{key_id}` is sourced `local-policy`, but neither it nor its public key \
+         is in the verifier's trusted witness set (I-D §7.1)"
+    )]
+    WitnessKeyNotTrusted {
+        /// The offending key id.
+        key_id: String,
+    },
+
+    /// A cosignature names a witness identity the manifest version active for the checkpoint
+    /// does not declare (I-D §7.1: each `anchoring.witnesses[]` element carries "the witness
+    /// identity as declared in the manifest").
+    ///
+    /// Applies whatever the key's source. A `local-policy` key establishes what the verifier
+    /// trusts, never what the corpus's governance declared, so an identity absent from the
+    /// active manifest is outside the witness set the receipt's own governance defines.
+    #[error(
+        "cosignature names witness `{witness_id}`, which the manifest version active for the \
+         checkpoint of tree_size {tree_size} does not declare (I-D §7.1)"
+    )]
+    WitnessNotDeclared {
+        /// The identity the cosignature carried.
+        witness_id: String,
+        /// The tree size of the checkpoint being cosigned.
+        tree_size: u64,
+    },
+
+    /// A cosignature names a `witness_id` other than the identity the manifest declares for
+    /// the key it is verified under (I-D §7.1: a witness key object "carries `witness_id`, the
+    /// identity under which the manifest declares that witness").
+    ///
+    /// The identity is part of the cosignature preimage, so this is not a cosmetic label: an
+    /// unauthorized party that could name an identity of its own choosing under a key the
+    /// manifest declares would cosign bytes no declared witness ever agreed to.
+    #[error(
+        "cosignature under witness key `{key_id}` names `{carried}`, but the manifest declares \
+         that key under `{declared}` (I-D §7.1)"
+    )]
+    WitnessIdentityMismatch {
+        /// The witness key the cosignature names.
+        key_id: String,
+        /// The identity the manifest declares for that key.
+        declared: String,
+        /// The identity the cosignature carried.
+        carried: String,
+    },
+
+    /// AT L3, a checkpoint carries no verifying witness cosignature at all (I-D §3.3, §7.5:
+    /// "At L3 a verifier accepts a checkpoint C only with a valid witness cosignature").
+    ///
+    /// Distinct from [`Self::WitnessCosignatureInvalid`], which names a cosignature that WAS
+    /// carried and failed to verify: this is what fires when none verified — zero carried, or
+    /// every carried entry failed — under a manifest version that requires one.
+    #[error(
+        "AT L3, a checkpoint of tree_size {tree_size} carries no verifying witness \
+         cosignature under the manifest version active for it"
+    )]
+    CheckpointUnwitnessed {
+        /// The unwitnessed checkpoint's tree size.
+        tree_size: u64,
+    },
+
     /// `subject.entry_index` is not committed by the checkpoint (§5 step 3).
     #[error("entry index {entry_index} is not committed by a checkpoint of size {tree_size}")]
     EntryIndexBeyondCheckpoint {
@@ -317,10 +923,201 @@ pub enum ReceiptError {
     #[error("governance chain invalid: {0}")]
     GovernanceChainInvalid(String),
 
+    /// A manifest object does not satisfy the schema the specification fixes for it.
+    ///
+    /// Spec §7.3 states value grammars for the `log` object and requires a malformed value to
+    /// be "rejected rather than approximated". The duty is on the value, so a signed manifest
+    /// that breaks the schema does not verify here even where this verifier never reads the
+    /// offending member — admitting it would leave the corpus verifiable only by
+    /// implementations that share this one's tolerances.
+    #[error("manifest `{object}` is invalid: {detail}")]
+    ManifestSchemaInvalid {
+        /// The offending member, as a dotted path from the manifest payload.
+        object: String,
+        /// Which rule it breaks.
+        detail: String,
+    },
+
+    /// A carried governance chain rotates a log or witness key set (I-D §7.1 "governance-key
+    /// rotation": a manifest whose log checkpoint-signing key objects or whose witness key
+    /// objects, compared as SETS, differ from its predecessor's), and either
+    /// `governance.rotation_proofs[]` carries no element for it, or the element fails a
+    /// requirement I-D §7.1 / §7.5.1 4b(M) states for it.
+    ///
+    /// I-D §7.1: "A receipt that omits `governance.rotation_proofs[]` where the carried chain
+    /// rotates either governance key set, or that carries an element failing any requirement
+    /// above, is `invalid`". This is that rule.
+    #[error("rotation proof for manifest entry index {manifest_entry_index} is invalid: {detail}")]
+    RotationProofInvalid {
+        /// Entry index of the rotating manifest.
+        manifest_entry_index: u64,
+        /// Which requirement failed.
+        detail: String,
+    },
+
+    /// This build does not implement the canonicalization procedure a dataset's descriptor
+    /// names (I-D §2.6): only `jcs` and `exact-bytes` are implemented.
+    ///
+    /// Per I-D §6.3's conformance table, an identifier this verifier does not implement makes
+    /// only THAT dataset's content-binding finding `unverifiable` — never `invalid`, and never
+    /// rehabilitated to `content_binding: "none"`.
+    #[error(
+        "canonicalization identifier `{identifier}` names a procedure this build does not \
+         implement; dataset `{dataset}`'s content-binding finding is unverifiable, not invalid \
+         (I-D §6.3)"
+    )]
+    CanonicalizationUnsupported {
+        /// The dataset whose content-binding finding is affected.
+        dataset: String,
+        /// The unimplemented `canonicalization` identifier.
+        identifier: String,
+    },
+
+    /// Carried record/output bytes did not canonicalize under the dataset's declared procedure
+    /// (I-D §2.6, §7.2: the verifier canonicalizes the record AS RECEIVED before recomputing
+    /// the commitment).
+    ///
+    /// Unlike [`Self::CanonicalizationUnsupported`], this is `invalid`: the procedure IS
+    /// implemented, and the carried bytes simply fail it (for `jcs`, do not parse as JSON).
+    #[error(
+        "dataset `{dataset}`: carried bytes do not canonicalize under `{identifier}`: {detail}"
+    )]
+    CanonicalizationFailed {
+        /// The dataset whose content binding failed.
+        dataset: String,
+        /// The `canonicalization` identifier the bytes failed to satisfy.
+        identifier: String,
+        /// Why.
+        detail: String,
+    },
+
+    /// A dataset's declared `media_type` PRESENCE violates the identifier's own rule (I-D
+    /// §2.6): `jcs` MUST NOT carry `media_type` (it never reads the media type), `exact-bytes`
+    /// MUST carry it (the canonical input is qualified by it).
+    ///
+    /// Presence is "a producer duty and is never a syntactic matter" (I-D §2.6), so wrong
+    /// presence never rejects the manifest — only this dataset's content-binding finding is
+    /// `invalid`, and only where this verifier implements the procedure well enough to know the
+    /// rule; for an identifier it does not implement at all, that dataset's finding is
+    /// [`Self::CanonicalizationUnsupported`], not this variant.
+    #[error(
+        "dataset `{dataset}` (canonicalization `{identifier}`) has an invalid `media_type` \
+         presence: {detail}"
+    )]
+    MediaTypePresenceInvalid {
+        /// The dataset whose content-binding finding is affected.
+        dataset: String,
+        /// The dataset's `canonicalization` identifier.
+        identifier: String,
+        /// Which rule it breaks.
+        detail: &'static str,
+    },
+
+    /// `claim_material`'s descriptor for a dataset does not equal (I-D §2.6 descriptor
+    /// equality: identical NORMALIZED forms) the descriptor declared by the manifest version
+    /// NAMED BY THE SUBJECT STATEMENT'S `manifest` binding (I-D §2.2, §6.3) — the manifest
+    /// statement whose STATEMENT id (I-D §2.4.5) that binding carries, not merely the manifest
+    /// active at the subject's entry index.
+    #[error(
+        "claim material's descriptor for dataset `{dataset}` (`{claimed}`) does not equal the \
+         manifest's declared descriptor (`{declared}`) at manifest version \
+         `{manifest_version_id}` (I-D §2.6, §6.3)"
+    )]
+    ClaimDescriptorMismatch {
+        /// The dataset the mismatch concerns.
+        dataset: String,
+        /// The descriptor's normalized form as carried in `claim_material`.
+        claimed: String,
+        /// The descriptor's normalized form as declared in the governing manifest.
+        declared: String,
+        /// The governing manifest's version id (I-D §2.4.5: the manifest statement's own
+        /// statement id).
+        manifest_version_id: String,
+    },
+
+    /// The receipt asks for a combination the frozen container format cannot evidence.
+    ///
+    /// Not a failed rule: a rule that cannot be satisfied at all. Rejecting is the only honest
+    /// outcome, because the alternative is to report as verified a coverage requirement no
+    /// material in the format can meet.
+    #[error("{combination} cannot be evidenced under this format revision: {conflict}")]
+    FormatConflict {
+        /// The combination of receipt features that cannot be evidenced.
+        combination: &'static str,
+        /// The conflicting requirements, each named by section.
+        conflict: &'static str,
+    },
+
     /// An envelope signature did not verify under the key set as of its entry index.
     #[error("envelope signature at entry index {entry_index} did not verify")]
     EnvelopeSignatureInvalid {
         /// The entry index of the offending envelope.
+        entry_index: u64,
+    },
+
+    /// Under `declared` governance, an envelope names a producer key the presented material
+    /// does not account for (I-D §7.4, "Declared mode and producer-key transitions").
+    ///
+    /// This is the I-D's `unverifiable` outcome, not `invalid`, and the distinction is
+    /// normative: "Such a receipt is `unverifiable` (Section 7.7), for want of material the
+    /// mode does not carry. It is NOT `invalid`: the omitted transition is not material this
+    /// mode required the receipt to carry, and a verifier holding the enumerated material
+    /// would verify the same bytes, so `invalid` would put two verifiers in contradiction over
+    /// one artifact. A verifier MUST NOT silently treat the named key as active, and MUST NOT
+    /// silently treat the envelope as invalid." Refusing under a variant of its own is how this
+    /// crate does neither.
+    ///
+    /// It arises only under `declared` governance. Producer-key transitions are `key`
+    /// statements and reach a verifier through enumeration material alone (§7.4), so declared
+    /// mode never sees them; under `enumerated` the range proof over exactly
+    /// `[0, tree_size(C))` forecloses omission (§7.5.1 4c), the presented key state IS the
+    /// state that was in force, and an unresolvable `key_id` there is a defect —
+    /// [`Self::EnvelopeSignatureInvalid`], `invalid`.
+    ///
+    /// The condition this variant reports is broader than §7.4's own sentence, which describes
+    /// a key some `key` statement added or retired. Declared mode cannot tell that key from
+    /// one no statement ever mentioned — telling them apart needs exactly the enumerated
+    /// material the mode does not carry — so any narrower rule would require a verifier to
+    /// decide a question its evidence cannot reach. `unverifiable` is what both cases are.
+    ///
+    /// Distinct from [`Self::KeyNotBound`], which is about the receipt's own `keys` listing
+    /// rather than about a signature: a `manifest-chain` binding naming an entry index that
+    /// holds no matching key object is decidable from the presented chain alone, and is
+    /// `invalid` in either mode.
+    #[error(
+        "the envelope at entry index {entry_index} is signed by producer key `{key_id}`, which \
+         the presented declared-mode governance material does not carry a transition for \
+         (I-D §7.4: unverifiable, not invalid)"
+    )]
+    ProducerKeyNotCarried {
+        /// The entry index of the envelope whose signer could not be resolved.
+        entry_index: u64,
+        /// The `key_id` the envelope names.
+        key_id: String,
+    },
+
+    /// The governance induction stopped at a manifest whose governance-key rotation could not
+    /// be authenticated, so the key state from that entry index onward is not established
+    /// (I-D §7.5.1 4b, 4f).
+    ///
+    /// This is the I-D's `unverifiable` outcome. 4b(M)'s rotation-anchoring rule proves the
+    /// rotating manifest's own anchoring under the OUTGOING key state, and that proof rests on
+    /// a checkpoint — which cannot be authenticated without the adaptor profile that fixes its
+    /// serialization (§7.5 step 2). 4b is explicit about what follows: "Only after phases 1 and
+    /// 2 have BOTH passed, apply the statement's effect to K", and "No effect is ever applied
+    /// to K by a statement that has not completed both earlier phases." So the induction stops
+    /// before the effect, K stays at the pre-rotation state, and every assertion needing K at
+    /// an index at or after this one is `unverifiable` rather than decided under a key set this
+    /// verifier never established — which is also what 4f requires: it "MUST NOT resolve a
+    /// checkpoint-verification or cosignature-validating key from a manifest version whose log
+    /// or witness key set was not established by the governance-key induction."
+    #[error(
+        "the governance-key rotation at entry index {entry_index} cannot be authenticated \
+         without the adaptor profile this receipt pins, so the key state from that index \
+         onward is not established (I-D §7.5.1 4b, 4f)"
+    )]
+    GovernanceRotationUnverifiable {
+        /// Entry index of the rotating manifest whose effect was not applied.
         entry_index: u64,
     },
 
@@ -347,6 +1144,14 @@ pub enum ReceiptError {
         /// The subject statement's type.
         statement_type: String,
     },
+
+    /// `subject.manifest` fails the I-D §7.6 binding rule: it does not equal the subject
+    /// envelope's OWN `payload.manifest` (the only thing that authenticates the receipt's
+    /// copy, since the copy itself is outside the subject's signature), or the manifest version
+    /// it names is absent from `governance.chain`, or that version's `entry_index` is not
+    /// STRICTLY SMALLER than `subject.entry_index`.
+    #[error("`subject.manifest` binding is invalid: {0}")]
+    SubjectManifestBindingInvalid(String),
 
     /// An embedded receipt's entry index violates the §2.3 ordering rule.
     #[error(
@@ -413,6 +1218,28 @@ pub enum ReceiptError {
         claimed: String,
     },
 
+    /// The receipt asserts a `keyed-authorized` content binding over a dataset this verifier
+    /// holds no key for (I-D §7.3, §7.7).
+    ///
+    /// This is the I-D's `unverifiable` outcome, not `invalid`. §7.7 lists "a dataset key it is
+    /// not authorized to hold" among the capability gaps, and §7.3 states the consequence for
+    /// this member directly: a `keyed-authorized` binding "whose evidence is present and well
+    /// formed but for which the verifier holds no dataset key... MUST NOT be rendered as though
+    /// it had been established. Both are capability gaps rather than defects: that content
+    /// binding is `unverifiable` (Section 7.7), and the receipt is not thereby invalid."
+    ///
+    /// Distinct from [`Self::ContentBindingMismatch`], which reports carried bytes that DO
+    /// recompute and do not match: that is a cryptographic failure over material in hand, and
+    /// is `invalid` in every configuration.
+    #[error(
+        "dataset `{dataset}` is committed under a keyed mode and this verifier holds no key \
+         for it; its content-binding finding is unverifiable, not invalid (I-D §7.3, §7.7)"
+    )]
+    DatasetKeyNotHeld {
+        /// The dataset whose content-binding finding is affected.
+        dataset: String,
+    },
+
     /// A `trigger-effective` receipt's competing-trigger range is not the required range (§3).
     #[error(
         "competing-trigger range [{got_from}, {got_to}) is not the required \
@@ -469,6 +1296,247 @@ pub enum ReceiptError {
     /// A primitive operation failed on data read from the receipt.
     #[error(transparent)]
     Ahl(#[from] AhlError),
+}
+
+impl ReceiptError {
+    /// Which of I-D §7.7's three values this rejection produces.
+    ///
+    /// §7.7 resolves every rejection site in this document under one principle, and this match
+    /// is that principle applied variant by variant, with no wildcard: a variant added later
+    /// does not inherit a class by accident.
+    ///
+    /// *   "Material the receipt MUST carry and does not; a cryptographic check that fails; a
+    ///     schema failure; a disagreement among carried fields (Section 7.6) — `invalid`. What
+    ///     these share is that they are decidable from the receipt's own bytes, so every
+    ///     verifier decides them alike, in every year."
+    /// *   "A capability the verifier lacks, a local configuration it has not been given, or a
+    ///     local budget it has set — `unverifiable`. What these share is that they are
+    ///     properties of the verifier, not of the artifact."
+    ///
+    /// The division "is not stylistic. A verifier-local condition reported as `invalid` would
+    /// let two verifiers make contradictory statements about one artifact."
+    #[must_use]
+    pub const fn class(&self) -> Outcome {
+        match *self {
+            // Properties of the verifier, never of the artifact — §7.7's second bullet.
+            //
+            // "an artifact declaring a revision earlier than the one this document defines
+            // (Section 2.2)" (§7.7; §7.5 step 1).
+            Self::UnsupportedVersion { .. }
+            // §7.8: "Exhaustion of either budget yields `unverifiable`, never `invalid`: the
+            // artifact has not been shown defective, and a verifier reporting `invalid` here
+            // would contradict a better-resourced verifier's `verified` over the same bytes."
+            | Self::BudgetExhausted { .. }
+            // "an adaptor profile it does not possess" (§7.7); §7.5 step 2: "If the verifier
+            // possesses NO profile under that id, it lacks a capability and the result is
+            // `unverifiable`."
+            | Self::AdaptorUnknown { .. }
+            // A capability the pinned profile does not define, or one this build does not
+            // implement for the profile the receipt names: either way the run is short of a
+            // capability rather than holding a defect (§7.7 second bullet).
+            //
+            // AMBIGUITY (I-D §7.5 step 2): the section settles profile POSSESSION and profile
+            // HASH, and says nothing about a profile that is possessed at the pinned hash and
+            // defines no serialization for material the receipt carries. Read here as a
+            // capability gap, the minimal reading: `unverifiable` asserts nothing about the
+            // artifact, while `invalid` would assert a defect this verifier has not shown.
+            | Self::AdaptorCapabilityUnsupported { .. }
+            // "a local configuration it has not been given" (§7.7). A policy asserting a
+            // capability this build cannot make good on is a property of the verifier.
+            //
+            // AMBIGUITY (I-D §7.7): a misconfigured verifier could also be read as the
+            // non-completing run §7.7 scopes out. Read as `unverifiable` because the run does
+            // complete and reaches a defined stopping point; see [`ExecutionError`].
+            | Self::AdaptorProfileMisconfigured { .. }
+            // Receipt format §1 rule 1: "its absence — no configured genesis anchor, no dataset
+            // key, no adaptor profile — is `unverifiable` and never `invalid`; a configured
+            // anchor DIFFERING from the carried one is also `unverifiable`... since the receipt
+            // may be a perfectly valid receipt of another corpus."
+            | Self::GenesisAnchorMismatch
+            // A witness key the receipt sources from local policy that local policy does not
+            // hold: the set it must appear in is the verifier's own configuration.
+            | Self::WitnessKeyNotTrusted { .. }
+            // §6.3, verifier-resolution table: an identifier whose procedure this verifier does
+            // not implement makes "the content-binding FINDING for that dataset... unverifiable
+            // (Section 7.7)... Nothing else in the receipt is affected, and the receipt is not
+            // invalid evidence."
+            | Self::CanonicalizationUnsupported { .. }
+            // "a dataset key it is not authorized to hold" (§7.7); §7.3 for this member.
+            | Self::DatasetKeyNotHeld { .. }
+            // §7.4: "Such a receipt is `unverifiable` (Section 7.7), for want of material the
+            // mode does not carry. It is NOT `invalid`."
+            | Self::ProducerKeyNotCarried { .. }
+            // §7.5.1 4b: no effect is applied by a statement whose phases did not both pass, so
+            // the key state past an unauthenticatable rotation is not established rather than
+            // defective.
+            | Self::GovernanceRotationUnverifiable { .. } => Outcome::Unverifiable,
+
+            // Decidable from the receipt's own bytes — §7.7's first bullet.
+            //
+            // "a malformed or non-JCS artifact" (§7.7); a schema failure.
+            Self::Malformed(_)
+            // §7.8: the fixed limits "are properties of the artifact, decided identically by
+            // every verifier in every year, so a receipt exceeding either is `invalid`."
+            | Self::LimitExceeded(_)
+            // A disagreement among carried fields (§7.6, §7.5 step 1).
+            | Self::IdentifierMismatch { .. }
+            // §7.5 step 2: "If it possesses a profile under that id whose HASH DIFFERS from the
+            // receipt's, the receipt and the profile it names disagree, which is decidable from
+            // the bytes in hand, and the result is `invalid`."
+            | Self::AdaptorHashMismatch { .. }
+            // Two carriers of one pinned fact disagreeing (§3.2) — decidable from the bytes.
+            | Self::AdaptorBindingInvalid { .. }
+            // Material the claim type requires, absent or not the material it must be (§7.2).
+            | Self::CheckpointNotBound { .. }
+            | Self::GovernanceRangeNotComplete { .. }
+            | Self::CompetingRangeInsufficient { .. }
+            | Self::ClaimMaterialMissing { .. }
+            | Self::GovernanceSubjectNotManifest { .. }
+            | Self::GovernanceStateNotCurrent { .. }
+            | Self::TriggerNotAuthorized { .. }
+            // Cryptographic checks that fail.
+            | Self::CheckpointSignatureInvalid
+            | Self::WitnessCosignatureInvalid { .. }
+            | Self::CheckpointUnwitnessed { .. }
+            | Self::InclusionPathInvalid { .. }
+            | Self::ConsistencyPathInvalid
+            | Self::ClaimMaterialPathInvalid { .. }
+            | Self::RangeProofInvalid { .. }
+            | Self::TreeMaterialInvalid { .. }
+            | Self::ClosureMismatch(_)
+            | Self::EnvelopeSignatureInvalid { .. }
+            // §7.5 step 5: "A recomputed commitment differing from the one the subject statement
+            // names is a cryptographic failure and the result is `invalid`."
+            | Self::ContentBindingMismatch { .. }
+            // §6.3: the procedure IS implemented and the carried bytes fail it.
+            | Self::CanonicalizationFailed { .. }
+            // §6.3: "a verifier that implements the procedure and finds presence wrong reports
+            // that dataset's content-binding finding `invalid`."
+            | Self::MediaTypePresenceInvalid { .. }
+            // §6.3: "A mismatch in either member makes the receipt `invalid`; it is never
+            // downgraded."
+            | Self::ClaimDescriptorMismatch { .. }
+            // Schema and structural failures over carried governance material.
+            | Self::EntryIndexBeyondCheckpoint { .. }
+            | Self::KeyNotBound { .. }
+            | Self::WitnessNotDeclared { .. }
+            | Self::WitnessIdentityMismatch { .. }
+            | Self::GovernanceChainInvalid(_)
+            | Self::ManifestSchemaInvalid { .. }
+            // §7.7 names this one expressly: "A missing `governance.rotation_proofs[]` element
+            // for a governance-key rotation the carried chain contains... falls squarely in the
+            // first of those: the receipt was required to carry it, and its absence is not a
+            // capability the verifier lacks."
+            | Self::RotationProofInvalid { .. }
+            // Disagreements among carried fields (§7.6).
+            | Self::AssuranceMismatch { .. }
+            | Self::RecordSubjectMismatch { .. }
+            | Self::SubjectManifestPresence { .. }
+            | Self::SubjectManifestBindingInvalid(_)
+            | Self::EmbeddedOrderingViolation { .. }
+            | Self::EmbeddedSubjectMismatch { .. }
+            | Self::EmbeddedClaimTypeMismatch { .. }
+            // A combination the container format leaves no material to evidence: a disagreement
+            // between two members of the receipt, decided identically by every verifier.
+            //
+            // AMBIGUITY (I-D §7.7): the section does not name this case. Read as `invalid`
+            // because nothing about the verifier decides it — the same bytes are refused by
+            // every verifier in every year, which is §7.7's own test for the first bullet.
+            | Self::FormatConflict { .. }
+            // A decoding or field failure over the receipt's own bytes.
+            | Self::Ahl(_) => Outcome::Invalid,
+        }
+    }
+
+    /// Which required assertion (I-D §7.7) this rejection belongs to, judged from the variant
+    /// alone.
+    ///
+    /// This is the FALLBACK. Inside a verification run the assertion is the phase of the §7.5
+    /// algorithm that was running when the rejection was raised, which is the only thing that
+    /// can tell a malformed container member from a malformed governance payload from a
+    /// malformed claim-material member — one variant, three assertions. This function is what
+    /// answers for a rejection examined outside a run, or raised before any phase has begun
+    /// (the version read and the decoded-size budget of [`verify_receipt_report`]'s first two
+    /// steps), and the variants whose home does not depend on where they arose answer here
+    /// exactly as they would there.
+    ///
+    /// Exhaustive and without a wildcard, for the same reason [`Self::class`] is: a variant
+    /// added later must be placed deliberately rather than inherit a home.
+    #[must_use]
+    pub fn assertion(&self) -> Assertion {
+        match *self {
+            Self::UnsupportedVersion { .. } => Assertion::Versions,
+            Self::BudgetExhausted { .. } => Assertion::ResourceLimits,
+            // I-D §7.8 on the fixed limits: "A nesting depth of 4 and a count of 64 embedded
+            // receipts bound a receipt's STRUCTURE and not its size." They are properties of the
+            // artifact, decided from its own shape, so they belong to the structural assertion
+            // rather than to the verifier-local budgets.
+            Self::LimitExceeded(_)
+            | Self::Malformed(_)
+            | Self::IdentifierMismatch { .. }
+            | Self::Ahl(_) => Assertion::Structure,
+            Self::AdaptorUnknown { .. }
+            | Self::AdaptorHashMismatch { .. }
+            | Self::AdaptorBindingInvalid { .. }
+            | Self::AdaptorCapabilityUnsupported { .. }
+            | Self::AdaptorProfileMisconfigured { .. } => Assertion::AdaptorProfile,
+            Self::EntryIndexBeyondCheckpoint { .. }
+            | Self::InclusionPathInvalid { .. }
+            | Self::ConsistencyPathInvalid => Assertion::Anchoring,
+            Self::GenesisAnchorMismatch
+            | Self::GovernanceChainInvalid(_)
+            | Self::ManifestSchemaInvalid { .. }
+            | Self::RotationProofInvalid { .. }
+            | Self::GovernanceRangeNotComplete { .. }
+            | Self::GovernanceRotationUnverifiable { .. }
+            | Self::KeyNotBound { .. }
+            // Not a §7.6 disagreement: what cannot be evidenced is the governance COVERAGE two
+            // members ask for at once (§7.4's enumerated range against §2.1's coverage through
+            // a later checkpoint), which is the governance assertion's own subject.
+            | Self::FormatConflict { .. } => Assertion::Governance,
+            Self::CheckpointSignatureInvalid => Assertion::CheckpointAuthentication,
+            Self::WitnessCosignatureInvalid { .. }
+            | Self::WitnessKeyNotTrusted { .. }
+            | Self::WitnessNotDeclared { .. }
+            | Self::WitnessIdentityMismatch { .. }
+            | Self::CheckpointUnwitnessed { .. } => Assertion::Witnesses,
+            Self::EnvelopeSignatureInvalid { .. } | Self::ProducerKeyNotCarried { .. } => {
+                Assertion::EnvelopeValidity
+            }
+            Self::AssuranceMismatch { .. }
+            | Self::RecordSubjectMismatch { .. }
+            | Self::SubjectManifestPresence { .. }
+            | Self::SubjectManifestBindingInvalid(_)
+            | Self::EmbeddedOrderingViolation { .. }
+            | Self::EmbeddedSubjectMismatch { .. } => Assertion::CrossField,
+            // The one variant whose home depends on its own payload: the same range-proof
+            // recomputation authenticates governance currency (§7.5.1 4c) and competing-trigger
+            // and completeness material (§7.2), and the two are different assertions.
+            Self::RangeProofInvalid { what, .. } => {
+                if what == "governance" {
+                    Assertion::Governance
+                } else {
+                    Assertion::ClaimMaterial
+                }
+            }
+            Self::CheckpointNotBound { .. }
+            | Self::CompetingRangeInsufficient { .. }
+            | Self::GovernanceSubjectNotManifest { .. }
+            | Self::GovernanceStateNotCurrent { .. }
+            | Self::TriggerNotAuthorized { .. }
+            | Self::EmbeddedClaimTypeMismatch { .. }
+            | Self::ClaimMaterialMissing { .. }
+            | Self::ClaimMaterialPathInvalid { .. }
+            | Self::TreeMaterialInvalid { .. }
+            | Self::ClosureMismatch(_) => Assertion::ClaimMaterial,
+            Self::CanonicalizationUnsupported { .. }
+            | Self::CanonicalizationFailed { .. }
+            | Self::MediaTypePresenceInvalid { .. }
+            | Self::ClaimDescriptorMismatch { .. }
+            | Self::ContentBindingMismatch { .. }
+            | Self::DatasetKeyNotHeld { .. } => Assertion::ContentBinding,
+        }
+    }
 }
 
 type Result<T> = core::result::Result<T, ReceiptError>;
@@ -531,49 +1599,610 @@ fn statement_type(payload: &Value) -> Result<&str> {
     text(payload, "type")
 }
 
+/// The literal `type` value of a carried statement, read without validating anything.
+///
+/// I-D §7.5.1 4b defines the induction over "the manifest statements of `governance.chain[]`,
+/// merged in entry-index order with the `key` statements the enumeration material carries", so
+/// something has to decide WHICH enumerated statements those are before any signature is
+/// verified. That decision is a selection, not the "type-specific validation" 4b's phase 2
+/// holds back: it reads one member and compares it to a literal, and it reaches no conclusion
+/// about the statement. A payload with no `type`, or a non-string one, is simply not a
+/// `manifest` and not a `key` — it takes the non-induction path, where 4d's signature runs
+/// first and the missing member is then reported by [`common_payload_fields`] in phase 2,
+/// which is the order 4b(K) fixes ("`type` is exactly `key`, and the common payload fields of
+/// Section 2.2 are present and well formed" is phase-2 work).
+fn statement_type_literal(envelope: &Value) -> Option<&str> {
+    envelope.get("payload")?.get("type")?.as_str()
+}
+
+/// Check a carried statement's `ahl_version` before validating anything else about it
+/// (I-D §2.2, §7.1, §7.5 step 1).
+///
+/// An absent `ahl_version` is a schema failure, decidable from the bytes alone, and is
+/// `invalid` (`ReceiptError::Malformed`). A present value other than [`crate::AHL_VERSION`] is
+/// `unverifiable` — not `invalid` — because this document establishes nothing about whether an
+/// earlier-revision artifact verifies under rules it was never issued under.
+fn check_ahl_version(payload: &Value) -> Result<()> {
+    match payload.get("ahl_version").and_then(Value::as_str) {
+        None => Err(ReceiptError::Malformed("statement payload missing `ahl_version`".to_owned())),
+        Some(got) if got == crate::AHL_VERSION => Ok(()),
+        Some(got) => Err(ReceiptError::UnsupportedVersion {
+            field: "ahl_version",
+            expected: crate::AHL_VERSION,
+            got: got.to_owned(),
+        }),
+    }
+}
+
+/// The seven statement types I-D §2.3 defines: five describe records, two govern the corpus.
+const STATEMENT_TYPES: [&str; 7] =
+    ["ingestion", "derivation", "retraction", "correction", "propagation", "manifest", "key"];
+
+/// Validate I-D §2.2's common payload fields on a carried statement, before its type-specific
+/// content or effect is trusted (§7.5.1 4b(K): "the common payload fields of Section 2.2 are
+/// present and well formed" — stated for `key` statements, but §2.2 states the same fields for
+/// EVERY statement type, manifest and the five record types included).
+///
+/// `ahl_version` carries its own distinct "unverifiable, not invalid" semantics and is checked
+/// separately by [`check_ahl_version`]; this function does not repeat it. Used for the subject
+/// envelope, every governance chain hop, and every enumerated envelope — one validator, so the
+/// rule cannot drift between call sites.
+fn common_payload_fields(payload: &Value) -> Result<()> {
+    let invalid =
+        |member: &str, detail: &str| ReceiptError::Malformed(format!("payload {member}: {detail}"));
+
+    let kind = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("type", "the member is REQUIRED (I-D §2.2)"))?;
+    if !STATEMENT_TYPES.contains(&kind) {
+        return Err(invalid("type", "not one of the seven defined statement types (I-D §2.3)"));
+    }
+
+    if !payload.get("producer").is_some_and(Value::is_string) {
+        return Err(invalid("producer", "the member is REQUIRED and MUST be a string (I-D §2.2)"));
+    }
+
+    // I-D §2.2: "<manifest version id; absent only in manifest statements>"; §2.4.5: "the
+    // `manifest` common field is absent" on a manifest statement's own payload.
+    match (kind, payload.get("manifest")) {
+        ("manifest", Some(_)) => {
+            return Err(invalid(
+                "manifest",
+                "MUST be absent on a manifest statement (I-D §2.2, §2.4.5)",
+            ))
+        }
+        ("manifest", None) => {}
+        (_, Some(value)) if value.is_string() => {}
+        (_, _) => {
+            return Err(invalid(
+                "manifest",
+                "the member is REQUIRED, and MUST be a string, except on a manifest \
+                 statement (I-D §2.2)",
+            ))
+        }
+    }
+
+    // `"<RFC 3339>" | {"from": "<RFC 3339>", "to": "<RFC 3339 or null>"}` — already implements
+    // exactly this shape, open interval and all, for trigger scoping; reused here purely for
+    // its shape validation.
+    crate::bitemporal::ValidTime::from_payload(payload)
+        .map_err(|source| invalid("valid_time", &source.to_string()))?;
+
+    let issued_at = payload.get("issued_at").and_then(Value::as_str).ok_or_else(|| {
+        invalid("issued_at", "the member is REQUIRED and MUST be a string (I-D §2.2)")
+    })?;
+    crate::bitemporal::parse_rfc3339("payload.issued_at", issued_at)
+        .map_err(|source| invalid("issued_at", &source.to_string()))?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
-// Budget
+// Run
 // ---------------------------------------------------------------------------
 
-/// Tracks the §3.1 budgets across a whole receipt tree, including embedded receipts.
+/// The verification-work budget, under the name I-D §7.8 requires a verifier to report it by.
+const WORK_BUDGET: &str = "verification work units";
+
+/// The decoded-size budget, under the name I-D §7.8 requires a verifier to report it by.
+const DECODED_SIZE_BUDGET: &str = "decoded size in bytes";
+
+/// One verification run over one receipt tree: the §7.8 budgets it shares, and the §7.7
+/// findings it produces.
+///
+/// Both live here because both are properties of the RUN rather than of any one receipt in the
+/// tree: the budgets are spent across every embedded receipt, and the findings of an embedded
+/// receipt are reported alongside the outer receipt's own (§7.7, "for each embedded receipt,
+/// every required assertion of THAT receipt").
 #[derive(Debug)]
-struct Budget {
+struct Run {
     limits: Limits,
     work: u64,
     embedded: usize,
-    /// Verdicts of embedded receipts already verified, keyed by the **JCS digest of the whole
-    /// embedded receipt object** (format §3.1). The entry id alone is unsound: two embedded
-    /// receipts can share a subject statement while carrying different — independently
+    /// Verdicts and findings of embedded receipts already verified, keyed by the **JCS digest
+    /// of the whole embedded receipt object** (format §3.1). The entry id alone is unsound: two
+    /// embedded receipts can share a subject statement while carrying different — independently
     /// forgeable — `claim_material`, and keying on the envelope would let the second reuse the
     /// first's verdict. Consulted before recursing, not merely recorded after.
-    verified: BTreeMap<String, Verdict>,
+    ///
+    /// The findings are cached with the verdict so that a receipt served from the cache still
+    /// reports its own assertions, at its own path, rather than disappearing from the report
+    /// because an identical receipt was verified elsewhere in the tree.
+    verified: BTreeMap<String, (Verdict, Vec<Finding>)>,
+    /// One finding per required assertion the run has settled, in the order it settled them.
+    findings: Vec<Finding>,
+    /// Where the run currently is: the `claim_material` member names of the embedded receipts
+    /// it has descended into, outermost first. Empty while the outermost receipt is being
+    /// verified.
+    ///
+    /// Pushed before descending and popped only when the descent SUCCEEDS: a rejection inside
+    /// an embedded receipt is recorded at that receipt's own path as the run unwinds, which is
+    /// where a reader has to look for it.
+    path: Vec<String>,
+    /// The assertion whose PHASE of the §7.5 algorithm is currently running, if any.
+    ///
+    /// A rejection is attributed to this rather than to the variant it happens to be: I-D §7.7
+    /// asks for a finding "for each assertion the receipt REQUIRES", and which assertion a
+    /// failure belongs to is decided by what was being checked, not by which error type the
+    /// check reached for. A malformed member is `structure` in the container, `governance` in a
+    /// governance statement's phase-2 validation, and `claim-material` in claim material — one
+    /// variant, three assertions. Saved and restored around each embedded receipt, and left as
+    /// it stands when a rejection unwinds, so the report names the phase the run stopped in.
+    scope: Option<Assertion>,
+    /// The assertions of the receipt currently being verified that were settled `unverifiable`,
+    /// and which the assertions depending on them therefore rest on (I-D §7.7; see
+    /// [`Run::pass`] and [`prerequisites`]).
+    ///
+    /// Saved and restored around each embedded receipt, because the dependence is between the
+    /// assertions of ONE receipt: an embedded receipt short of material says nothing about the
+    /// assertions its parent settled before descending into it.
+    blocked: Vec<Assertion>,
+    /// Rejections recorded as findings and not propagated ([`Run::tolerate`]), so that
+    /// [`verify_receipt`] can still return the one that decided the result.
+    deferred: Vec<Tolerated>,
+    /// The void entries inspected so far (I-D §7.5.1 4d), reported alongside the findings and
+    /// entering neither the reduction nor any assertion.
+    informative: Vec<InformativeItem>,
+    /// The entry indexes of carried entries SET ASIDE for want of a revision this document
+    /// defines (§7.1, §7.5.1 4b).
+    ///
+    /// Reported as a finding rather than an informative item — a void entry is a fact about the
+    /// artifact, while this one is a fact about the verifier — and treated like a void entry
+    /// everywhere else: not a competing candidate, never traversed by the closure.
+    set_aside: BTreeSet<u64>,
+    /// The entry indexes those items are about.
+    ///
+    /// A void entry is "excluded before any authority comparison... never effective and never
+    /// traversed", so every later reader of the same material — the competing-trigger
+    /// comparison, the closure walk over a propagation prefix — asks this. Keyed by entry index
+    /// because one index is one envelope: the range proof over a checkpoint fixes which.
+    void_indexes: BTreeSet<u64>,
 }
 
-impl Budget {
+/// One rejection [`Run::tolerate`] recorded and carried on from: the assertion and receipt path
+/// it was recorded under, so that whether it enters the reduction can be decided again later,
+/// and the rejection itself.
+type Tolerated = (Assertion, Vec<String>, ReceiptError);
+
+/// What each assertion RESTS ON: the assertions whose `unverifiable` outcome leaves it
+/// undecidable, so that it is itself `unverifiable` rather than reported as having held.
+///
+/// I-D §7.7 requires the run to carry on past an `unverifiable` finding — `invalid` dominates,
+/// and a run that stopped at the first capability gap could never reach the defect that
+/// dominates it — so what matters is which of the REMAINING assertions the gap actually
+/// reaches. That is this table, and nothing outside it is affected:
+///
+/// *   Nothing rests on the version read, the budgets, the container structure, the paths, or
+///     the adaptor profile ITSELF. §7.5 step 3's checks are hash recomputations against the
+///     carried `root_hash`, which need no profile and no key.
+/// *   Checkpoint authentication rests on the ADAPTOR PROFILE, whose document fixes the
+///     checkpoint serialization the signature is computed over, and on GOVERNANCE, which
+///     establishes the log key set the signature is verified under.
+/// *   The witness cosignatures rest on both of those and on the checkpoint itself, since a
+///     cosignature is over the checkpoint the log signed.
+/// *   Envelope validity rests on GOVERNANCE: §2.1 wants a key active at the envelope's own
+///     entry index, and it is the induction that establishes which keys those are. Where the
+///     induction stopped early ([`Governance::established_at`]), the checks that would resolve
+///     a key at or after that index are SKIPPED rather than run against the superseded state,
+///     and their assertions are settled here.
+/// *   Claim material rests on governance and envelope validity only where the claim type's own
+///     material does — §7.5.1 4e is "applied ONLY to envelopes already valid under 4d", and
+///     only the authority-dependent types reach it. That one is decided by the claim type at
+///     the call site rather than here (see [`AUTHORITY_DEPENDENT_TYPES`]).
+/// *   Content binding rests on nothing: it resolves its descriptor from the CARRIED manifest,
+///     whose authenticity is a separate assertion from its contents.
+/// *   Cross-field rests on nothing STATICALLY, because every §7.6 rule is decidable from the
+///     receipt's own bytes — except the two that compare an assurance member against what 4f
+///     established. Where one of those was not evaluated, the call site names the assertion
+///     that blocked it, and the finding is `unverifiable` rather than `verified`: a rule that
+///     was skipped is not a rule that held.
+const fn prerequisites(assertion: Assertion) -> &'static [Assertion] {
+    match assertion {
+        Assertion::CheckpointAuthentication => &[Assertion::AdaptorProfile, Assertion::Governance],
+        Assertion::Witnesses => {
+            &[Assertion::AdaptorProfile, Assertion::Governance, Assertion::CheckpointAuthentication]
+        }
+        Assertion::EnvelopeValidity => &[Assertion::Governance],
+        Assertion::Versions
+        | Assertion::ResourceLimits
+        | Assertion::Structure
+        | Assertion::AdaptorProfile
+        | Assertion::Anchoring
+        | Assertion::Governance
+        | Assertion::CrossField
+        | Assertion::ClaimMaterial
+        | Assertion::ContentBinding => &[],
+    }
+}
+
+/// The claim types whose §7.2 material rests on the governance state and on the subject's own
+/// envelope: the ones that test AUTHORITY (§7.5.1 4e), or whose claim is about the governance
+/// state itself.
+const AUTHORITY_DEPENDENT_TYPES: [&str; 4] =
+    ["trigger-effective", "disposition-effective", "propagation-complete", "governance-state"];
+
+/// Whether a finding for `assertion` at `path` enters the reduction of the receipt the run is
+/// over — the free-standing form of [`Finding::counts_toward_result`], for deciding it before a
+/// [`Finding`] is in hand.
+const fn counts_toward_result(assertion: Assertion, path: &[String]) -> bool {
+    !matches!(assertion, Assertion::ContentBinding) || path.is_empty()
+}
+
+impl Run {
     const fn new(limits: Limits) -> Self {
-        Self { limits, work: 0, embedded: 0, verified: BTreeMap::new() }
+        Self {
+            limits,
+            work: 0,
+            embedded: 0,
+            verified: BTreeMap::new(),
+            findings: Vec::new(),
+            path: Vec::new(),
+            scope: None,
+            blocked: Vec::new(),
+            informative: Vec::new(),
+            set_aside: BTreeSet::new(),
+            void_indexes: BTreeSet::new(),
+            deferred: Vec::new(),
+        }
+    }
+
+    /// Record the outcome of one assertion at the receipt currently being verified.
+    ///
+    /// One finding per assertion per receipt, and the DOMINATING outcome wins where the same
+    /// assertion is settled more than once — a version read that passes for the subject and
+    /// then fails for an enumerated statement is one `unverifiable` finding on `versions`, not
+    /// two contradictory ones.
+    fn record(
+        &mut self,
+        assertion: Assertion,
+        outcome: Outcome,
+        detail: Option<String>,
+        rests_on: Option<Assertion>,
+    ) {
+        if let Some(existing) = self
+            .findings
+            .iter_mut()
+            .find(|f| f.assertion == assertion && f.receipt_path == self.path)
+        {
+            if outcome > existing.outcome {
+                existing.outcome = outcome;
+                existing.detail = detail;
+                existing.rests_on = rests_on;
+            }
+            return;
+        }
+        self.findings.push(Finding {
+            assertion,
+            outcome,
+            receipt_path: self.path.clone(),
+            detail,
+            rests_on,
+        });
+    }
+
+    /// Enter the phase of the §7.5 algorithm that settles `assertion`.
+    ///
+    /// Every rejection raised from here until the next call is attributed to `assertion`. The
+    /// phases of one receipt are a straight sequence, so this is set at each boundary rather
+    /// than pushed and popped; what does nest is a receipt inside another receipt's claim
+    /// material, and the enclosing phase is saved and restored around that descent.
+    const fn phase(&mut self, assertion: Assertion) {
+        self.scope = Some(assertion);
+    }
+
+    /// The assertion a rejection belongs to: the phase that was running, or — for a rejection
+    /// raised outside any phase — the one the variant itself names.
+    fn attribute(&self, error: &ReceiptError) -> Assertion {
+        match *error {
+            // The one exception to attribution by phase. A budget is spent by every phase and
+            // exhausted by whichever happens to reach the last unit, so the phase says nothing;
+            // I-D §7.8 wants the BUDGET named, which is what this assertion does.
+            ReceiptError::BudgetExhausted { .. } => Assertion::ResourceLimits,
+            _ => self.scope.unwrap_or_else(|| error.assertion()),
+        }
+    }
+
+    /// Record one required assertion the algorithm has just settled.
+    ///
+    /// I-D §7.7 makes a finding rest on the assertions it needs: where an earlier assertion of
+    /// THIS receipt was `unverifiable` and the run carried on, an assertion settled after it
+    /// rests on material the run never established, and is itself `unverifiable` naming that
+    /// prerequisite. Assertions settled BEFORE the prerequisite keep the outcome they reached —
+    /// which is what §7.7's own example requires: a receipt whose content binding is
+    /// `unverifiable` still reports its anchoring and introduction findings as `verified`.
+    fn pass(&mut self, assertion: Assertion) {
+        self.pass_resting_on(assertion, &[]);
+    }
+
+    /// As [`Self::pass`], with prerequisites the call site knows and [`prerequisites`] cannot:
+    /// the claim material of an authority-dependent claim type rests on assertions the same
+    /// step does not touch for any other type.
+    fn pass_resting_on(&mut self, assertion: Assertion, also: &[Assertion]) {
+        let unmet = prerequisites(assertion)
+            .iter()
+            .chain(also)
+            .find(|prerequisite| self.blocked.contains(prerequisite));
+        match unmet {
+            Some(prerequisite) => {
+                let detail = format!("rests on `{prerequisite}`, which is unverifiable (I-D §7.7)");
+                let prerequisite = *prerequisite;
+                self.record(assertion, Outcome::Unverifiable, Some(detail), Some(prerequisite));
+                // Dependence is transitive: an assertion left `unverifiable` by a gap is itself
+                // a prerequisite nothing further can be settled against.
+                if !self.blocked.contains(&assertion) {
+                    self.blocked.push(assertion);
+                }
+            }
+            None => self.record(assertion, Outcome::Verified, None, None),
+        }
+    }
+
+    /// Record a rejection as a finding and carry on, where the assertions the run has left do
+    /// not depend on it.
+    ///
+    /// I-D §7.7's reduction is over ALL required findings, so a capability gap must not end the
+    /// run: `invalid` dominates `unverifiable`, and a run that stopped at the first gap could
+    /// never reach the defect that dominates it. An `invalid` outcome ends the run instead — it
+    /// has already decided the result — with one exception, and it is the exception §7.7 states
+    /// rather than a tolerance of this crate's own: a rejection that does not ENTER the
+    /// reduction cannot decide the result whatever its value, so it is recorded and the run
+    /// carries on. That is exactly an embedded receipt's content binding, which "is never a
+    /// required assertion of the receipt that embeds it".
+    /// Record one void entry (I-D §2.1, §7.5.1 4d): reported, and consequential nowhere.
+    fn void(&mut self, entry_index: u64, reason: VoidReason) {
+        if self.void_indexes.insert(entry_index) {
+            self.informative.push(InformativeItem {
+                entry_index,
+                reason,
+                receipt_path: self.path.clone(),
+            });
+        }
+    }
+
+    /// Record that an entry is set aside for want of a revision this document defines.
+    fn set_aside(&mut self, entry_index: u64) {
+        self.set_aside.insert(entry_index);
+    }
+
+    /// Whether an entry at this index is one no later step may read: found void (I-D §2.1,
+    /// §7.5.1 4d) or set aside for its revision (§7.1). Neither is a candidate, and neither is
+    /// traversed.
+    fn is_void(&self, entry_index: u64) -> bool {
+        self.void_indexes.contains(&entry_index) || self.set_aside.contains(&entry_index)
+    }
+
+    /// Record a rejection the run is REQUIRED to carry on past, and carry on.
+    ///
+    /// [`Self::tolerate`] ends the run for an unsupported version, because §7.5 step 1 gives the
+    /// receipt's own version read "no further processing". A governance entry an enumeration
+    /// reveals is the case I-D §7.5.1 4b settles the other way: such an entry "is not inducted,
+    /// K is unestablished at and after its index, the governance finding is `unverifiable`
+    /// (Section 2.2), every K-dependent check at or after that index rests on it, and the scalar
+    /// result is reduced under Section 7.7 — a later required `invalid` still dominates." Ending
+    /// the run there would make that last sentence unreachable: nothing later could be reached,
+    /// so nothing later could dominate.
+    ///
+    /// The finding is recorded under the phase that raised it and the rejection is deferred, so
+    /// [`verify_receipt`] still has one to return. What the CALLER must do is install the stop
+    /// ([`Governance::unestablished_from`]), so that every K-dependent check at or after that
+    /// index is skipped rather than run against the state the walk had reached.
+    fn record_gap(&mut self, error: ReceiptError) {
+        let settled = self.attribute(&error);
+        self.record(settled, error.class(), Some(error.to_string()), None);
+        if !self.blocked.contains(&settled) {
+            self.blocked.push(settled);
+        }
+        self.deferred.push((settled, self.path.clone(), error));
+    }
+
+    fn tolerate<T>(&mut self, result: Result<T>) -> Result<Option<T>> {
+        let error = match result {
+            Ok(value) => return Ok(Some(value)),
+            Err(error) => error,
+        };
+        if error.class() != Outcome::Unverifiable
+            && counts_toward_result(self.attribute(&error), &self.path)
+        {
+            return Err(error);
+        }
+        // Two `unverifiable` conditions end the run even so, and both are ordering rules rather
+        // than reductions. I-D §7.5 step 1 puts the version read before every other check and
+        // gives an unsupported one "no further processing"; §7.8 requires a verifier to "fail
+        // closed — never degrading to a partial check — when either [budget] is exhausted", and
+        // continuing on a spent budget is exactly a partial check. Neither can hide an
+        // `invalid`: an `invalid` finding ends the run where it is reached, so none can have
+        // been recorded before this point and none can be reached after it.
+        if matches!(
+            error,
+            ReceiptError::UnsupportedVersion { .. } | ReceiptError::BudgetExhausted { .. }
+        ) {
+            return Err(error);
+        }
+        let settled = self.attribute(&error);
+        // A tolerated rejection is what its own check produced: a cause, never a derivation.
+        self.record(settled, error.class(), Some(error.to_string()), None);
+        self.deferred.push((settled, self.path.clone(), error));
+        // What this gap reaches is [`prerequisites`], and nothing else: I-D §7.7 wants the run
+        // to carry on with every assertion that does not depend on the missing material.
+        if !self.blocked.contains(&settled) {
+            self.blocked.push(settled);
+        }
+        Ok(None)
+    }
+
+    /// Record the outcome of this receipt's content binding.
+    ///
+    /// One rejection is not about the binding at all: where the descriptor's manifest version
+    /// was never reached, because the induction stopped at a rotation it could not
+    /// authenticate, the finding rests on `governance` and is reported as resting on it. The
+    /// rejection is still registered, so [`verify_receipt`] has one to return.
+    fn settle_content_binding(&mut self, outcome: Result<()>) -> Result<()> {
+        if let Err(error @ ReceiptError::GovernanceRotationUnverifiable { .. }) = outcome {
+            self.phase(Assertion::ContentBinding);
+            self.pass_resting_on(Assertion::ContentBinding, &[Assertion::Governance]);
+            self.tolerate::<()>(Err(error))?;
+            self.phase(Assertion::ClaimMaterial);
+            return Ok(());
+        }
+        self.tolerate(outcome).map(|_| ())
+    }
+
+    /// Turn the run into the report I-D §7.7 requires: the findings, and the scalar result
+    /// they reduce to.
+    ///
+    /// A rejection that ended the run is recorded here, at the path the run stopped at, so the
+    /// report names the assertion that produced the result. What happens to the assertions the
+    /// run never reached depends on which value stopped it:
+    ///
+    /// *   `invalid` — the result is decided, and the remaining assertions are simply not
+    ///     reported. Reporting them would mean asserting outcomes for checks that never ran.
+    /// *   `unverifiable` — every remaining required assertion of the outermost receipt rests
+    ///     on material the run was short of, so each is reported `unverifiable` naming that
+    ///     prerequisite. Embedded receipts the run never descended into are not enumerated:
+    ///     which receipts a claim embeds is itself read from claim material.
+    fn into_report(mut self, outcome: Result<Verdict>, receipt: &Value) -> Report {
+        let verdict = match outcome {
+            Ok(verdict) => Some(verdict),
+            Err(error) => {
+                let stopped_at = self.attribute(&error);
+                let class = error.class();
+                self.record(stopped_at, class, Some(error.to_string()), None);
+                if class == Outcome::Unverifiable {
+                    self.fill_unreached(receipt, stopped_at);
+                }
+                None
+            }
+        };
+        // Report order is the reader's order, not the run's: the outermost receipt's own
+        // assertions first, in the order §7.5 settles them, then each embedded receipt's under
+        // its path. The run produces them innermost-first, because an embedded receipt is
+        // verified inside the outer receipt's claim-material step.
+        self.findings.sort_by(|a, b| {
+            a.receipt_path.cmp(&b.receipt_path).then_with(|| a.assertion.cmp(&b.assertion))
+        });
+        let result = reduce(&self.findings);
+        Report {
+            result,
+            findings: self.findings,
+            informative: self.informative,
+            // I-D §7.7: only `verified` may be rendered in words that assert the property, so
+            // no boundary is carried for the other two values.
+            verdict: if result == Outcome::Verified { verdict } else { None },
+        }
+    }
+
+    /// Report every required assertion of the outermost receipt the run did not settle as
+    /// resting on the one that stopped it.
+    fn fill_unreached(&mut self, receipt: &Value, stopped_at: Assertion) {
+        // I-D §7.7: the content binding is a required assertion "if and only if its own
+        // `assurance.content_binding` is not `none`". Read from the receipt's own bytes, since
+        // the run may have stopped before the assurance block was parsed at all.
+        let binds_content = receipt
+            .get("claim")
+            .and_then(|claim| claim.get("assurance"))
+            .and_then(|assurance| assurance.get("content_binding"))
+            .and_then(Value::as_str)
+            .is_some_and(|binding| binding != "none");
+        self.path.clear();
+        for assertion in Assertion::ORDER {
+            if matches!(assertion, Assertion::ContentBinding) && !binds_content {
+                continue;
+            }
+            if self.findings.iter().any(|f| f.assertion == assertion && f.receipt_path.is_empty()) {
+                continue;
+            }
+            self.record(
+                assertion,
+                Outcome::Unverifiable,
+                Some(format!("rests on `{stopped_at}`, which is unverifiable (I-D §7.7)")),
+                Some(stopped_at),
+            );
+        }
+    }
+
+    /// The tolerated rejection that decided the result, for the callers that report one error
+    /// rather than a report.
+    ///
+    /// The rule is [`Report::dominating`]'s, so the single-value API and the report name the
+    /// same thing: `invalid` first, then the first `unverifiable`, among the findings that enter
+    /// the reduction — an embedded receipt's content binding never does (I-D §7.7) — and in the
+    /// report's own order, by receipt path and then by [`Assertion::ORDER`]. Every rejection
+    /// here is one a check produced, so all of them are causes; the `rests_on` half of the rule
+    /// has nothing to exclude.
+    fn dominating_deferred(self) -> Option<ReceiptError> {
+        let mut candidates: Vec<Tolerated> = self
+            .deferred
+            .into_iter()
+            .filter(|(assertion, path, _)| counts_toward_result(*assertion, path))
+            .collect();
+        candidates.sort_by(|(left, left_path, _), (right, right_path, _)| {
+            left_path.cmp(right_path).then_with(|| left.cmp(right))
+        });
+        let invalid = candidates.iter().position(|(_, _, error)| error.class() == Outcome::Invalid);
+        let chosen = invalid.or(if candidates.is_empty() { None } else { Some(0) })?;
+        Some(candidates.swap_remove(chosen).2)
     }
 
     const fn spend(&mut self, units: u64) -> Result<()> {
         self.work = self.work.saturating_add(units);
         if self.work > self.limits.max_work_units {
-            return Err(ReceiptError::LimitExceeded("verification work budget"));
+            return Err(ReceiptError::BudgetExhausted {
+                budget: WORK_BUDGET,
+                in_force: self.limits.max_work_units,
+            });
         }
         Ok(())
     }
 
+    /// The §7.8 FIXED limits, enforced at exactly the values the document states.
     const fn enter(&mut self, depth: usize) -> Result<()> {
-        if depth > self.limits.max_depth {
+        if depth > MAX_EMBEDDED_DEPTH {
             return Err(ReceiptError::LimitExceeded("embedded-receipt nesting depth"));
         }
         if depth > 0 {
             self.embedded += 1;
-            if self.embedded > self.limits.max_embedded {
+            if self.embedded > MAX_EMBEDDED_RECEIPTS {
                 return Err(ReceiptError::LimitExceeded("embedded receipts per file"));
             }
         }
         Ok(())
     }
+}
+
+/// The reduction of I-D §7.7: "`invalid` if any required finding is `invalid`; otherwise
+/// `unverifiable` if any required finding is `unverifiable`; otherwise `verified`."
+///
+/// That is the maximum under [`Outcome`]'s own ordering, over the findings that ENTER the
+/// reduction: I-D §7.7 excludes an embedded receipt's content binding from the required
+/// assertions of the receipt that embeds it, and nothing else.
+fn reduce(findings: &[Finding]) -> Outcome {
+    findings
+        .iter()
+        .filter(|finding| finding.counts_toward_result())
+        .map(|finding| finding.outcome)
+        .max()
+        .unwrap_or(Outcome::Verified)
 }
 
 // ---------------------------------------------------------------------------
@@ -590,10 +2219,156 @@ struct KeyEvent {
 
 /// The verified governance state carried by a receipt.
 struct Governance<'a> {
+    /// `governance.currency.mode` — one of I-D §7.4's two tokens, already held to that domain
+    /// by the caller.
+    ///
+    /// Carried here because it decides what an unresolvable producer key MEANS: under
+    /// `enumerated` the state is the state that was in force (§7.5.1 4c) and an unresolvable
+    /// key is a defect, while under `declared` the state is only what the chain implies and
+    /// §7.4 makes the same condition `unverifiable`. See [`envelope_outcome`].
+    mode: &'a str,
     /// Manifest statements in the chain, ascending by entry index.
     manifests: Vec<(u64, &'a Value)>,
     /// Producer key transitions, ascending by entry index.
     events: Vec<KeyEvent>,
+    /// Manifest payloads keyed by their MANIFEST VERSION ID — the manifest statement's own
+    /// `statement_id` (I-D §2.4.5), which is what a subject statement's `manifest` field
+    /// references (I-D §2.2). Distinct from `entry_id`, which `predecessor` references.
+    manifest_by_version_id: BTreeMap<String, (u64, &'a Value)>,
+    /// Every manifest version the chain CARRIES, by its manifest version id (I-D §2.4.5: the
+    /// manifest statement's own statement id), to the entry index the chain asserts for it.
+    ///
+    /// Built from the raw chain before the induction walks a step, and never truncated by where
+    /// the walk stopped. §7.5 step 3 has already recomputed each element's inclusion path at
+    /// that asserted index — "the path proof IS the index proof" — so this is step-3 material,
+    /// established without any key. §7.6's rules about `subject.manifest` are read off it:
+    /// "Each of the following is a disagreement among fields the receipt itself carries,
+    /// decidable from the receipt alone... A receipt failing any of them is `invalid`; none of
+    /// them is ever a capability gap, and none is downgraded." What the INDUCTION decides is
+    /// something else — which version was active, and what its contents may be trusted for.
+    chain_index: BTreeMap<String, u64>,
+    /// The entry indexes at which the induction actually WALKED a governance statement, both
+    /// streams and the genesis included.
+    ///
+    /// §7.5.1 4d verifies "every carried envelope that is NOT part of the induction", and what
+    /// makes an envelope part of it is having been walked — not its type and not its statement
+    /// id, which a void duplicate shares with the copy that governs. Keyed by entry index for
+    /// that reason: one index, one envelope.
+    walked_indexes: BTreeSet<u64>,
+    /// The chain hops the induction skipped as void duplicates (I-D §2.1), with their entry
+    /// indexes.
+    ///
+    /// Void of EFFECT is not the same as absent: §7.5 step 4 says "verify every carried
+    /// envelope", so these are verified under 4d at their own entry indexes like any other
+    /// carried envelope that the induction did not walk.
+    void_chain: Vec<(u64, &'a Value)>,
+    /// Every entry index the chain carries an element at, void duplicates included.
+    ///
+    /// What §7.5.1 4c asks of enumerated currency is that the CHAIN carry every manifest the
+    /// range reveals — "the range proof forecloses omission" holds only if the presented chain
+    /// shows them all — and an element the induction skipped as a void duplicate (I-D §2.1) is
+    /// still an element the chain carries.
+    chain_indexes: BTreeSet<u64>,
+    /// The entry index of the governance statement whose effect the induction did NOT apply,
+    /// where it stopped early (I-D §7.5.1 4b, [`ReceiptError::GovernanceRotationUnverifiable`]).
+    ///
+    /// `None` — the induction walked the whole chain and K is established throughout. `Some(n)`
+    /// — K is the state in force immediately before entry index `n`, and is established for
+    /// indexes strictly below `n` and for nothing at or after it.
+    unestablished_from: Option<u64>,
+}
+
+/// The MANIFEST VERSION ID (I-D §2.4.5: a manifest statement's own `statement_id`) of the
+/// manifest ACTIVE at `index` — I-D §2.2: "the manifest version active at the statement's
+/// entry index... the manifest statement with the greatest entry index smaller than the
+/// statement's own." Free function so `read_chain` can call it mid-induction, with only the
+/// manifests known so far, exactly like [`snapshot_manifest_in`].
+fn active_manifest_version_id(
+    manifests: &[(u64, &Value)],
+    manifest_by_version_id: &BTreeMap<String, (u64, &Value)>,
+    index: u64,
+) -> Option<String> {
+    let (active_index, _) = snapshot_manifest_in(manifests, index)?;
+    manifest_by_version_id
+        .iter()
+        .find(|(_, (mi, _))| *mi == active_index)
+        .map(|(version_id, _)| version_id.clone())
+}
+
+impl Governance<'_> {
+    /// Whether the key state K is ESTABLISHED at `index` — that is, whether the induction
+    /// walked every governance statement up to it (I-D §7.5.1 4b).
+    ///
+    /// Where it is not, no check that resolves a key at that index may run: 4f "MUST NOT
+    /// resolve a checkpoint-verification or cosignature-validating key from a manifest version
+    /// whose log or witness key set was not established by the governance-key induction", and
+    /// the same holds for the envelope rule of §2.1, which wants a key active at the envelope's
+    /// own entry index. Such a check is skipped and its assertion reported `unverifiable`
+    /// resting on `governance`, never run against the pre-rotation state as though that state
+    /// were still in force.
+    const fn established_at(&self, index: u64) -> bool {
+        match self.unestablished_from {
+            Some(stopped_at) => index < stopped_at,
+            None => true,
+        }
+    }
+
+    /// The manifest a statement's `manifest` binding names, for a check that needs its CONTENT
+    /// — the dataset descriptors of §6.3 above all.
+    ///
+    /// The two ways this can fail are not the same failure, and I-D §7.7 separates them. A
+    /// version the induction WALKED and does not hold is material the receipt was required to
+    /// carry and does not: `invalid`, decidable from the receipt's own bytes. A version the
+    /// induction never reached, because it stopped at a rotation it could not authenticate, is
+    /// a capability this verifier lacks: `unverifiable`, and a better-equipped verifier would
+    /// resolve the same bytes. Reporting the second as the first would let two verifiers
+    /// contradict each other over one artifact.
+    fn manifest_for_binding(&self, version_id: &str) -> Result<(u64, &Value)> {
+        if let Some(found) = self.manifest_by_version_id.get(version_id) {
+            return Ok(*found);
+        }
+        // A version the chain CARRIES, at or after the point the walk stopped, is one whose
+        // CONTENTS this verifier could not establish: `unverifiable`, and a better-equipped
+        // verifier resolves it from the same bytes. Anything else — a version the chain does not
+        // carry at all, or one the walk did reach — is material the receipt owed, and is
+        // `invalid` whether or not the walk stopped somewhere else.
+        let carried_at = self.chain_index.get(version_id).copied();
+        match (self.unestablished_from, carried_at) {
+            (Some(stopped_at), Some(index)) if index >= stopped_at => {
+                Err(ReceiptError::GovernanceRotationUnverifiable { entry_index: stopped_at })
+            }
+            _ => Err(ReceiptError::GovernanceChainInvalid(format!(
+                "manifest version `{version_id}` named by the subject statement's `manifest` \
+                 binding is not in the carried governance chain"
+            ))),
+        }
+    }
+
+    /// The scope one `keys[]` scan resolves against for a checkpoint whose active manifest
+    /// version sits at `active_index`: the complete walk, and where it stopped.
+    fn scope_at(&self, active_index: u64) -> KeyScope<'_> {
+        KeyScope {
+            manifests: &self.manifests,
+            active_index,
+            unestablished_from: self.unestablished_from,
+            complete: true,
+        }
+    }
+
+    /// Whether K is established for the manifest version active for a checkpoint of this size.
+    ///
+    /// A checkpoint of `tree_size` commits entries `[0, tree_size)`, so the manifest version
+    /// active for it is the one at the greatest entry index below `tree_size`.
+    const fn established_for_tree_size(&self, tree_size: u64) -> bool {
+        self.established_at(tree_size.saturating_sub(1))
+    }
+}
+
+impl Governance<'_> {
+    /// The manifest version id ACTIVE at `index` (I-D §2.2). See [`active_manifest_version_id`].
+    fn active_manifest_version_id_at(&self, index: u64) -> Option<String> {
+        active_manifest_version_id(&self.manifests, &self.manifest_by_version_id, index)
+    }
 }
 
 /// One producer key in force at some entry index, with the governance statement that put it
@@ -604,51 +2379,70 @@ struct BoundKey {
     bound_at: u64,
 }
 
+/// The governance statement whose producer-key snapshot is in force *at* `index`, given the
+/// manifests known SO FAR (I-D §7.5.1 4b: "K as established so far" needs only the manifests
+/// and events strictly before `index`, so this is safe to call mid-induction, before the hop
+/// AT `index` has itself been validated).
+///
+/// Spec §2.2 resolves "the manifest version active at entry index i" as the manifest with the
+/// greatest entry index **smaller** than i — which is also what §2.3.5 needs, since a manifest
+/// statement is signed under its *predecessor*'s state. The genesis manifest is the one
+/// statement validated by its own snapshot, so index 0 falls back to it.
+fn snapshot_manifest_in<'a>(
+    manifests: &[(u64, &'a Value)],
+    index: u64,
+) -> Option<(u64, &'a Value)> {
+    manifests.iter().rfind(|(mi, _)| *mi < index).or_else(|| manifests.first()).copied()
+}
+
+/// The producer key set in force at `index`, with each key's binding index, given the
+/// manifests and events known SO FAR. See [`snapshot_manifest_in`].
+///
+/// Spec §7.2: "A manifest's producer `keys` array is the complete producer-key snapshot
+/// effective from that manifest's entry index: it discards the prior snapshot; later `key`
+/// statements then modify it in entry order until the next manifest version." So this is *not*
+/// a union across manifest versions — a key a later manifest omits is gone, and a signature by
+/// it no longer validates.
+fn producer_keys_at_in(
+    manifests: &[(u64, &Value)],
+    events: &[KeyEvent],
+    index: u64,
+) -> BTreeMap<String, BoundKey> {
+    let mut keys = BTreeMap::new();
+    let Some((snapshot_index, manifest)) = snapshot_manifest_in(manifests, index) else {
+        return keys;
+    };
+    // Every manifest in `manifests` passed [`producer_key_objects`] during `read_chain`'s
+    // induction before it was ever pushed there, so this cannot fail; were it ever to, the
+    // effect is a key absent from the derived set, which fails closed as `KeyNotBound`.
+    for (key_id, pubkey) in producer_key_objects(manifest).unwrap_or_default() {
+        keys.insert(key_id, BoundKey { pubkey, bound_at: snapshot_index });
+    }
+    // Only transitions anchored after that snapshot and at or before `index` apply; an
+    // earlier `key` statement was already folded into (or discarded by) the snapshot.
+    for event in events.iter().filter(|e| e.entry_index > snapshot_index && e.entry_index <= index)
+    {
+        if event.added {
+            keys.insert(
+                event.key_id.clone(),
+                BoundKey { pubkey: event.pubkey.clone(), bound_at: event.entry_index },
+            );
+        } else {
+            keys.remove(&event.key_id);
+        }
+    }
+    keys
+}
+
 impl<'a> Governance<'a> {
     /// The governance statement whose producer-key snapshot is in force *at* `index`.
-    ///
-    /// Spec §2.2 resolves "the manifest version active at entry index i" as the manifest with
-    /// the greatest entry index **smaller** than i — which is also what §2.3.5 needs, since a
-    /// manifest statement is signed under its *predecessor*'s state. The genesis manifest is
-    /// the one statement validated by its own snapshot, so index 0 falls back to it.
     fn snapshot_manifest(&self, index: u64) -> Option<(u64, &'a Value)> {
-        self.manifests
-            .iter()
-            .rfind(|(mi, _)| *mi < index)
-            .or_else(|| self.manifests.first())
-            .copied()
+        snapshot_manifest_in(&self.manifests, index)
     }
 
     /// The producer key set in force at `index`, with each key's binding index.
-    ///
-    /// Spec §7.2: "A manifest's producer `keys` array is the complete producer-key snapshot
-    /// effective from that manifest's entry index: it discards the prior snapshot; later `key`
-    /// statements then modify it in entry order until the next manifest version." So this is
-    /// *not* a union across manifest versions — a key a later manifest omits is gone, and a
-    /// signature by it no longer validates.
     fn producer_keys_at(&self, index: u64) -> BTreeMap<String, BoundKey> {
-        let mut keys = BTreeMap::new();
-        let Some((snapshot_index, manifest)) = self.snapshot_manifest(index) else {
-            return keys;
-        };
-        for (key_id, pubkey) in key_objects(manifest).unwrap_or_default() {
-            keys.insert(key_id, BoundKey { pubkey, bound_at: snapshot_index });
-        }
-        // Only transitions anchored after that snapshot and at or before `index` apply; an
-        // earlier `key` statement was already folded into (or discarded by) the snapshot.
-        for event in
-            self.events.iter().filter(|e| e.entry_index > snapshot_index && e.entry_index <= index)
-        {
-            if event.added {
-                keys.insert(
-                    event.key_id.clone(),
-                    BoundKey { pubkey: event.pubkey.clone(), bound_at: event.entry_index },
-                );
-            } else {
-                keys.remove(&event.key_id);
-            }
-        }
-        keys
+        producer_keys_at_in(&self.manifests, &self.events, index)
     }
 
     /// `key_id -> pubkey` at `index`, for signature resolution.
@@ -670,179 +2464,1918 @@ impl<'a> Governance<'a> {
     }
 }
 
-/// Read the manifest key objects of `group` (`keys`, `log.keys`, `witnesses[].keys`).
+// ---------------------------------------------------------------------------
+// The manifest `log` object schema (spec §7.3)
+// ---------------------------------------------------------------------------
+
+/// A `sha256:` family string: the prefix plus exactly 64 lowercase hex digits.
+///
+/// Lowercase is not cosmetic. Spec §2.3.6 derives a producer `key_id` as `sha256:` plus
+/// *lowercase* hex, and §2.5 says family strings are lowercase hex; two spellings of one digest
+/// would compare unequal as strings while naming the same value, and every key lookup and
+/// checkpoint binding in this verifier is a string comparison.
+fn is_family_hash(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Accept a `base64:` family string under I-D §2.1's strict rule: the prefix, the standard
+/// alphabet, canonical padding, and no non-zero trailing bits.
+///
+/// The decoder this crate uses everywhere ([`crate::B64`]) already enforces all three of the
+/// encoding conditions — it rejects a wrong-length pad and refuses trailing bits rather than
+/// discarding them — so validating a family string is deciding the prefix and then asking it
+/// to decode. What this adds over decoding AT THE POINT OF USE is that it can be applied to
+/// every carried byte field, including the ones verification never selects (I-D §7.1: "Each is
+/// a `base64:` family string… A family string failing those checks is a schema failure and the
+/// result is `invalid`").
+fn is_family_base64(value: &str) -> bool {
+    value.strip_prefix("base64:").is_some_and(|body| B64.decode(body).is_ok())
+}
+
+/// Reject any member outside the set I-D §7.1's container fixes for an object.
+///
+/// "The member shapes shown above are normative", and the container marks its own extension
+/// points: an elided body (`{ ... }`) or a trailing `...` says the members are defined
+/// elsewhere or by an outside format, and every other object is drawn complete. This closes
+/// the complete ones. What it buys is not tidiness: a member no rule compares can be read by
+/// a human, or by a second implementation, as though something had checked it — and the one
+/// that matters most is the member an object's own MATCH rule deliberately leaves out, such as
+/// a receipt-side key entry asserting `valid_from_index` where §7.1 says the match compares
+/// only shared members.
+///
+/// `allowed` lists every member the shape names, REQUIRED or optional alike; presence rules
+/// are the callers' own and are checked where they belong.
+fn check_closed_members(value: &Value, what: &str, allowed: &[&str]) -> Result<()> {
+    let members = value
+        .as_object()
+        .ok_or_else(|| ReceiptError::Malformed(format!("`{what}` MUST be an object (I-D §7.1)")))?;
+    if let Some(extra) = members.keys().find(|member| !allowed.contains(&member.as_str())) {
+        return Err(ReceiptError::Malformed(format!(
+            "`{what}` carries `{extra}`, which is not a member of that object: I-D §7.1 fixes \
+             its shape as {allowed:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Every element of a `sha256:` family-string array member, validated where the member is
+/// present (I-D §7.1: inclusion and consistency paths are `sha256:` family-string arrays).
+///
+/// Absent members are left to the readers that require them; what this rules out is a path
+/// carrying an element no verifier could interpret, on any element of any carried path,
+/// including one an earlier failure would have short-circuited past.
+fn check_family_hash_path(container: &Value, member: &str, what: &str) -> Result<()> {
+    let Some(value) = container.get(member) else { return Ok(()) };
+    let elements = value.as_array().ok_or_else(|| {
+        ReceiptError::Malformed(format!("`{what}` MUST be an array of `sha256:` family strings"))
+    })?;
+    for (position, element) in elements.iter().enumerate() {
+        if !element.as_str().is_some_and(is_family_hash) {
+            return Err(ReceiptError::Malformed(format!(
+                "`{what}[{position}]` is not a `sha256:` family string in lowercase hex \
+                 (I-D §2.1, §7.1)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Recompute a producer `key_id` from its `pubkey`: I-D §6.2 — "`pubkey` decodes to exactly
+/// the 32 octets of an Ed25519 public key; and `key_id` equals `sha256:` followed by the
+/// lowercase hex SHA-256 of those octets, so it is recomputable rather than merely declared."
+/// Shared by every place a PRODUCER key object's own id is trusted only once recomputed —
+/// manifest producer key objects ([`producer_key_objects`]) and `key` statements' own key
+/// object (I-D §7.5.1 4b(K)) alike; NOT for log or witness keys, whose id derivation is
+/// adaptor-profile-defined rather than this fixed rule (I-D §2.4.6).
+///
+/// # Errors
+///
+/// Returns [`AhlError::BadLength`] (via [`decode_pubkey`]) if `pubkey` does not decode to
+/// exactly 32 octets.
+fn recompute_producer_key_id(pubkey: &str) -> Result<String> {
+    Ok(sha256_hex(decode_pubkey(pubkey)?.as_bytes()))
+}
+
+/// The receipt-borne checkpoint shape (I-D §7.1): `{log_id, tree_size, root_hash,
+/// checkpoint_time, key_id, signature}` — every member REQUIRED — plus an optional `raw`.
+/// Shared by `anchoring.checkpoint`, `anchoring.later_checkpoint`, and every
+/// `governance.rotation_proofs[].checkpoint` (I-D §7.1: rotation-proof checkpoints are "in the
+/// receipt-borne form defined above"), so a strict shape check written once cannot drift
+/// between the three call sites.
+fn checkpoint_object(value: &Value) -> Result<&Value> {
+    let invalid = |member: &str, detail: &str| {
+        ReceiptError::Malformed(format!("checkpoint {member}: {detail}"))
+    };
+    if !value.get("log_id").and_then(Value::as_str).is_some_and(is_family_hash) {
+        return Err(invalid("log_id", "REQUIRED, a `sha256:` family string in lowercase hex"));
+    }
+    if value.get("tree_size").and_then(Value::as_u64).is_none() {
+        return Err(invalid("tree_size", "REQUIRED, an entry count"));
+    }
+    if !value.get("root_hash").and_then(Value::as_str).is_some_and(is_family_hash) {
+        return Err(invalid("root_hash", "REQUIRED, a `sha256:` family string in lowercase hex"));
+    }
+    let checkpoint_time = value
+        .get("checkpoint_time")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("checkpoint_time", "REQUIRED"))?;
+    crate::bitemporal::parse_rfc3339("checkpoint_time", checkpoint_time)
+        .map_err(|source| invalid("checkpoint_time", &source.to_string()))?;
+    if !value.get("key_id").and_then(Value::as_str).is_some_and(is_family_hash) {
+        return Err(invalid("key_id", "REQUIRED, a `sha256:` family string in lowercase hex"));
+    }
+    if !value.get("signature").and_then(Value::as_str).is_some_and(is_family_base64) {
+        return Err(invalid(
+            "signature",
+            "REQUIRED, a `base64:` family string under the strict acceptance rule (I-D §2.1)",
+        ));
+    }
+    // I-D §7.1 draws the receipt-borne checkpoint complete: the committed state of §1.5 plus
+    // `key_id` and `signature`, and `raw` which it "MAY additionally carry". Being a SUPERSET
+    // of §1.5's four members is what that sentence says; it is not licence for members beyond
+    // the seven. The signing bytes are `JCS(cp)` minus `signature`, so an extra member would
+    // also silently enter the preimage two implementations must agree on.
+    check_closed_members(
+        value,
+        "checkpoint",
+        &["log_id", "tree_size", "root_hash", "checkpoint_time", "key_id", "signature", "raw"],
+    )?;
+    Ok(value)
+}
+
+/// The corpus's own minimal test profile — the ONE profile this VERIFIER has a checkpoint
+/// signing-bytes procedure for.
+///
+/// `ahl-adaptor-atl-v1` is deliberately NOT dispatched here even though
+/// `ahl_core::checkpoint_signing_bytes_for`/`ahl_core::reconcile_atl_checkpoint_raw` implement
+/// its checkpoint-blob mechanism and are unit-tested in `lib.rs`: that profile's leaf
+/// construction (adaptor §4.2, `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`) and
+/// origin-derived `log_id` (§7.1, the SHA-256 of a 16-byte Data Tree UUID) are not yet
+/// profile-dispatched anywhere ELSE in this crate — inclusion proofs and entry ids still use
+/// the one generic form every corpus here shares — so a checkpoint whose SIGNATURE verified
+/// correctly would still rest on entries hashed the wrong way. And adaptor §14: "Until this
+/// document is released as an immutable, openly published artifact… no manifest may pin it."
+/// A receipt naming `ahl-adaptor-atl-v1` is therefore refused as
+/// [`ReceiptError::AdaptorCapabilityUnsupported`] — a profile-limitation outcome, never
+/// `invalid` — regardless of what local policy holds for it.
+const TEST_ADAPTOR_PROFILE_ID: &str = "ahl-test-log-v1";
+
+/// The bytes a checkpoint's own log signature is verified over.
+///
+/// Narrower than the crate-level, profile-string-dispatched
+/// `ahl_core::checkpoint_signing_bytes_for`: this verifier only ever trusts the ONE profile
+/// procedure it actually stands behind ([`TEST_ADAPTOR_PROFILE_ID`]'s own, I-D §3.2). Any other
+/// profile id — `ahl-adaptor-atl-v1` included — is the profile-limitation outcome rather than
+/// a silent fallback to a form this crate cannot yet vouch for end to end (see
+/// [`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment).
+fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> Result<Vec<u8>> {
+    check_profile_supported(profile_id)?;
+    Ok(crate::checkpoint_signing_bytes(checkpoint)?)
+}
+
+/// Refuse a profile id this verifier has no checkpoint procedure for, at the point I-D §7.5
+/// step 2 resolves the profile — after the recomputed-hash comparison and before any carried
+/// material is verified.
+///
+/// The refusal is a capability outcome about the receipt's own pinned profile, so it is
+/// decidable from the id alone and nothing in the receipt can change it. Deciding it here,
+/// rather than where the signing bytes are first needed, is what keeps an unsupported-profile
+/// receipt from being walked through the governance induction — verifying signatures, resolving
+/// keys, checking manifest schemas — on its way to a refusal that was certain from step 2.
+/// Ordering that work ahead of a decided refusal would let material this verifier has already
+/// declined to interpret drive it.
+fn check_profile_supported(profile_id: &str) -> Result<()> {
+    if profile_id == TEST_ADAPTOR_PROFILE_ID {
+        return Ok(());
+    }
+    Err(ReceiptError::AdaptorCapabilityUnsupported {
+        id: profile_id.to_owned(),
+        capability: "a checkpoint signing-bytes procedure",
+    })
+}
+
+/// Reject a receipt-borne checkpoint's optional `raw` framing (I-D §7.1, §7.5 step 2: "WHERE
+/// `raw` is carried it MUST parse to the same values as the JSON members").
+///
+/// This build wires NO profile's `raw` parser into the verifier — `ahl-test-log-v1` defines no
+/// binary framing at all (its own §5), and `ahl-adaptor-atl-v1`'s is deliberately not reachable
+/// here either (see [`TEST_ADAPTOR_PROFILE_ID`]'s doc comment: leaf/origin construction for
+/// that profile is not yet dispatched anywhere in this crate, and the profile document is not
+/// yet released, adaptor §14). So `raw`'s mere presence is always the profile-limitation
+/// outcome, unconditionally — `verify_nested`'s policy-level check already refuses a policy
+/// that claims `checkpoint_raw: true` for ANY profile before a receipt is even read, so
+/// `profile`/`profile_id` are accepted here only to name the profile in the error, never to
+/// branch on what the policy claims.
+fn reconcile_checkpoint_raw(checkpoint: &Value, profile_id: &str) -> Result<()> {
+    if checkpoint.get("raw").is_some() {
+        return Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: profile_id.to_owned(),
+            capability: "a binary checkpoint framing for `checkpoint.raw`",
+        });
+    }
+    Ok(())
+}
+
+/// Reconcile the `raw` form of every checkpoint the `anchoring` block carries (I-D §7.5
+/// step 2: "Where a raw checkpoint form is carried (`anchoring.checkpoint.raw`, Section 7.1),
+/// verify that it parses to the same values as the JSON members; a mismatch is `invalid`").
+///
+/// The check is profile-dependent — what `raw` even means is the adaptor's own framing — but
+/// it is key-independent, and §7.5 places it in step 2 alongside profile resolution rather
+/// than in the authenticated validation of 4f. Presence is read here without requiring the
+/// checkpoint object to be otherwise well formed: its shape is step 3's business, and reading
+/// one member for presence prejudges none of it.
+fn reconcile_anchoring_raw(anchoring: &Value, profile_id: &str) -> Result<()> {
+    for member in ["checkpoint", "later_checkpoint"] {
+        if let Some(checkpoint) = anchoring.get(member) {
+            reconcile_checkpoint_raw(checkpoint, profile_id)?;
+        }
+    }
+    Ok(())
+}
+
+/// One witness-cosignature object in the shape of `anchoring.witnesses[]` (I-D §7.1):
+/// `{witness_id, key_id, cosignature, cosigned_at}` — every member REQUIRED. Shared by
+/// `anchoring.witnesses[]` and every `governance.rotation_proofs[].witnesses[]` element (I-D
+/// §7.1: "an array in the shape of `anchoring.witnesses[]`"), so EVERY element of such an array
+/// is checked against this shape, not merely the ones whose cosignature happens to verify.
+fn witness_cosignature_object(value: &Value) -> Result<&Value> {
+    let invalid = |member: &str, detail: &str| {
+        ReceiptError::Malformed(format!("witness cosignature {member}: {detail}"))
+    };
+    if value.get("witness_id").and_then(Value::as_str).is_none() {
+        return Err(invalid("witness_id", "REQUIRED"));
+    }
+    if !value.get("key_id").and_then(Value::as_str).is_some_and(is_family_hash) {
+        return Err(invalid("key_id", "REQUIRED, a `sha256:` family string in lowercase hex"));
+    }
+    if !value.get("cosignature").and_then(Value::as_str).is_some_and(is_family_base64) {
+        return Err(invalid(
+            "cosignature",
+            "REQUIRED, a `base64:` family string under the strict acceptance rule (I-D §2.1)",
+        ));
+    }
+    let cosigned_at = value
+        .get("cosigned_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("cosigned_at", "REQUIRED"))?;
+    crate::bitemporal::parse_rfc3339("cosigned_at", cosigned_at)
+        .map_err(|source| invalid("cosigned_at", &source.to_string()))?;
+    check_closed_members(
+        value,
+        "witness cosignature",
+        &["witness_id", "key_id", "cosignature", "cosigned_at"],
+    )?;
+    Ok(value)
+}
+
+/// Parse the restricted duration grammar of spec §7.3, returning the value in nanoseconds.
+///
+/// §7.3 admits `P[n]DT[n]H[n]M[n]S` and nothing else: days, hours, minutes and seconds. Years
+/// and calendar months are PROHIBITED because their length is context-dependent, and a value
+/// carrying `Y`, or `M` in the date part, "is malformed and MUST be rejected rather than
+/// approximated". Fractional seconds are capped at nine digits, again with rejection rather than
+/// truncation — truncating would make the value implementation-dependent in exactly the way the
+/// component restriction exists to prevent.
+///
+/// The duty is on the *value*, not on the reader's use of it. This verifier computes no cadence
+/// or freshness verdict, but a manifest carrying `P1Y` would make those verdicts
+/// implementation-dependent for whoever does compute them, and a signed manifest that violates
+/// the frozen schema must not verify here merely because this code has no use for the field.
+///
+/// Returns the offending rule as a message on rejection.
+fn duration_nanos(value: &str) -> core::result::Result<u128, &'static str> {
+    /// Seconds per unit, in the order the grammar fixes.
+    const UNITS: [(char, u128); 3] = [('H', 3_600), ('M', 60), ('S', 1)];
+
+    fn digits(text: &str) -> core::result::Result<u64, &'static str> {
+        if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("every component is one or more ASCII digits followed by its designator");
+        }
+        text.parse().map_err(|_| "the component value is too large to represent")
+    }
+
+    let rest = value.strip_prefix('P').ok_or("a duration must begin with `P`")?;
+    let (date, time) = rest.split_once('T').map_or((rest, None), |(d, t)| (d, Some(t)));
+
+    let mut nanos: u128 = 0;
+    let mut components = 0usize;
+
+    if !date.is_empty() {
+        // Days are the only date component §7.3 admits: `Y`, and `M` in the date part, are
+        // prohibited outright, and no other designator (`W` among them) is in the grammar.
+        let day_digits = date.strip_suffix('D').ok_or(
+            "the date part admits days only — `Y` and a date-part `M` are prohibited (§7.3)",
+        )?;
+        nanos = u128::from(digits(day_digits)?) * 86_400 * 1_000_000_000;
+        components += 1;
+    }
+
+    if let Some(time) = time {
+        // A dangling `T` designates a time part that is not there. Admitting it would mean two
+        // spellings of one value, which is the class of latitude §7.3 exists to close.
+        if time.is_empty() {
+            return Err("`T` must be followed by at least one time component");
+        }
+        let mut cursor = time;
+        let mut next_unit = 0usize;
+        while !cursor.is_empty() {
+            let at = cursor
+                .find(|c: char| !c.is_ascii_digit() && c != '.')
+                .ok_or("a time component must carry a `H`, `M` or `S` designator")?;
+            let (number, tail) = cursor.split_at(at);
+            let designator = tail.chars().next().ok_or("a truncated time component")?;
+            let unit = UNITS
+                .iter()
+                .position(|(c, _)| *c == designator)
+                .ok_or("the time part admits `H`, `M` and `S` only (§7.3)")?;
+            if unit < next_unit {
+                return Err("time components appear in the order H, M, S, each at most once");
+            }
+            next_unit = unit + 1;
+
+            let value_nanos = match number.split_once('.') {
+                Some((whole, fraction)) => {
+                    if designator != 'S' {
+                        return Err("only the seconds component may carry a fraction (§7.3)");
+                    }
+                    if fraction.len() > 9 {
+                        return Err(
+                            "at most nine fractional digits; a longer value is malformed and is \
+                             rejected rather than truncated or rounded (§7.3)",
+                        );
+                    }
+                    let scale = 10u128.pow(9 - u32::try_from(fraction.len()).unwrap_or(9));
+                    u128::from(digits(whole)?) * 1_000_000_000
+                        + u128::from(digits(fraction)?) * scale
+                }
+                None => u128::from(digits(number)?) * UNITS[unit].1 * 1_000_000_000,
+            };
+            nanos =
+                nanos.checked_add(value_nanos).ok_or("the duration is too large to represent")?;
+            components += 1;
+            cursor = &tail[designator.len_utf8()..];
+        }
+    }
+
+    if components == 0 {
+        return Err("a duration carries at least one component");
+    }
+    Ok(nanos)
+}
+
+/// The manifest `log` object, checked against the §7.3 schema before anything reads it.
+///
+/// Spec §7.3 fixes both the membership and the value grammars, and makes rejection a duty on
+/// the value rather than a consequence of computing with it:
+///
+/// * every member is REQUIRED — `log_id`, `operator`, `adaptor: {id, hash}`,
+///   `checkpoint_cadence`, `cadence_epoch`, `witness_grace_period`, `keys`;
+/// * `log_id` and each `keys[].key_id` are family strings, as is `adaptor.hash`;
+/// * `checkpoint_cadence` and `witness_grace_period` follow the restricted duration grammar of
+///   [`duration_nanos`], and `checkpoint_cadence` MUST be greater than zero;
+/// * `cadence_epoch` is RFC 3339;
+/// * each key object is `{key_id, pubkey, valid_from_index}`, the last an entry index.
+///
+/// The id member is `log_id`, and there is deliberately no alias for `id`: reading the id under
+/// another spelling — or tolerating a manifest that omits `cadence_epoch` — is how two
+/// incompatible dialects of one manifest come to coexist, each verifiable only by the
+/// implementation that wrote it.
+///
+/// What this does *not* fix is the encoding of `keys[].pubkey`, which core spec §2.3.6 leaves
+/// adaptor-defined; it is decoded where it is used, under the rule of the pinned profile.
+fn log_object(manifest: &Value) -> Result<&Value> {
+    let invalid = |member: &str, detail: &str| ReceiptError::ManifestSchemaInvalid {
+        object: format!("log.{member}"),
+        detail: detail.to_owned(),
+    };
+    let missing = |member: &str| invalid(member, "the member is REQUIRED (spec §7.3)");
+
+    let log = manifest.get("log").filter(|value| value.is_object()).ok_or_else(|| {
+        ReceiptError::ManifestSchemaInvalid {
+            object: "log".to_owned(),
+            detail: "the object is REQUIRED (spec §7.3)".to_owned(),
+        }
+    })?;
+
+    for member in
+        ["log_id", "operator", "checkpoint_cadence", "cadence_epoch", "witness_grace_period"]
+    {
+        if !log.get(member).is_some_and(Value::is_string) {
+            return Err(missing(member));
+        }
+    }
+    if !is_family_hash(text(log, "log_id")?) {
+        return Err(invalid("log_id", "not a `sha256:` family string in lowercase hex (§7.3)"));
+    }
+
+    // Both durations are restricted to time components. `checkpoint_cadence` additionally MUST
+    // be greater than zero: a zero maximum gap could never be met by any published series, so a
+    // corpus declaring it would be unjudgeable rather than merely strict.
+    let cadence = duration_nanos(text(log, "checkpoint_cadence")?)
+        .map_err(|detail| invalid("checkpoint_cadence", detail))?;
+    if cadence == 0 {
+        return Err(invalid("checkpoint_cadence", "MUST be greater than zero (§7.3)"));
+    }
+    duration_nanos(text(log, "witness_grace_period")?)
+        .map_err(|detail| invalid("witness_grace_period", detail))?;
+
+    crate::bitemporal::parse_rfc3339("log.cadence_epoch", text(log, "cadence_epoch")?)
+        .map_err(|source| invalid("cadence_epoch", &source.to_string()))?;
+
+    let adaptor =
+        log.get("adaptor").filter(|value| value.is_object()).ok_or_else(|| missing("adaptor"))?;
+    for member in ["id", "hash"] {
+        if !adaptor.get(member).is_some_and(Value::is_string) {
+            return Err(missing(&format!("adaptor.{member}")));
+        }
+    }
+    if !is_family_hash(text(adaptor, "hash")?) {
+        return Err(invalid("adaptor.hash", "not a `sha256:` family string in lowercase hex"));
+    }
+
+    if !log.get("keys").is_some_and(Value::is_array) {
+        return Err(missing("keys"));
+    }
+    key_objects(log)?;
+    Ok(log)
+}
+
+/// I-D §3.2: "the profile id and hash are pinned in the manifest and carried in every Evidence
+/// Receipt" — `anchoring.adaptor` (already resolved into `profile_id`/`profile` by
+/// `verify_nested`, since policy resolution requires an exact hash match) MUST equal the
+/// active manifest's own `log.adaptor` for the checkpoint being verified.
+///
+/// Checked BEFORE any profile-specific parsing or signature rule, so a receipt cannot borrow a
+/// policy-held profile's capabilities merely by NAMING it in `anchoring.adaptor` while the
+/// governance chain it actually carries pins a different one.
+///
+/// `active_log` is the already schema-validated `log` object of the manifest active for this
+/// checkpoint ([`log_object`]'s return), so `adaptor.id`/`adaptor.hash` are known present and
+/// well typed.
+fn check_adaptor_binding(
+    active_log: &Value,
+    profile_id: &str,
+    profile: &AdaptorProfile,
+) -> Result<()> {
+    let adaptor = obj(active_log, "adaptor")?;
+    let pinned_id = text(adaptor, "id")?;
+    let pinned_hash = text(adaptor, "hash")?;
+    if pinned_id != profile_id || pinned_hash != profile.hash() {
+        return Err(ReceiptError::AdaptorBindingInvalid {
+            pinned: format!("{pinned_id} ({pinned_hash})"),
+            carried: format!("{profile_id} ({})", profile.hash()),
+        });
+    }
+    Ok(())
+}
+
+/// Read manifest LOG or WITNESS key objects (`log.keys`, `witnesses[].keys`): the shared shape
+/// `{key_id, pubkey, valid_from_index}` (I-D §6.2). `key_id` is a family string and
+/// `valid_from_index` is an entry index, which is an unsigned integer: a negative or
+/// fractional value is not an index into an append-only log.
+///
+/// NOT for PRODUCER key objects — those take a stricter, different shape with no
+/// `valid_from_index` at all; see [`producer_key_objects`].
 fn key_objects(container: &Value) -> Result<Vec<(String, String)>> {
     array(container, "keys")?
         .iter()
-        .map(|object| Ok((text(object, "key_id")?.to_owned(), text(object, "pubkey")?.to_owned())))
+        .enumerate()
+        .map(|(index, object)| {
+            let invalid = |member: &str, detail: &str| ReceiptError::ManifestSchemaInvalid {
+                object: format!("keys[{index}].{member}"),
+                detail: detail.to_owned(),
+            };
+            let key_id = object
+                .get("key_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("key_id", "the member is REQUIRED (spec §7.2)"))?;
+            if !is_family_hash(key_id) {
+                return Err(invalid("key_id", "not a `sha256:` family string in lowercase hex"));
+            }
+            let pubkey = object
+                .get("pubkey")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("pubkey", "the member is REQUIRED (spec §7.2)"))?;
+            // I-D §2.1's strict acceptance rule, on the manifest side of the same comparison
+            // the receipt's `keys` entries are held to: a declared key object no verifier could
+            // decode is a schema failure of the manifest, not a key that happens not to match.
+            if !is_family_base64(pubkey) {
+                return Err(invalid(
+                    "pubkey",
+                    "not a `base64:` family string under the strict acceptance rule (I-D §2.1)",
+                ));
+            }
+            if object.get("valid_from_index").and_then(Value::as_u64).is_none() {
+                return Err(invalid("valid_from_index", "not an entry index (spec §7.2, §7.3)"));
+            }
+            Ok((key_id.to_owned(), pubkey.to_owned()))
+        })
         .collect()
 }
 
-/// Build and structurally validate the governance chain (spec §2.3.5).
-fn read_chain<'a>(receipt: &'a Value, policy: &TrustPolicy) -> Result<Governance<'a>> {
+/// Read manifest PRODUCER key objects (`payload.keys`): I-D §6.2 — "Each entry is a producer
+/// key object `{key_id, pubkey}`. Both members are family strings... A producer key object
+/// carrying any member beyond those two is a schema failure." Deliberately stricter than
+/// [`key_objects`]: no `valid_from_index`, because the array itself IS the producer key state
+/// at the manifest's entry index (I-D §6.2), not a set of per-key activation records.
+fn producer_key_objects(container: &Value) -> Result<Vec<(String, String)>> {
+    const ALLOWED: [&str; 2] = ["key_id", "pubkey"];
+    array(container, "keys")?
+        .iter()
+        .enumerate()
+        .map(|(index, object)| {
+            let invalid = |member: &str, detail: &str| ReceiptError::ManifestSchemaInvalid {
+                object: format!("keys[{index}].{member}"),
+                detail: detail.to_owned(),
+            };
+            let map = object
+                .as_object()
+                .ok_or_else(|| invalid("", "a producer key object MUST be an object (I-D §6.2)"))?;
+            if let Some(extra) = map.keys().find(|member| !ALLOWED.contains(&member.as_str())) {
+                return Err(invalid(
+                    extra,
+                    "a producer key object carries `key_id` and `pubkey` ONLY — any other \
+                     member, `valid_from_index` included, is a schema failure (I-D §6.2)",
+                ));
+            }
+            let key_id = object
+                .get("key_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("key_id", "the member is REQUIRED (I-D §6.2)"))?;
+            if !is_family_hash(key_id) {
+                return Err(invalid("key_id", "not a `sha256:` family string in lowercase hex"));
+            }
+            let pubkey = object
+                .get("pubkey")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("pubkey", "the member is REQUIRED (I-D §6.2)"))?;
+            // "`pubkey` decodes to exactly the 32 octets... `key_id` equals `sha256:` ...of
+            // those octets, so it is recomputable rather than merely declared" (I-D §6.2).
+            let recomputed = recompute_producer_key_id(pubkey).map_err(|_| {
+                invalid("pubkey", "does not decode to exactly 32 octets (I-D §6.2)")
+            })?;
+            if recomputed != key_id {
+                return Err(invalid("key_id", "does not equal `sha256:`-of-`pubkey` (I-D §6.2)"));
+            }
+            Ok((key_id.to_owned(), pubkey.to_owned()))
+        })
+        .collect()
+}
+
+/// Validate the manifest `datasets` object: its own required presence (I-D §6.2), every
+/// declared dataset id's syntax, and every declared descriptor's syntax (I-D §2.6, §6.3).
+///
+/// §6.2 lists `datasets` among what the manifest payload "contains at minimum", so its absence
+/// — or a non-object value — is a schema failure exactly like a missing `log` object.
+///
+/// §6.3's conformance table makes a SYNTACTICALLY INVALID dataset declaration — a dataset id
+/// violating the dataset id syntax or containing a control octet; a `canonicalization`
+/// identifier that is missing, not a string, or violating the identifier syntax; a `media_type`
+/// that is present but not a string or that does not match the descriptor media-type production
+/// (duplicate lowercased parameter names and quoted-string parameter values included) — reject
+/// the WHOLE manifest, not merely the affected dataset's claims: "A dataset's canonicalization
+/// descriptor is a required manifest member (§6.2), and statements derive their governance from
+/// that manifest (§2.2)". This checks every declared dataset, key by key, regardless of whether
+/// any claim in the receipt ever binds content against it — the same way [`log_object`] and
+/// [`key_objects`] check the members they are responsible for, once per manifest, not lazily
+/// where a claim happens to need them.
+///
+/// [`verify_content_binding`] independently reconstructs the descriptor it actually uses, via
+/// [`CanonicalizationDescriptor::new`], the moment a claim needs it to recompute a commitment;
+/// that is a defensive re-check, not this rule's only enforcement point.
+fn datasets_object(manifest: &Value) -> Result<()> {
+    let datasets = manifest.get("datasets").and_then(Value::as_object).ok_or_else(|| {
+        ReceiptError::ManifestSchemaInvalid {
+            object: "datasets".to_owned(),
+            detail: "the member is REQUIRED and MUST be an object (I-D §6.2)".to_owned(),
+        }
+    })?;
+    for (dataset_id, declared) in datasets {
+        let invalid = |detail: String| ReceiptError::ManifestSchemaInvalid {
+            object: format!("datasets.{dataset_id}"),
+            detail,
+        };
+        descriptor::validate_dataset_id(dataset_id)
+            .map_err(|source| invalid(source.to_string()))?;
+
+        let declared = declared
+            .as_object()
+            .ok_or_else(|| invalid("the dataset's declaration MUST be an object".to_owned()))?;
+        let canonicalization =
+            declared.get("canonicalization").and_then(Value::as_str).ok_or_else(|| {
+                invalid("`canonicalization` is REQUIRED and MUST be a string (I-D §2.6)".to_owned())
+            })?;
+        let media_type = match declared.get("media_type") {
+            None => None,
+            Some(Value::String(value)) => Some(value.clone()),
+            Some(_) => {
+                return Err(invalid(
+                    "`media_type`, where present, MUST be a string (I-D §2.6)".to_owned(),
+                ))
+            }
+        };
+        CanonicalizationDescriptor::new(canonicalization, media_type)
+            .map_err(|source| invalid(source.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Validate I-D §6.2's remaining manifest-scope members — the ones §6.2 lists as part of what
+/// the manifest "contains at minimum" beyond producer/log/witness keys and datasets, which are
+/// checked elsewhere ([`producer_key_objects`], [`log_object`], [`datasets_object`]):
+/// `pipelines`, `windows`, `retention`, and `level`.
+///
+/// `level` in particular gates the L3 cosignature requirement in [`verify_rotation_proof`]
+/// (`rotating_manifest.get("level") == Some("L3")`); an absent or malformed `level` MUST fail
+/// HERE, in schema, rather than be silently read by that later, unrelated `==` comparison as
+/// simply "not L3" — this function running before that comparison is what makes the guarantee
+/// hold, not any check inside the comparison itself.
+fn manifest_scope_fields(manifest: &Value) -> Result<()> {
+    let invalid = |object: &str, detail: &str| ReceiptError::ManifestSchemaInvalid {
+        object: object.to_owned(),
+        detail: detail.to_owned(),
+    };
+
+    // `windows.*` and `retention.*` are durations in name and by example ("PT24H", "P30D",
+    // "P10Y"), but — unlike `log.checkpoint_cadence`/`log.witness_grace_period` — §6.2 gives
+    // NO grammar for them at all, `P`-prefix included; §7.3's restricted grammar (and its
+    // `Y`/date-part-`M` prohibition) is stated for those two log-timing fields specifically,
+    // not for every duration a manifest carries. Inventing a `P`-prefix requirement §6.2 does
+    // not state would reject values the I-D itself leaves unconstrained, so this checks only
+    // presence and non-emptiness.
+    let duration_shaped = |member: &str, value: &str| -> Result<()> {
+        if value.is_empty() {
+            Err(invalid(member, "MUST be a non-empty string (I-D §6.2)"))
+        } else {
+            Ok(())
+        }
+    };
+
+    match manifest.get("level").and_then(Value::as_str) {
+        Some("L1" | "L2" | "L3") => {}
+        Some(_) => {
+            return Err(invalid("level", "MUST be exactly `L1`, `L2`, or `L3` (I-D §6.1, §6.2)"))
+        }
+        None => return Err(invalid("level", "the member is REQUIRED (I-D §6.2)")),
+    }
+
+    let pipelines = manifest
+        .get("pipelines")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| invalid("pipelines", "the object is REQUIRED (I-D §6.2)"))?;
+    for member in ["include", "exclude"] {
+        let list = pipelines.get(member).and_then(Value::as_array).ok_or_else(|| {
+            invalid(
+                &format!("pipelines.{member}"),
+                "the member is REQUIRED and MUST be an array (I-D §6.2)",
+            )
+        })?;
+        if !list.iter().all(Value::is_string) {
+            return Err(invalid(
+                &format!("pipelines.{member}"),
+                "every element MUST be a string (I-D §6.2)",
+            ));
+        }
+    }
+
+    let windows = manifest
+        .get("windows")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| invalid("windows", "the object is REQUIRED (I-D §6.2)"))?;
+    for member in ["anchoring", "propagation"] {
+        let value = windows.get(member).and_then(Value::as_str).ok_or_else(|| {
+            invalid(
+                &format!("windows.{member}"),
+                "the member is REQUIRED and MUST be a string (I-D §6.2)",
+            )
+        })?;
+        duration_shaped(&format!("windows.{member}"), value)?;
+    }
+
+    let retention = manifest
+        .get("retention")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| invalid("retention", "the object is REQUIRED (I-D §6.2)"))?;
+    let statements = retention.get("statements").and_then(Value::as_str).ok_or_else(|| {
+        invalid("retention.statements", "the member is REQUIRED and MUST be a string (I-D §6.2)")
+    })?;
+    duration_shaped("retention.statements", statements)?;
+
+    // "Retention: for statements, and for artifacts IF REPRODUCIBLE RECONSTRUCTION IS
+    // CLAIMED" — the second retention duration is conditionally REQUIRED, exactly when
+    // `properties.reproducible_reconstruction` claims true, not merely optional throughout.
+    let reproducible = match manifest.get("properties") {
+        None => false,
+        Some(value) => {
+            let properties = value.as_object().ok_or_else(|| {
+                invalid("properties", "MUST be an object where present (I-D §6.2)")
+            })?;
+            match properties.get("reproducible_reconstruction") {
+                None => false,
+                Some(Value::Bool(claim)) => *claim,
+                Some(_) => {
+                    return Err(invalid(
+                        "properties.reproducible_reconstruction",
+                        "MUST be a boolean where present (I-D §6.2)",
+                    ))
+                }
+            }
+        }
+    };
+    match retention.get("artifacts") {
+        Some(value) => {
+            let duration = value.as_str().ok_or_else(|| {
+                invalid("retention.artifacts", "MUST be a string where present (I-D §6.2)")
+            })?;
+            duration_shaped("retention.artifacts", duration)?;
+        }
+        None if reproducible => {
+            return Err(invalid(
+                "retention.artifacts",
+                "the member is REQUIRED where `properties.reproducible_reconstruction` is \
+                 true (I-D §6.2)",
+            ))
+        }
+        None => {}
+    }
+
+    Ok(())
+}
+
+/// The SET of a manifest's log key objects, normalized for I-D §7.1 governance-key-rotation
+/// comparison: `(key_id, pubkey, valid_from_index)` tuples, order-independent (I-D §6.2: "Each
+/// manifest version's log and witness key objects replace the prior set in full" — a SET, not a
+/// sequence).
+///
+/// Called only where the manifest schema (`log_object`) has already validated `log.keys`, so
+/// every member read here is known present and well typed.
+fn log_key_set(payload: &Value) -> BTreeSet<(String, String, u64)> {
+    payload
+        .get("log")
+        .and_then(|log| log.get("keys"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|object| {
+            Some((
+                object.get("key_id")?.as_str()?.to_owned(),
+                object.get("pubkey")?.as_str()?.to_owned(),
+                object.get("valid_from_index")?.as_u64()?,
+            ))
+        })
+        .collect()
+}
+
+/// `(witness_id, key_id, pubkey, valid_from_index)` — one witness key object, normalized for
+/// set comparison.
+type WitnessKeySet = BTreeSet<(String, String, String, u64)>;
+
+/// The SET of a manifest's witness key objects, normalized the same way, with `witness_id`
+/// carried alongside each key object since it is part of the object's identity (I-D §7.1: "A
+/// witness key object additionally carries `witness_id`, the identity under which the manifest
+/// declares that witness").
+///
+/// Unlike [`log_key_set`] — always reachable only after the UNCONDITIONAL [`log_object`] check
+/// — `witnesses` is conditionally required (I-D §6.2: mandatory only AT L3), so this rejects a
+/// witness object missing `witness_id` or a malformed `keys` array rather than silently
+/// dropping it: a governance-key-rotation comparison must never treat a schema-invalid witness
+/// as simply absent from the set.
+///
+/// # Errors
+///
+/// Returns [`ReceiptError::ManifestSchemaInvalid`] if `witnesses`, where present, is not an
+/// array, or if any entry's `witness_id` or `keys` shape is malformed.
+fn witness_key_set(payload: &Value) -> Result<WitnessKeySet> {
+    let Some(witnesses) = payload.get("witnesses") else {
+        return Ok(BTreeSet::new());
+    };
+    let witnesses = witnesses.as_array().ok_or_else(|| ReceiptError::ManifestSchemaInvalid {
+        object: "witnesses".to_owned(),
+        detail: "MUST be an array where present (I-D §6.2)".to_owned(),
+    })?;
+    let mut set = BTreeSet::new();
+    for (index, witness) in witnesses.iter().enumerate() {
+        let witness_id = witness.get("witness_id").and_then(Value::as_str).ok_or_else(|| {
+            ReceiptError::ManifestSchemaInvalid {
+                object: format!("witnesses[{index}].witness_id"),
+                detail: "the member is REQUIRED (I-D §7.1: \"A witness key object \
+                         additionally carries `witness_id`\")"
+                    .to_owned(),
+            }
+        })?;
+        key_objects(witness)?;
+        for object in array(witness, "keys")? {
+            set.insert((
+                witness_id.to_owned(),
+                text(object, "key_id")?.to_owned(),
+                text(object, "pubkey")?.to_owned(),
+                number(object, "valid_from_index")?,
+            ));
+        }
+    }
+    Ok(set)
+}
+
+/// Validate the manifest `witnesses` member (I-D §6.2: "Witnesses: at L3, witness ids with key
+/// objects in the same form"). AT L3 the array is REQUIRED and MUST be non-empty — a schema
+/// failure otherwise; below L3 it remains OPTIONAL, present or not.
+///
+/// Every witness object present, at ANY level, MUST carry `witness_id` (I-D §7.1) and a
+/// well-formed `keys` array (the shared log/witness shape, [`key_objects`]) — checked here,
+/// once per manifest, the same convention [`log_object`] and [`datasets_object`] set, rather
+/// than left to whichever comparison first happens to read a witness object.
+///
+/// Called only after [`manifest_scope_fields`] has already validated `level` is exactly one of
+/// `L1`/`L2`/`L3`.
+fn witnesses_object(manifest: &Value) -> Result<()> {
+    let level = manifest.get("level").and_then(Value::as_str).unwrap_or_default();
+    let witnesses = manifest.get("witnesses");
+    if level == "L3" {
+        let non_empty = witnesses.and_then(Value::as_array).is_some_and(|list| !list.is_empty());
+        if !non_empty {
+            return Err(ReceiptError::ManifestSchemaInvalid {
+                object: "witnesses".to_owned(),
+                detail: "AT L3, the array is REQUIRED and MUST be non-empty (I-D §6.2)".to_owned(),
+            });
+        }
+    }
+    // `witness_key_set` already validates shape (including `witness_id`) for every witness
+    // present; called here too so a manifest whose ONLY defect is a malformed witness object
+    // fails at schema time even where nothing ever compares it against a predecessor (a
+    // genesis manifest, for instance, has none to compare against).
+    witness_key_set(manifest)?;
+    Ok(())
+}
+
+/// Require the receipt to LIST a rotation proof's cosigning witness key exactly as I-D §7.1's
+/// transition exception describes it: a `manifest-chain` entry whose `binding` names the
+/// PREDECESSOR manifest version, and whose `(witness_id, key_id, pubkey)` is that manifest's
+/// own witness key object.
+///
+/// Deliberately not the generic binder. `local-policy` is admissible for the witness keys a
+/// verifier already trusts, and such an entry carries no binding at all — so routing rotation
+/// material through the generic path would let a trusted local-policy key presented under the
+/// outgoing witness's identity and key id satisfy the rotation cosignature requirement, while
+/// the outgoing manifest's own public key was never compared. The exception says which entries
+/// attest a handover, and they are the retiring manifest's, from the chain, and no others.
+///
+/// The error names the binding index the entry actually carried where one exists, so a key
+/// listed but bound to the INCOMING version is reported as the mis-binding it is rather than
+/// as an absence.
+fn require_listed_rotation_witness(
+    receipt: &Value,
+    outgoing_index: u64,
+    witness_id: &str,
+    key_id: &str,
+    pubkey: &str,
+) -> Result<()> {
+    let mut attempted: Option<u64> = None;
+    for entry in array(obj(receipt, "keys")?, "witness")? {
+        if entry.get("witness_id").and_then(Value::as_str) != Some(witness_id)
+            || entry.get("key_id").and_then(Value::as_str) != Some(key_id)
+        {
+            continue;
+        }
+        let binding = entry
+            .get("binding")
+            .and_then(|binding| binding.get("entry_index"))
+            .and_then(Value::as_u64);
+        if entry.get("source").and_then(Value::as_str) == Some("manifest-chain")
+            && binding == Some(outgoing_index)
+            && entry.get("pubkey").and_then(Value::as_str) == Some(pubkey)
+        {
+            return Ok(());
+        }
+        attempted = attempted.or(binding);
+    }
+    Err(ReceiptError::KeyNotBound {
+        key_id: key_id.to_owned(),
+        entry_index: attempted.unwrap_or(outgoing_index),
+    })
+}
+
+/// The already-established context one `governance.rotation_proofs[]` element is validated
+/// against, gathered so the element's own material can be told apart from it at a glance.
+///
+/// `manifests` is the induction's key state SO FAR — every manifest version established
+/// strictly before the rotating one — and `outgoing` is the last of them: the state being
+/// retired, which is what the proof must be signed and cosigned under, and the version the
+/// receipt's own `keys` entries for this proof must bind to (I-D §7.1's transition exception).
+#[derive(Clone, Copy)]
+struct RotationContext<'a> {
+    /// The receipt, for the `keys` block every key used in verification must appear in.
+    receipt: &'a Value,
+    /// Local policy, for the source rules a `keys` entry is bound under.
+    policy: &'a TrustPolicy,
+    /// The manifest versions established before the rotating one.
+    manifests: &'a [(u64, &'a Value)],
+    /// Entry index and payload of the OUTGOING manifest version.
+    outgoing: (u64, &'a Value),
+    /// The pinned adaptor profile, for the §3.2 binding check.
+    profile: &'a AdaptorProfile,
+    /// The pinned adaptor profile's id.
+    profile_id: &'a str,
+}
+
+/// Verify this manifest's `governance.rotation_proofs[]` element (I-D §7.1; §7.5.1 4b(M) "The
+/// rotation-anchoring rule, also phase 2"): a manifest may be trusted to introduce a rotated log
+/// or witness key set only where its own anchoring is proven under the OUTGOING states.
+///
+/// `rotating_manifest`/`rotating_envelope` are this manifest's own payload/envelope;
+/// `outgoing_manifest` is its predecessor's payload — the state being retired, which is what the
+/// proof must be signed and cosigned under, never the incoming state the rotation installs.
+///
+/// `element` is the specific `governance.rotation_proofs[]` element already selected, and its
+/// `manifest_entry_index` already matched, by the caller's positional walk (I-D §7.5.1): this
+/// function trusts neither the array nor the index — it validates the one element it was
+/// handed, nothing more.
+// The element and the rotating hop's own material are the arguments; everything already
+// established — the induction's key state, the outgoing version, policy, the receipt's `keys`
+// block and the pinned profile — travels in [`RotationContext`], so what this function
+// VALIDATES stays visible against what it merely CONSULTS.
+#[allow(clippy::too_many_lines)]
+fn verify_rotation_proof(
+    element: &Value,
+    rotating_envelope: &Value,
+    manifest_entry_index: u64,
+    rotating_manifest: &Value,
+    context: &RotationContext<'_>,
+    run: &mut Run,
+) -> Result<()> {
+    let RotationContext { receipt, policy, manifests, outgoing, profile, profile_id } = *context;
+    let (outgoing_index, outgoing_manifest) = outgoing;
+    let invalid =
+        |detail: String| ReceiptError::RotationProofInvalid { manifest_entry_index, detail };
+
+    // I-D §7.1: the element's `checkpoint` is "in the receipt-borne form defined above" — the
+    // same strict shape `anchoring.checkpoint` takes, not a looser one.
+    let checkpoint = checkpoint_object(obj(element, "checkpoint")?)?;
+    // I-D §3.2: the same adaptor-binding check every other checkpoint gets — under the
+    // OUTGOING manifest here, since that is the state this proof's checkpoint is signed and
+    // cosigned under, never the incoming one.
+    check_adaptor_binding(log_object(outgoing_manifest)?, profile_id, profile)?;
+    // "WHERE `raw` is present, the verifier MUST check that it parses to the same values" —
+    // the same reconciliation `verify_checkpoint` applies to `anchoring.checkpoint.raw`
+    // applies here, identically (I-D §7.1).
+    reconcile_checkpoint_raw(checkpoint, profile_id)?;
+    let tree_size = number(checkpoint, "tree_size")?;
+    if tree_size <= manifest_entry_index {
+        return Err(invalid(format!(
+            "the element's checkpoint tree_size ({tree_size}) must be GREATER than \
+             manifest_entry_index ({manifest_entry_index}) (I-D §7.1)"
+        )));
+    }
+
+    // The checkpoint MUST verify under a log key of the OUTGOING state — never the incoming
+    // manifest's own log keys, which is exactly the substitution this proof exists to rule out.
+    let checkpoint_key_id = text(checkpoint, "key_id")?;
+    if !log_key_set(outgoing_manifest).iter().any(|entry| entry.0.as_str() == checkpoint_key_id) {
+        return Err(invalid(format!(
+            "the element's checkpoint `key_id` (`{checkpoint_key_id}`) is not a log key of the \
+             OUTGOING state at manifest entry index {manifest_entry_index} — a checkpoint \
+             signed by the INCOMING key does not attest the transition (I-D §7.1)"
+        )));
+    }
+    // I-D §7.1: "Every key used in verification MUST appear in `keys` with its source and its
+    // binding", and under the transition exception "the corresponding `keys.log[]` and
+    // `keys.witness[]` entries carry `manifest-chain` bindings naming that predecessor
+    // version." The key this signature is verified under is therefore resolved THROUGH the
+    // receipt's own `keys` block, bound at the outgoing manifest's entry index, rather than
+    // lifted out of the manifest behind the block's back. Where the receipt is well formed the
+    // two agree; where they do not, it is verifying under a key it never declared.
+    let (outgoing_log_keys, outgoing_log_attempted, _) = bind_keys_by_group(
+        receipt,
+        policy,
+        // Inside 4b(M): `manifests` is the prefix walked so far, so a binding naming a
+        // version the walk has not reached is not yet decidable.
+        &KeyScope {
+            manifests,
+            active_index: outgoing_index,
+            unestablished_from: None,
+            complete: false,
+        },
+        "log",
+    )?;
+    let signer = outgoing_log_keys.get(checkpoint_key_id).ok_or_else(|| {
+        let entry_index =
+            outgoing_log_attempted.get(checkpoint_key_id).copied().unwrap_or(outgoing_index);
+        ReceiptError::KeyNotBound { key_id: checkpoint_key_id.to_owned(), entry_index }
+    })?;
+    run.spend(1)?;
+    if !verify_signature(
+        &decode_pubkey(&signer.pubkey)?,
+        &checkpoint_signing_bytes_for(checkpoint, profile_id)?,
+        text(checkpoint, "signature")?,
+    )? {
+        return Err(invalid(
+            "the element's checkpoint signature does not verify under the outgoing log key"
+                .to_owned(),
+        ));
+    }
+
+    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
+    check_inclusion(
+        &jcs(rotating_envelope),
+        manifest_entry_index,
+        tree_size,
+        &path_strings(element, "inclusion_path")?,
+        &root,
+        "rotation-proof manifest inclusion",
+        run,
+    )?;
+
+    // I-D §7.1: `witnesses`, where PRESENT, is "an array in the shape of
+    // `anchoring.witnesses[]`" — EVERY element of that array is held to the shape whenever the
+    // member is present at all, regardless of level, not merely the ones a match happens to
+    // reach and not merely below L3. A malformed entry is invalid whether or not some OTHER
+    // entry in the array would have cosigned successfully, and whether or not a cosignature is
+    // even required at this level.
+    let witness_candidates = match element.get("witnesses") {
+        None => Vec::new(),
+        Some(value) => {
+            let array = value.as_array().ok_or_else(|| {
+                invalid(
+                    "`witnesses`, where present, MUST be an array in the shape of \
+                     `anchoring.witnesses[]` (I-D §7.1)"
+                        .to_owned(),
+                )
+            })?;
+            array.iter().map(witness_cosignature_object).collect::<Result<Vec<_>>>()?
+        }
+    };
+
+    // AT L3, at least one `witnesses[]` cosignature MUST verify under a witness key of the
+    // OUTGOING state, whichever set actually rotated — I-D §7.1: "a change to EITHER set is
+    // attested under BOTH outgoing states". This build reads the rotating manifest's OWN
+    // declared `level` to decide whether L3 applies going forward. Below L3, `witnesses` was
+    // already shape-checked above where present, but no cosignature is required from it.
+    if rotating_manifest.get("level").and_then(Value::as_str) == Some("L3") {
+        let outgoing_witnesses = witness_key_set(outgoing_manifest)?;
+        let mut cosigned = false;
+        for witness in &witness_candidates {
+            let witness_id = text(witness, "witness_id")?.to_owned();
+            let key_id = text(witness, "key_id")?;
+            // A cosignature by a witness the OUTGOING manifest does not declare under that
+            // identity attests nothing about the handover, and is passed over rather than
+            // refused: §7.1 asks only that at least one element verify under an outgoing
+            // witness key, so an element that is not such a key is simply not that one. The
+            // pubkey comes from that manifest object, never from the receipt.
+            let Some(pubkey) = outgoing_witnesses
+                .iter()
+                .find(|entry| entry.0 == witness_id && entry.1.as_str() == key_id)
+                .map(|entry| entry.2.clone())
+            else {
+                continue;
+            };
+            // Having selected it, the receipt must LIST that key as the transition exception
+            // requires — `manifest-chain`, bound to the predecessor version, and carrying that
+            // same public key. A `local-policy` entry is not such a listing however trusted it
+            // is: it attests what this verifier accepts, not what the retiring authority did.
+            require_listed_rotation_witness(receipt, outgoing_index, &witness_id, key_id, &pubkey)?;
+            run.spend(1)?;
+            if verify_signature(
+                &decode_pubkey(&pubkey)?,
+                &cosignature_bytes(checkpoint, &witness_id),
+                text(witness, "cosignature")?,
+            )? {
+                cosigned = true;
+                break;
+            }
+        }
+        if !cosigned {
+            return Err(invalid(
+                "AT L3, at least one `witnesses[]` cosignature must verify under a witness key \
+                 of the OUTGOING state (I-D §7.1) — none did"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// I-D §7.5.1 4b's ascending-entry-index requirement over the MERGED induction stream.
+///
+/// Both sources are internally ascending, so the only thing left to rule out is one entry index
+/// arriving twice — once from `governance.chain[]` and once from the enumerated `key`
+/// statements. That would be two hash proofs against one root disagreeing about what the log
+/// holds at that index, which no conforming material can produce; the walk refuses it rather
+/// than choosing an order for the pair.
+fn check_merged_order(walked_index: u64, index: u64) -> Result<()> {
+    if walked_index >= index {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "the merged governance walk reaches entry index {index} after {walked_index}; the \
+             manifest chain and the enumerated `key` statements are walked in ascending \
+             entry-index order, and no index may be claimed by both (I-D §7.5.1 4b)"
+        )));
+    }
+    Ok(())
+}
+
+/// Turn an envelope check into the outcome the receipt's governance MODE fixes for it.
+///
+/// Every producer-key signature check over an envelope the receipt RESTS ON ends here — the
+/// subject's, an embedded receipt's subject, a `governance.chain[]` element — so the two
+/// conditions [`crate::EnvelopeCheck`] separates cannot be conflated at one call site and kept
+/// apart at another. For those three, I-D §7.5.1 4d makes a failure `invalid`; for every other
+/// carried envelope the same failure is VOID and goes through [`evaluate_envelope_at`] instead.
+/// A signature that does not verify under a key the presented state DOES hold is a demonstrated
+/// defect and is `invalid` in either mode, and [`crate::check_envelope`] gives it precedence over
+/// an unresolved key on the SAME envelope, so a multi-signature envelope carrying both defects
+/// arrives here as `SignatureInvalid` whatever order the producer wrote them in. A `key_id` the
+/// presented state holds no key for — every resolvable entry on that envelope having verified —
+/// is the mode-dependent case: `invalid` under `enumerated`, where 4c's complete range
+/// forecloses omission, and [`ReceiptError::ProducerKeyNotCarried`] — the I-D's `unverifiable`
+/// — under `declared`, where §7.4 says the verifier is short of material rather than looking at
+/// a defect.
+fn envelope_outcome(check: &crate::EnvelopeCheck, mode: &str, index: u64) -> Result<()> {
+    match check {
+        crate::EnvelopeCheck::Verified => Ok(()),
+        crate::EnvelopeCheck::KeyNotResolved { key_id } if mode == DECLARED_MODE => {
+            Err(ReceiptError::ProducerKeyNotCarried { entry_index: index, key_id: key_id.clone() })
+        }
+        crate::EnvelopeCheck::SignatureInvalid | crate::EnvelopeCheck::KeyNotResolved { .. } => {
+            Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index })
+        }
+    }
+}
+
+/// I-D §7.5.1 4b phase 1, identical for both induction types: "Verify the envelope under the
+/// envelope signature rule of Section 2.1 against K AS ESTABLISHED SO FAR — the governance
+/// state in force immediately before this statement's own entry index."
+///
+/// `manifests` and `events` hold only statements strictly before `index` when this is called,
+/// so the state derived from them is exactly that pre-effect state — computed BEFORE anything
+/// about this statement's own content (schema, predecessor linkage, rotation proof, `key`
+/// object) is read.
+fn verify_governance_phase_1(
+    envelope: &Value,
+    manifests: &[(u64, &Value)],
+    events: &[KeyEvent],
+    index: u64,
+    mode: &str,
+    run: &mut Run,
+) -> Result<()> {
+    let k_so_far = producer_keys_at_in(manifests, events, index);
+    run.spend(1)?;
+    let check = crate::check_envelope(envelope, |key_id| {
+        k_so_far.get(key_id).map(|bound| bound.pubkey.clone())
+    })?;
+    envelope_outcome(&check, mode, index)
+}
+
+/// I-D §7.5.1 4b(K) phase 2: a `key` statement's own form, validated before its effect on K.
+///
+/// "A statement that verifies under a valid key is thereby authentic, not thereby well formed,
+/// and applying an `action` that was never checked would let a malformed statement modify the
+/// key set." Returns the phase-3 effect for the caller to apply, so the two phases cannot be
+/// reordered by accident: there is no way to reach the [`KeyEvent`] without passing every check
+/// here first.
+fn validate_key_statement(
+    payload: &Value,
+    index: u64,
+    manifests: &[(u64, &Value)],
+    manifest_by_version_id: &BTreeMap<String, (u64, &Value)>,
+) -> Result<KeyEvent> {
+    // Phase 2, 4b(K): action, key-object shape, key-id/pubkey binding, and
+    // `valid_from` (I-D §7.5.1 4b(K)): "before a `key` statement's effect touches
+    // K, validate its form... a failure is `invalid`, and the event is NOT
+    // applied."
+    let key = obj(payload, "key")?;
+    let added = match text(payload, "action")? {
+        "add" => true,
+        "retire" => false,
+        other => {
+            return Err(ReceiptError::GovernanceChainInvalid(format!(
+                "unknown key action `{other}`"
+            )))
+        }
+    };
+    let key_id = text(key, "key_id")?.to_owned();
+    if !is_family_hash(&key_id) {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries `key.key_id` that is \
+             not a `sha256:` family string in lowercase hex (I-D §7.5.1 4b(K))"
+        )));
+    }
+    let pubkey = text(key, "pubkey")?.to_owned();
+    // "`pubkey` decodes to exactly 32 octets" and "`key_id` RECOMPUTED from
+    // `pubkey` and equal to the carried one" — the SAME rule and SAME helper I-D
+    // §6.2 states for a manifest's own producer key objects
+    // ([`recompute_producer_key_id`]), shared rather than re-derived here.
+    let recomputed = recompute_producer_key_id(&pubkey).map_err(|_| {
+        ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries `key.pubkey` that does \
+             not decode to exactly 32 octets (I-D §7.5.1 4b(K))"
+        ))
+    })?;
+    if recomputed != key_id {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries `key.key_id` \
+             (`{key_id}`) that does not equal `sha256:`-of-`key.pubkey` \
+             (`{recomputed}`) (I-D §7.5.1 4b(K))"
+        )));
+    }
+    // "`valid_from` REQUIRED and well-formed RFC 3339 (informative for ordering,
+    // but required)"
+    let valid_from = key.get("valid_from").and_then(Value::as_str).ok_or_else(|| {
+        ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries no `key.valid_from` — \
+             the member is REQUIRED (I-D §7.5.1 4b(K))"
+        ))
+    })?;
+    crate::bitemporal::parse_rfc3339("key.valid_from", valid_from).map_err(|source| {
+        ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries `key.valid_from` \
+                 that is not well-formed RFC 3339 (I-D §7.5.1 4b(K)): {source}"
+        ))
+    })?;
+    // I-D §2.2: a `key` statement is not a manifest statement, so it carries a
+    // `manifest` field of its own, and that field is held to the SAME rule as the
+    // subject's copy (§7.6) — it must name the manifest version ACTIVE at THIS
+    // statement's own entry index, never a stale one.
+    let claimed_manifest = text(payload, "manifest")?;
+    let active =
+        active_manifest_version_id(manifests, manifest_by_version_id, index).ok_or_else(|| {
+            ReceiptError::GovernanceChainInvalid(format!(
+                "no manifest version is active at entry index {index} (I-D §2.2)"
+            ))
+        })?;
+    if claimed_manifest != active {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} names manifest \
+             `{claimed_manifest}`, which is not the manifest version active at \
+             that index (`{active}`) (I-D §2.2)"
+        )));
+    }
+    // Phase 3: effect — modifies the producer key set only (I-D §6.2: log and
+    // witness keys rotate only by anchoring a new manifest version).
+    Ok(KeyEvent { entry_index: index, key_id, pubkey, added })
+}
+
+/// Build and structurally validate the governance state (I-D §7.5.1 4a-4c): the base case,
+/// then the induction, each carried statement's SIGNATURE verified against K as established by
+/// its predecessors before anything about its own content is trusted.
+///
+/// The induction walks TWO streams merged in ascending entry-index order, which is what I-D
+/// §7.5.1 4b states: "the manifest statements of `governance.chain[]`, merged in entry-index
+/// order with the `key` statements the enumeration material carries where the mode carries
+/// them." `key_statements` is that second stream — empty under `declared` governance, which
+/// carries no producer-key transitions at all (§7.4). The chain itself carries manifests and
+/// nothing else: §7.1 defines each of its elements as "an anchored MANIFEST statement's
+/// complete envelope", and §7.4 says producer-key transitions "reach a verifier only through
+/// enumeration material".
+// The governance-key-rotation check (I-D §7.1, §7.5.1) folds naturally into this same
+// per-manifest walk rather than a second pass over the same material.
+/// What the raw chain carries: the entry index GOVERNING each manifest version id, and every
+/// entry index the chain has an element at (void duplicates included).
+type ChainIndex = (BTreeMap<String, u64>, BTreeSet<u64>);
+
+/// Every manifest version the chain carries, by version id, to the entry index that GOVERNS it.
+///
+/// I-D §2.1: "A producer MUST NOT anchor two envelopes bearing the same statement id. If
+/// duplicates nevertheless occur, the envelope with the smallest entry index governs and later
+/// ones are void." So the map is FIRST-WINS, and since §7.1 requires the chain in ascending
+/// `entry_index` order — checked in §7.5 step 3, before this runs — the first occurrence in the
+/// array is the smallest index. Overwriting would let a later, void duplicate answer a §7.6
+/// question about the version that actually governs, and a valid `subject.manifest` reference
+/// would then read as "anchored at or after the subject".
+fn chain_version_index(chain: &[Value]) -> Result<ChainIndex> {
+    let mut governing = BTreeMap::new();
+    let mut carried = BTreeSet::new();
+    for hop in chain {
+        let index = number(hop, "entry_index")?;
+        governing.entry(statement_id(obj(hop, "envelope")?)?).or_insert(index);
+        carried.insert(index);
+    }
+    Ok((governing, carried))
+}
+
+#[allow(clippy::too_many_lines)]
+fn read_chain<'a>(
+    receipt: &'a Value,
+    policy: &TrustPolicy,
+    profile: Option<&AdaptorProfile>,
+    profile_id: &str,
+    key_statements: &[(u64, &Value)],
+    mode: &'a str,
+    run: &mut Run,
+) -> Result<Governance<'a>> {
     let chain = array(obj(receipt, "governance")?, "chain")?;
     if chain.is_empty() {
         return Err(ReceiptError::GovernanceChainInvalid("chain is empty".to_owned()));
     }
 
-    let mut manifests = Vec::new();
-    let mut events = Vec::new();
-    let mut previous_index: Option<u64> = None;
-    let mut previous_manifest_entry_id: Option<String> = None;
+    // The raw index of what the chain CARRIES, taken before the induction walks anything: §7.6's
+    // rules about `subject.manifest` are decidable from the receipt alone and are never
+    // downgraded, so they must not depend on how far the walk got. Step 3 has already proven
+    // each element's `entry_index` by recomputing its inclusion path at that index.
+    let (chain_index, chain_indexes) = chain_version_index(chain)?;
 
-    for hop in chain {
-        let index = number(hop, "entry_index")?;
-        if previous_index.is_some_and(|prev| prev >= index) {
-            return Err(ReceiptError::GovernanceChainInvalid(
-                "chain hops must ascend by entry index".to_owned(),
-            ));
-        }
-        previous_index = Some(index);
+    // I-D §7.1: "REQUIRED IF AND ONLY IF the carried governance chain contains a
+    // GOVERNANCE-KEY ROTATION"; "The member is ABSENT where the chain rotates neither set";
+    // "one element per rotation, in ascending `manifest_entry_index` order." §7.5.1: "Type
+    // specific validation MUST NOT run on material whose signature has not verified" — so
+    // WHICH hops rotate can only be decided inside the signed per-hop walk below, never from
+    // an unverified pre-scan of the chain's own payloads. What IS safe to read here, before
+    // induction starts, is the CONTAINER shape of `governance.rotation_proofs` itself — its
+    // presence/absence and, where present, that it is an array — because that is a fact about
+    // the receipt's own structure, not a claim about any chain hop's unverified content.
+    let rotation_proofs_member =
+        receipt.get("governance").and_then(|governance| governance.get("rotation_proofs"));
+    let rotation_proofs: &[Value] = match rotation_proofs_member {
+        None => &[],
+        Some(value) => value.as_array().map(Vec::as_slice).ok_or_else(|| {
+            ReceiptError::GovernanceChainInvalid(
+                "`governance.rotation_proofs`, where present, MUST be an array (I-D §7.1)"
+                    .to_owned(),
+            )
+        })?,
+    };
+    let mut rotation_cursor = 0usize;
+    // Set where the induction stops early: the entry index whose effect was NOT applied.
+    let mut unestablished_from: Option<u64> = None;
+    let mut saw_rotation = false;
 
-        let envelope = obj(hop, "envelope")?;
-        let payload = payload_of(envelope)?;
-        match statement_type(payload)? {
-            "manifest" => {
-                let predecessor = payload.get("predecessor").and_then(Value::as_str);
-                match (&previous_manifest_entry_id, predecessor) {
-                    (None, Some(_)) => {
-                        return Err(ReceiptError::GovernanceChainInvalid(
-                            "the genesis manifest must carry no predecessor reference".to_owned(),
-                        ))
-                    }
-                    (Some(_), None) => {
-                        return Err(ReceiptError::GovernanceChainInvalid(
-                            "a non-genesis manifest must reference its predecessor".to_owned(),
-                        ))
-                    }
-                    // A non-genesis manifest references its predecessor by *entry* id:
-                    // signature identity matters for chain links (spec §2.3.5).
-                    (Some(want), Some(got)) if want != got => {
-                        return Err(ReceiptError::GovernanceChainInvalid(format!(
-                            "manifest at entry index {index} references `{got}`, \
-                             its predecessor in the chain is `{want}`"
-                        )))
-                    }
-                    _ => {}
-                }
-                previous_manifest_entry_id = Some(entry_id(envelope));
-                // The manifest's `keys` array is a *snapshot*, not a set of add events
-                // (spec §7.2). It is read at resolution time by `producer_keys_at`, which
-                // discards whatever the prior manifest declared.
-                key_objects(payload)?;
-                manifests.push((index, payload));
-            }
-            "key" => {
-                let key = obj(payload, "key")?;
-                events.push(KeyEvent {
-                    entry_index: index,
-                    key_id: text(key, "key_id")?.to_owned(),
-                    pubkey: text(key, "pubkey")?.to_owned(),
-                    added: match text(payload, "action")? {
-                        "add" => true,
-                        "retire" => false,
-                        other => {
-                            return Err(ReceiptError::GovernanceChainInvalid(format!(
-                                "unknown key action `{other}`"
-                            )))
-                        }
-                    },
-                });
-            }
-            other => {
-                return Err(ReceiptError::GovernanceChainInvalid(format!(
-                    "`{other}` is not a governance statement"
-                )))
-            }
-        }
-    }
-
-    let genesis = &chain[0];
-    let genesis_envelope = obj(genesis, "envelope")?;
-    if number(genesis, "entry_index")? != 0
-        || statement_type(payload_of(genesis_envelope)?)? != "manifest"
-    {
+    // --- I-D §7.5.1 4a. Base case: the genesis manifest is authenticated WITHOUT any key. ---
+    //
+    // "An offline verifier cannot authenticate a genesis anchor supplied by the receipt itself;
+    // it MUST compare `governance.genesis_entry_id` against independently configured policy...
+    // Recompute the entry id of the first element of `governance.chain[]` and require it to
+    // equal the configured anchor. That equality alone authenticates the genesis envelope IN
+    // FULL, payload and signatures together, because an entry id is SHA-256(JCS(envelope))...
+    // no key is needed to establish it, which is what makes the base case genuinely basal
+    // rather than one more thing needing a key."
+    if number(&chain[0], "entry_index")? != 0 {
         return Err(ReceiptError::GovernanceChainInvalid(
-            "the chain must start at the genesis manifest at entry index 0".to_owned(),
+            "the chain must start at entry index 0".to_owned(),
         ));
     }
+    let genesis_envelope = obj(&chain[0], "envelope")?;
+    let genesis_payload = payload_of(genesis_envelope)?;
+    // §2.2's version-first rule runs before anything else, typed content included — an
+    // unsupported `ahl_version` is `unverifiable`, decided from the bytes alone, before any
+    // trust decision (anchor equality included) is even attempted.
+    check_ahl_version(genesis_payload)?;
+    // I-D §7.5.1 4a: entry-id equality "authenticates the genesis envelope IN FULL" — and
+    // typed checks, `type == "manifest"` among them, FOLLOW that anchor comparison, never
+    // precede it. Reading `type` (or anything else typed) before the anchor is verified would
+    // let unauthenticated content decide what gets rejected and how, the same ordering fault
+    // the induction's phase 1/phase 2 split exists to rule out for every later hop.
     let carried_anchor = text(obj(receipt, "governance")?, "genesis_entry_id")?;
     if carried_anchor != entry_id(genesis_envelope) {
         return Err(ReceiptError::GovernanceChainInvalid(
             "`genesis_entry_id` does not digest the carried genesis envelope".to_owned(),
         ));
     }
-    if carried_anchor != policy.genesis_entry_id {
-        return Err(ReceiptError::GenesisAnchorMismatch);
+    // I-D §7.7 and receipt format §1 rule 1: an anchor that does not match local policy is
+    // `unverifiable`, "since the receipt may be a perfectly valid receipt of another corpus" —
+    // and `unverifiable` does not end a run. The induction below still walks the CARRIED chain:
+    // whether each hop is signed under the key state its predecessors establish is decidable
+    // from the receipt's own bytes, and a defect there is `invalid` whichever corpus the
+    // receipt belongs to. What the anchor decides is whether that state is THIS verifier's log,
+    // so the assertions resting on it — this one, envelope validity, checkpoint authentication
+    // and the witnesses — are settled `unverifiable` rather than verified.
+    let configured_anchor = if carried_anchor == policy.genesis_entry_id {
+        Ok(())
+    } else {
+        Err(ReceiptError::GenesisAnchorMismatch)
+    };
+    run.tolerate(configured_anchor)?;
+    // I-D §7.5.1 4a: the fingerprint comparison is optional local policy — WHERE `policy`
+    // holds no configured set, the comparison does not arise at all, and that absence is not
+    // itself a defect. WHERE it holds one, the genesis manifest's producer key ids MUST match
+    // it exactly. Still part of anchor authentication, so still ahead of the `type` check.
+    if let Some(configured) = &policy.genesis_key_ids {
+        let genesis_key_ids: BTreeSet<String> =
+            producer_key_objects(genesis_payload)?.into_iter().map(|(id, _)| id).collect();
+        let configured_fingerprints = if &genesis_key_ids == configured {
+            Ok(())
+        } else {
+            Err(ReceiptError::GenesisAnchorMismatch)
+        };
+        run.tolerate(configured_fingerprints)?;
     }
-    let genesis_key_ids: BTreeSet<String> =
-        key_objects(payload_of(genesis_envelope)?)?.into_iter().map(|(id, _)| id).collect();
-    if genesis_key_ids != policy.genesis_key_ids {
-        return Err(ReceiptError::GenesisAnchorMismatch);
+    if statement_type(genesis_payload)? != "manifest" {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "the chain must start at the genesis manifest".to_owned(),
+        ));
     }
 
-    Ok(Governance { manifests, events })
+    // "The genesis manifest is INSIDE the typed checks, not outside them... It earns exactly
+    // two exemptions: it is exempt from the `predecessor` linkage rule... and it is exempt from
+    // signature derivation under a prior key state, because there is no prior state to derive
+    // from and entry-id equality has already bound its complete bytes, signatures included."
+    if genesis_payload.get("predecessor").is_some() {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "the genesis manifest must carry no predecessor reference".to_owned(),
+        ));
+    }
+    common_payload_fields(genesis_payload)?;
+    producer_key_objects(genesis_payload)?;
+    log_object(genesis_payload)?;
+    datasets_object(genesis_payload)?;
+    manifest_scope_fields(genesis_payload)?;
+    witnesses_object(genesis_payload)?;
+
+    // "Only after ALL of those pass... let K be the key state the genesis manifest declares."
+    let mut manifests: Vec<(u64, &Value)> = vec![(0, genesis_payload)];
+    let mut events: Vec<KeyEvent> = Vec::new();
+    let mut manifest_by_version_id: BTreeMap<String, (u64, &Value)> = BTreeMap::new();
+    manifest_by_version_id.insert(statement_id(genesis_envelope)?, (0, genesis_payload));
+    // The genesis hop is the smallest index there is, so nothing can precede it; every later
+    // insertion below is first-wins (I-D §2.1).
+    let mut previous_index = 0u64;
+    let mut previous_manifest_entry_id = entry_id(genesis_envelope);
+    let mut previous_manifest_payload = genesis_payload;
+    // The entry index of the manifest version a rotation would be retiring — the OUTGOING
+    // version, which I-D §7.1's transition exception says the proof's own `keys` entries bind
+    // to. Genesis is anchored at entry index 0.
+    let mut previous_manifest_index = 0u64;
+
+    // The chain's own entry indexes, read before the walk. This is a container-level read —
+    // an integer per element, no typed content — of exactly the kind I-D §7.5 step 3 already
+    // performs over the same member, so it precedes every signature without breaking the
+    // phase discipline the induction below keeps.
+    let mut chain_hops: Vec<(u64, &Value)> = Vec::with_capacity(chain.len().saturating_sub(1));
+    for hop in &chain[1..] {
+        let index = number(hop, "entry_index")?;
+        if previous_index >= index {
+            return Err(ReceiptError::GovernanceChainInvalid(CHAIN_ASCENDING.to_owned()));
+        }
+        previous_index = index;
+        chain_hops.push((index, obj(hop, "envelope")?));
+    }
+
+    // --- I-D §7.5.1 4b. Inductive step: three phases, in this order, for every later hop. ---
+    //
+    // "Walk the carried governance statements after the genesis manifest in ascending
+    // ENTRY-INDEX order: the manifest statements of `governance.chain[]`, merged in entry-index
+    // order with the `key` statements the enumeration material carries where the mode carries
+    // them." Both input streams are already ascending — the chain by the check just made, the
+    // enumerated key statements by the range proof's own index continuity — so the merge is a
+    // two-cursor walk and needs no sort.
+    // I-D §2.1: "If duplicates nevertheless occur, the envelope with the smallest entry index
+    // governs and later ones are void." Both merged streams are walked in ascending entry-index
+    // order, so the first statement id seen is the governing one and any later envelope bearing
+    // it is void — skipped whole, applying no effect and consuming no rotation proof. Seeded
+    // with the genesis manifest, which the base case above has already walked.
+    let mut governing_ids = BTreeSet::from([statement_id(genesis_envelope)?]);
+    // The genesis hop is walked by the base case above.
+    let mut walked_indexes = BTreeSet::from([0u64]);
+    let mut void_chain: Vec<(u64, &Value)> = Vec::new();
+    let mut chain_cursor = 0usize;
+    let mut key_cursor = 0usize;
+    // The genesis manifest, at entry index 0, is the statement the base case has just walked.
+    let mut walked_index = 0u64;
+    while chain_cursor < chain_hops.len() || key_cursor < key_statements.len() {
+        let take_key = match (chain_hops.get(chain_cursor), key_statements.get(key_cursor)) {
+            (Some((chain_index, _)), Some((key_index, _))) => key_index < chain_index,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        // The two streams are processed in separate arms rather than through one merged
+        // binding: the chain's envelopes are borrowed from the receipt and outlive this
+        // function inside [`Governance`], while the enumerated ones are borrowed from
+        // enumeration material the caller owns. Phases 1 and 2 are identical for both, and are
+        // shared through [`check_merged_order`], [`verify_governance_phase_1`] and
+        // [`validate_key_statement`].
+        if take_key {
+            let (index, envelope) = key_statements[key_cursor];
+            key_cursor += 1;
+            check_merged_order(walked_index, index)?;
+            walked_index = index;
+            // I-D §7.5.1 4b: an entry the enumeration alone reveals "is selected for the walk
+            // by its purported `type`, but it ENTERS the induction only if its envelope verifies
+            // in phase 1 under K as established so far: a purported `manifest` or `key` entry
+            // that does not verify is void (Section 2.1) — not inducted, no effect on K, the
+            // walk continues past it". Phase 1 therefore comes FIRST, before the version read
+            // and before §2.2's common fields, which §7.5 step 1 exempts an enumeration-only
+            // entry from "until its own-index signature check has passed".
+            let payload = payload_of(envelope)?;
+            let keys = producer_keys_at_in(&manifests, &events, index);
+            run.spend(1)?;
+            let check = crate::check_envelope(envelope, |key_id| {
+                keys.get(key_id).map(|bound| bound.pubkey.clone())
+            })?;
+            if !matches!(check, crate::EnvelopeCheck::Verified) {
+                run.void(
+                    index,
+                    if matches!(check, crate::EnvelopeCheck::SignatureInvalid) {
+                        VoidReason::SignatureInvalid
+                    } else {
+                        VoidReason::KeyNotActive
+                    },
+                );
+                continue;
+            }
+            // Verified here, so 4d's sweep need not verify it again: one carried envelope, one
+            // check, one charge against the §7.8 work budget.
+            walked_indexes.insert(index);
+            // §2.1's first-wins rule is about GOVERNING statements, and a void entry is never
+            // one: it occupies no statement id, so a LATER verifying copy of the same statement
+            // is still inducted. The claim is therefore made only now, after phase 1 passed.
+            if !governing_ids.insert(statement_id(envelope)?) {
+                // A verifying duplicate governs nothing (§2.1) and applies no effect, but it has
+                // been verified just above, which is all 4d asks of a carried envelope.
+                continue;
+            }
+            // Verifying: the version read is now due, and an unsupported one is `unverifiable`
+            // for a statement this document cannot interpret — "not inducted, K is unestablished
+            // at and after its index, the governance finding is `unverifiable`". So the walk
+            // stops here exactly as it does at a rotation it could not authenticate.
+            if let Err(error @ ReceiptError::UnsupportedVersion { .. }) = check_ahl_version(payload)
+            {
+                run.record_gap(error);
+                unestablished_from = Some(index);
+                break;
+            }
+            common_payload_fields(payload)?;
+            // Phase 2 (4b(K)) and phase 3 (the producer-key effect), in that order.
+            events.push(validate_key_statement(
+                payload,
+                index,
+                &manifests,
+                &manifest_by_version_id,
+            )?);
+            continue;
+        }
+
+        let (index, envelope) = chain_hops[chain_cursor];
+        chain_cursor += 1;
+        check_merged_order(walked_index, index)?;
+        walked_index = index;
+
+        // I-D §2.1: where two envelopes bear the same statement id, "the envelope with the
+        // smallest entry index governs and later ones are void". A void element governs
+        // nothing: it is not walked as a hop, applies no effect, consumes no
+        // `governance.rotation_proofs[]` element, and never becomes the version a
+        // `subject.manifest` reference resolves to — the governing copy, already walked, is all
+        // three. The `predecessor` linkage of any later manifest is therefore computed against
+        // that governing copy, which is what `previous_manifest_*` still holds here.
+        //
+        // Void of effect is not exempt from verification. I-D §7.5 step 4: "Establish the key
+        // state, and verify EVERY CARRIED ENVELOPE, by the procedure of the next subsection."
+        // §7.5.1 4d: "With K established, verify every carried envelope that is not part of the
+        // induction... An envelope carrying a non-verifying entry, or an entry naming a key not
+        // active at that index, is invalid however many other entries verify." A void duplicate
+        // is carried and is not part of the induction, so it is kept here and verified at its
+        // own entry index under completed K, with the subject and the rest of 4d's envelopes.
+        if !governing_ids.insert(statement_id(envelope)?) {
+            void_chain.push((index, envelope));
+            continue;
+        }
+        walked_indexes.insert(index);
+
+        let payload = payload_of(envelope)?;
+        // I-D §7.5.1 4b: "A `governance.chain[]` element is different: the receipt presents it
+        // as its own lineage, so its phase-1 failure is `invalid`." Phase 1 therefore runs
+        // before the version member is ACTED on. The foreign-revision rule below opens with "A
+        // VERIFYING purported governance entry", so a hop whose signature is corrupted, whose
+        // signer is not active at that index, or that carries no usable signature at all is a
+        // defect of the receipt whatever revision it declares — reducing it to `unverifiable`
+        // would let a broken lineage hide behind a version member. Reading the member early is
+        // fine; acting on it before the signature is settled is not.
+        verify_governance_phase_1(envelope, &manifests, &events, index, mode, run)?;
+
+        // Verifying, so the version read is now due. §7.1: an unsupported one "is
+        // `unverifiable` as for any carried statement". For a governance statement 4b says what
+        // follows — "not inducted, K is unestablished at and after its index, the governance
+        // finding is `unverifiable`... and the scalar result is reduced under Section 7.7 — a
+        // later required `invalid` still dominates" — so the walk stops with the prefix state it
+        // has established and the run carries on. Ending it would make that last clause
+        // unreachable.
+        if let Err(error @ ReceiptError::UnsupportedVersion { .. }) = check_ahl_version(payload) {
+            run.record_gap(error);
+            unestablished_from = Some(index);
+            break;
+        }
+
+        // "A failure at phase 1 or phase 2 is invalid, and the induction does not continue past
+        // it. No effect is ever applied to K by a statement that has not completed both
+        // earlier phases." Phase 2 (type-specific validation) and phase 3 (effect) follow —
+        // starting with the common payload fields I-D §2.2 requires of EVERY statement, before
+        // the manifest-specific content below is read.
+        common_payload_fields(payload)?;
+        match statement_type(payload)? {
+            "manifest" => {
+                // Phase 2, 4b(M): predecessor linkage, then the same §6.2/§6.3 schema every
+                // manifest version takes, then the rotation-anchoring rule.
+                match payload.get("predecessor").and_then(Value::as_str) {
+                    None => {
+                        return Err(ReceiptError::GovernanceChainInvalid(
+                            "a non-genesis manifest must reference its predecessor".to_owned(),
+                        ))
+                    }
+                    // A non-genesis manifest references its predecessor by *entry* id:
+                    // signature identity matters for chain links (spec §2.3.5).
+                    Some(got) if got != previous_manifest_entry_id => {
+                        return Err(ReceiptError::GovernanceChainInvalid(format!(
+                            "manifest at entry index {index} references `{got}`, its \
+                             predecessor in the chain is `{previous_manifest_entry_id}`"
+                        )))
+                    }
+                    Some(_) => {}
+                }
+                // The manifest's `keys` array is a *snapshot*, not a set of add events
+                // (spec §7.2). It is read at resolution time by `producer_keys_at`, which
+                // discards whatever the prior manifest declared.
+                //
+                // Schema checking happens here, once per manifest, rather than wherever a
+                // member is first read. Key binding downstream is deliberately tolerant — a
+                // receipt may carry the same log key bound to two manifest versions, so a
+                // single entry that fails to bind is not fatal — and a malformed key object
+                // reaching that path would be swallowed by the tolerance and resurface as a
+                // missing key. A manifest that breaks the frozen schema must be refused as
+                // such, not reported as a key that happens not to resolve.
+                producer_key_objects(payload)?;
+                log_object(payload)?;
+                datasets_object(payload)?;
+                // §6.2's remaining "contains at minimum" members — `pipelines`, `windows`,
+                // `retention`, `level` — validated BEFORE the rotation-anchoring rule below
+                // reads `level` to decide whether L3 applies (an absent or malformed `level`
+                // must fail HERE, in schema, never be silently read as "not L3").
+                manifest_scope_fields(payload)?;
+                witnesses_object(payload)?;
+                // I-D §7.1 / §7.5.1: a manifest whose log or witness key objects DIFFER, as
+                // SETS, from its predecessor's in the chain is a GOVERNANCE-KEY ROTATION (I-D
+                // §6.2: "Each manifest version's log and witness key objects replace the prior
+                // set in full" — a set, not a sequence, so a harmless reordering is never a
+                // rotation) and requires its `governance.rotation_proofs[]` element to verify
+                // under the outgoing key state (`verify_rotation_proof`).
+                let rotated = log_key_set(payload) != log_key_set(previous_manifest_payload)
+                    || witness_key_set(payload)? != witness_key_set(previous_manifest_payload)?;
+                if rotated {
+                    saw_rotation = true;
+                    // "The NEXT unconsumed `rotation_proofs[]` element must have
+                    // `manifest_entry_index` equal to this hop's entry index (else invalid),
+                    // and is validated then." Positional consumption, decided only now that
+                    // this hop's own signature (phase 1) and schema (phase 2, above) have
+                    // already passed.
+                    let element = rotation_proofs.get(rotation_cursor).ok_or_else(|| {
+                        ReceiptError::RotationProofInvalid {
+                            manifest_entry_index: index,
+                            detail: "the chain rotates the log or witness key set here, but \
+                                     `governance.rotation_proofs[]` carries no (further) \
+                                     element for it (I-D §7.1)"
+                                .to_owned(),
+                        }
+                    })?;
+                    let element_index = number(element, "manifest_entry_index")?;
+                    if element_index != index {
+                        return Err(ReceiptError::RotationProofInvalid {
+                            manifest_entry_index: index,
+                            detail: format!(
+                                "the next unconsumed `governance.rotation_proofs[]` element \
+                                 carries `manifest_entry_index` {element_index}, not {index} \
+                                 — one element per rotation, in ascending \
+                                 `manifest_entry_index` order (I-D §7.1)"
+                            ),
+                        });
+                    }
+                    // The element's own collection rules (I-D §7.1: required iff a rotation is
+                    // present, one per rotation, ascending, no extras) are governance facts and
+                    // ran above. What the element PROVES is a checkpoint under the OUTGOING key
+                    // state, and a checkpoint cannot be authenticated without the profile that
+                    // fixes its serialization. Where the profile is not resolved, phase 2 of
+                    // this statement has not passed, and §7.5.1 4b is explicit about what may
+                    // follow: "No effect is ever applied to K by a statement that has not
+                    // completed both earlier phases." So the induction STOPS here rather than
+                    // installing a key state it could not establish — anything the receipt
+                    // rests on the rotation is `unverifiable`, and nothing is decided under a
+                    // key set this verifier never authenticated.
+                    let Some(profile) = profile else {
+                        run.tolerate::<()>(Err(ReceiptError::GovernanceRotationUnverifiable {
+                            entry_index: index,
+                        }))?;
+                        unestablished_from = Some(index);
+                        break;
+                    };
+                    verify_rotation_proof(
+                        element,
+                        envelope,
+                        index,
+                        payload,
+                        &RotationContext {
+                            receipt,
+                            policy,
+                            manifests: &manifests,
+                            outgoing: (previous_manifest_index, previous_manifest_payload),
+                            profile,
+                            profile_id,
+                        },
+                        run,
+                    )?;
+                    rotation_cursor += 1;
+                }
+                // Phase 3: effect — replaces the log, witness, and producer key state in full.
+                previous_manifest_entry_id = entry_id(envelope);
+                previous_manifest_payload = payload;
+                previous_manifest_index = index;
+                // First-wins for the same §2.1 reason as [`chain_version_index`]; a void
+                // duplicate never reaches here, and the entry API states the rule at the site.
+                manifest_by_version_id.entry(statement_id(envelope)?).or_insert((index, payload));
+                manifests.push((index, payload));
+            }
+            other => {
+                // I-D §7.1: each `governance.chain[]` element is "an anchored MANIFEST
+                // statement's complete envelope", and §7.4 states where the other governance
+                // type travels: "`governance.chain[]` carries manifest statements; producer-key
+                // transitions are `key` statements, and those reach a verifier only through
+                // enumeration material." A chain element of any other type is a container the
+                // format does not define, so it is refused as a shape defect rather than
+                // silently walked as though the chain were a second carrier for key
+                // transitions. The type is read HERE, after phase 1, so the refusal never rests
+                // on bytes no key has vouched for.
+                return Err(ReceiptError::GovernanceChainInvalid(format!(
+                    "`governance.chain[]` carries a `{other}` statement at entry index \
+                     {index}; each element is an anchored MANIFEST statement's envelope (I-D \
+                     §7.1), and producer-key transitions reach a verifier only through \
+                     enumeration material (I-D §7.4)"
+                )));
+            }
+        }
+    }
+
+    // I-D §7.1: "one element per rotation" — an element the walk never had occasion to
+    // consume is an extra, exactly as invalid as a missing one. Unless the walk STOPPED: an
+    // element it did not reach is not an element the receipt should not have carried, and
+    // reporting one as an extra would turn this verifier's own capability gap into a defect of
+    // the artifact.
+    if unestablished_from.is_none() && rotation_cursor < rotation_proofs.len() {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "`governance.rotation_proofs[]` carries {} element(s) beyond the {} the chain \
+             walk actually consumed — I-D §7.1: one element per rotation, no extras",
+            rotation_proofs.len(),
+            rotation_cursor
+        )));
+    }
+    // "The member is ABSENT where the chain rotates neither set" — so a member present with
+    // no rotation ever encountered is invalid too, symmetric with the absent-but-rotated case
+    // caught inline above.
+    if rotation_proofs_member.is_some() && !saw_rotation {
+        return Err(ReceiptError::GovernanceChainInvalid(
+            "`governance.rotation_proofs` is present, but the carried chain rotates neither \
+             the log nor the witness key set — I-D §7.1 requires the member to be ABSENT in \
+             that case"
+                .to_owned(),
+        ));
+    }
+
+    Ok(Governance {
+        mode,
+        manifests,
+        events,
+        manifest_by_version_id,
+        chain_index,
+        walked_indexes,
+        void_chain,
+        chain_indexes,
+        unestablished_from,
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Anchoring
 // ---------------------------------------------------------------------------
 
-/// The verified anchoring context every later step checks material against.
+/// What 4f established about the receipt's anchoring, for the §7.3 assurance comparison.
+///
+/// The checkpoint's own `tree_size` and `root_hash` are read at step 3, where every path and
+/// range recomputation that needs them already runs; nothing after 4f reaches for them again,
+/// so they are deliberately not carried forward here.
 struct Anchoring {
-    tree_size: u64,
-    root: Hash,
-    witnessed: bool,
-    continued_history: bool,
+    /// Whether a witness cosignature verified — `None` where the witness keys could not be
+    /// resolved at all, which is the witness assertion's `unverifiable` outcome and not the
+    /// same fact as "none verified" (I-D §7.1, §7.7).
+    witnessed: Option<bool>,
+    /// Whether the later checkpoint, its cosignatures and the consistency path are present and
+    /// verify (§7.6) — `None` on the same terms as [`Self::witnessed`]: the rule's own
+    /// evaluation was blocked by a gap, never because a check ran and failed.
+    continued_history: Option<bool>,
 }
 
-/// Bind a log or witness key to a key object in the manifest version active for the checkpoint
-/// being verified (format §2.2). A key a later manifest replaced cannot validate that
-/// checkpoint, because `active_index` is fixed by the checkpoint's `tree_size`.
+/// A `keys.log[]`/`keys.witness[]` entry resolved to the public key verification uses.
+struct ResolvedKey {
+    /// The public key a signature or cosignature is verified under.
+    pubkey: String,
+    /// For a witness key, the identity it was resolved under (I-D §7.1) — the manifest's own
+    /// declaration for a `manifest-chain` key, and the one local policy holds the key for
+    /// where the source is `local-policy`. `None` for a log key, which carries no identity
+    /// member and has no cosignature to bind one to.
+    witness_id: Option<String>,
+}
+
+/// Bind a log or witness key to the key object the receipt says it comes from (I-D §7.1
+/// "`keys`"), under the one of the two admissible sources the entry declares.
+///
+/// **`manifest-chain`.** The key object must appear in the manifest version active for the
+/// checkpoint being verified, and `active_index` is fixed by that checkpoint's `tree_size`, so
+/// a key a later manifest replaced cannot validate it. A log key matches on `(key_id, pubkey)`;
+/// a witness key matches on `(witness_id, key_id, pubkey)`, because §7.1 makes `witness_id`
+/// part of the witness key object rather than a free-text label — dropping it would let one
+/// declared witness's key be presented under another witness's identity.
+///
+/// **`local-policy`.** Admissible for witness keys only, and only for keys the verifier already
+/// trusts: the entry's `key_id` AND `pubkey` must both be what [`TrustPolicy`] holds. Nothing
+/// carried in the receipt contributes to that decision, which is the whole point — a policy
+/// holding no trusted witness key accepts no `local-policy` witness key at all.
+/// One `manifest-chain` entry against the manifest version its BINDING names (I-D §7.1).
+///
+/// "A `manifest-chain` key that matches no object in the manifest version its binding names, or
+/// that differs from the matching object in any compared member, is `invalid`." The rule is
+/// about the entry, not about the checkpoint being verified, so it holds whether or not this
+/// checkpoint ever selects the key — an unused entry that matches nothing is as much a defect
+/// as a used one.
+///
+/// I-D §7.1, keys block: the manifest object is `{key_id, pubkey, valid_from_index}`, "a witness
+/// object additionally carrying `witness_id`; the receipt-side entry carries `key_id`, `pubkey`,
+/// and for a witness `witness_id`, but not `valid_from_index`, which is a property of the
+/// manifest declaration and is read from the manifest object alone. The match is therefore
+/// equality of every member the two objects share" (§6.2 fixes the manifest side of that pair).
+/// Which is what this compares — the shared members, all of them.
+fn match_manifest_key_object(entry: &Value, group: &str, manifest: &Value) -> Result<ResolvedKey> {
+    let key_id = text(entry, "key_id")?.to_owned();
+    let pubkey = text(entry, "pubkey")?.to_owned();
+    let binding_index = number(obj(entry, "binding")?, "entry_index")?;
+    let not_bound =
+        || ReceiptError::KeyNotBound { key_id: key_id.clone(), entry_index: binding_index };
+    if group == "log" {
+        key_objects(log_object(manifest)?)?
+            .into_iter()
+            .find(|(id, key)| id == &key_id && key == &pubkey)
+            .map(|(_, key)| ResolvedKey { pubkey: key, witness_id: None })
+            .ok_or_else(not_bound)
+    } else {
+        let witness_id = text(entry, "witness_id")?.to_owned();
+        witness_key_set(manifest)?
+            .into_iter()
+            .find(|(declared_id, id, key, _)| {
+                declared_id == &witness_id && id == &key_id && key == &pubkey
+            })
+            .map(|(declared_id, _, key, _)| ResolvedKey {
+                pubkey: key,
+                witness_id: Some(declared_id),
+            })
+            .ok_or_else(not_bound)
+    }
+}
+
 fn bind_log_or_witness_key(
-    governance: &Governance<'_>,
+    policy: &TrustPolicy,
+    manifests: &[(u64, &Value)],
     entry: &Value,
     group: &str,
     active_index: u64,
-) -> Result<String> {
+) -> Result<ResolvedKey> {
     let key_id = text(entry, "key_id")?.to_owned();
-    if text(entry, "source")? == "local-policy" {
-        // Permitted only for witness keys the verifier already trusts (§2.2).
-        return if group == "witness" {
-            Ok(text(entry, "pubkey")?.to_owned())
-        } else {
-            Err(ReceiptError::KeyNotBound { key_id, entry_index: active_index })
-        };
-    }
-    let binding_index = number(obj(entry, "binding")?, "entry_index")?;
-    if binding_index != active_index {
-        return Err(ReceiptError::KeyNotBound { key_id, entry_index: binding_index });
-    }
-    let (_, manifest) = governance
-        .manifests
-        .iter()
-        .find(|(index, _)| *index == binding_index)
-        .copied()
-        .ok_or_else(|| ReceiptError::KeyNotBound {
-            key_id: key_id.clone(),
-            entry_index: binding_index,
-        })?;
-
-    let declared: Vec<(String, String)> = if group == "log" {
-        key_objects(obj(manifest, "log")?)?
-    } else {
-        let mut all = Vec::new();
-        for witness in array(manifest, "witnesses")? {
-            all.extend(key_objects(witness)?);
+    let pubkey = text(entry, "pubkey")?.to_owned();
+    match text(entry, "source")? {
+        // I-D §7.1: "`source: \"local-policy\"` is an acceptable source only for witness keys
+        // the verifier already trusts, for the genesis anchor, and for authorized dataset
+        // keys" — neither of the latter two is a `keys.log[]`/`keys.producer[]` entry, so
+        // within this block the source is admissible for the witness group and nowhere else.
+        "local-policy" => {
+            if group != "witness" {
+                return Err(ReceiptError::KeyNotBound { key_id, entry_index: active_index });
+            }
+            // All three members, and the identity among them: §7.1 gives a witness key object
+            // "`witness_id`, the identity under which the manifest declares that witness", and
+            // a key policy trusts for one witness is not a key trusted to cosign as another.
+            // What policy CANNOT establish is that the identity is a declared one at all —
+            // that is a fact about the manifest, checked on the cosignature itself.
+            let witness_id = text(entry, "witness_id")?.to_owned();
+            let trusted = policy.trusted_witness_keys.get(&key_id);
+            if trusted.map(|held| (held.pubkey.as_str(), held.witness_id.as_str()))
+                != Some((pubkey.as_str(), witness_id.as_str()))
+            {
+                return Err(ReceiptError::WitnessKeyNotTrusted { key_id });
+            }
+            Ok(ResolvedKey { pubkey, witness_id: Some(witness_id) })
         }
-        all
-    };
-    let pubkey = text(entry, "pubkey")?;
-    declared
-        .into_iter()
-        .find(|(id, key)| id == &key_id && key == pubkey)
-        .map(|(_, key)| key)
-        .ok_or(ReceiptError::KeyNotBound { key_id, entry_index: binding_index })
+        "manifest-chain" => {
+            let binding_index = number(obj(entry, "binding")?, "entry_index")?;
+            if binding_index != active_index {
+                return Err(ReceiptError::KeyNotBound { key_id, entry_index: binding_index });
+            }
+            let (_, manifest) = manifests
+                .iter()
+                .find(|(index, _)| *index == binding_index)
+                .copied()
+                .ok_or(ReceiptError::KeyNotBound { key_id, entry_index: binding_index })?;
+            match_manifest_key_object(entry, group, manifest)
+        }
+        // Unreachable in a receipt that reached this point — [`check_keys_block`] admits only
+        // the two tokens above, and runs over the whole `keys` block first — but stated rather
+        // than defaulted, so no third source can ever be read as one of the two.
+        other => Err(ReceiptError::Malformed(format!(
+            "`keys.{group}[]` entry `{key_id}` declares `source` `{other}`: I-D §7.1 admits \
+             exactly `manifest-chain` or `local-policy`"
+        ))),
+    }
 }
 
 /// Bind every producer key the receipt lists to the key set in force at the subject's entry
@@ -882,98 +4415,757 @@ fn check_key_id(entry: &Value) -> Result<()> {
     Ok(())
 }
 
-/// `key_id -> pubkey` for `keys.log`/`keys.witness` entries that bound successfully at some
-/// checkpoint's active manifest index, plus, for every `key_id` that never did, the binding
-/// index its first failing entry actually carried.
-type BoundAndAttempted = (BTreeMap<String, String>, BTreeMap<String, u64>);
+/// Require a cosignature's `witness_id` to be the identity the manifest declares for the key
+/// it is verified under (I-D §7.1: `anchoring.witnesses[]` carries "the witness identity AS
+/// DECLARED IN THE MANIFEST", and a witness key object carries "`witness_id`, the identity
+/// under which the manifest declares that witness").
+///
+/// The identity is not decorative: `cosignature_bytes` puts it in the preimage, so a
+/// cosignature naming an identity of the presenter's own choosing is a signature over bytes no
+/// declared witness ever cosigned. Applied identically to `anchoring.witnesses[]` and
+/// `anchoring.later_witnesses[]`; `governance.rotation_proofs[].witnesses[]` resolves its keys
+/// straight out of the outgoing manifest by `(witness_id, key_id)` and so is bound to the same
+/// identity by construction ([`verify_rotation_proof`]).
+///
+/// A `local-policy` witness key is held to the same rule from the other side: policy holds the
+/// identity alongside the key ([`TrustedWitnessKey`]), so the comparison here is against that
+/// held identity, and [`check_witness_declared`] separately requires it to be one the active
+/// manifest declares. Neither the receipt nor policy alone can invent a witness.
+fn check_witness_identity(resolved: &ResolvedKey, key_id: &str, carried: &str) -> Result<()> {
+    match &resolved.witness_id {
+        Some(declared) if declared != carried => Err(ReceiptError::WitnessIdentityMismatch {
+            key_id: key_id.to_owned(),
+            declared: declared.clone(),
+            carried: carried.to_owned(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// The elements of an `anchoring.witnesses[]`-shaped member, or the empty slice where the
+/// member is absent.
+///
+/// A member present under any other JSON type is `invalid` (I-D §7.1: "The member shapes shown
+/// above are normative") and is never read as absent: treating `"witnesses": {}` as an empty
+/// array would silently turn an L3 receipt's missing cosignature requirement into a receipt
+/// that carries none, and treating a string `later_witnesses` the same way would drop the
+/// cosignatures that are the only thing establishing a witness saw `later_checkpoint`.
+fn cosignature_array<'a>(container: &'a Value, member: &str, what: &str) -> Result<&'a [Value]> {
+    match container.get(member) {
+        None => Ok(&[]),
+        Some(Value::Array(elements)) => Ok(elements),
+        Some(_) => Err(ReceiptError::Malformed(format!(
+            "`{what}`, where present, MUST be an array in the shape of `anchoring.witnesses[]` \
+             (I-D §7.1)"
+        ))),
+    }
+}
+
+/// I-D §7.1: "Elements appear in ascending `entry_index` order."
+const CHAIN_ASCENDING: &str = "chain hops must ascend by entry index";
+
+/// I-D §7.5 step 3: "Key-independent structural and path checks. **No signature and no
+/// cosignature is verified in this step.**"
+///
+/// Every check here is an integer comparison or a hash recomputation, and each is therefore
+/// decidable before any key state exists. That is why the whole of the carried material's path
+/// evidence is proven here and not inside the induction: §7.5.1 walks the governance chain in
+/// ascending entry-index order and every activity test in the I-D is "at index i", so an
+/// unproven `entry_index` would let a producer present a governance chain in an order the log
+/// never had, and a manifest that was never anchored would still derive the key state. "An
+/// inclusion path recomputed from an element's entry id at its asserted index is what proves
+/// that index, and the two cannot be separated: the path proof IS the index proof."
+///
+/// `root` is used here as an UNAUTHENTICATED STRUCTURAL COMMITMENT — the medium the presented
+/// material is bound to, not yet a value shown to be the log's. Nothing in this function
+/// establishes that the log issued that root, and no result may be reported from it alone;
+/// 4f ([`verify_checkpoint`]) is what upgrades every path result here from a statement about
+/// carried bytes to a statement about the log's state.
+fn check_key_independent_paths(
+    receipt: &Value,
+    envelope: &Value,
+    subject_index: u64,
+    tree_size: u64,
+    root: &Hash,
+    run: &mut Run,
+) -> Result<()> {
+    if subject_index >= tree_size {
+        return Err(ReceiptError::EntryIndexBeyondCheckpoint {
+            entry_index: subject_index,
+            tree_size,
+        });
+    }
+    check_inclusion(
+        &jcs(envelope),
+        subject_index,
+        tree_size,
+        &path_strings(obj(receipt, "anchoring")?, "inclusion_path")?,
+        root,
+        "subject",
+        run,
+    )?;
+
+    let mut previous: Option<u64> = None;
+    for hop in array(obj(receipt, "governance")?, "chain")? {
+        let index = number(hop, "entry_index")?;
+        if previous.is_some_and(|earlier| earlier >= index) {
+            return Err(ReceiptError::GovernanceChainInvalid(CHAIN_ASCENDING.to_owned()));
+        }
+        previous = Some(index);
+        let hop_envelope = obj(hop, "envelope")?;
+        // The version read of a chain hop is NOT here. §7.5 step 1 puts it before that
+        // statement is validated, and the walk of §7.5.1 4b is where a hop is validated — which
+        // is also the only place that can act on the answer: an unsupported revision leaves K
+        // unestablished from that hop's index (4b), and there is no key state to leave
+        // unestablished in a key-independent pass. Step 3 recomputes this hop's path either
+        // way, since a hash needs no revision.
+        payload_of(hop_envelope)?;
+        // A hop the checkpoint does not commit cannot be proven against its root, and an
+        // unprovable governance statement is a refusal rather than a pass. This is the wall a
+        // receipt hits when a manifest version was anchored after its own anchoring checkpoint
+        // — the case §2.1 needs for a later checkpoint under a rotated key set. Reporting it as
+        // a named refusal keeps it from degrading into "the older key still worked, so accept".
+        if index >= tree_size {
+            return Err(ReceiptError::GovernanceChainInvalid(format!(
+                "the chain carries a hop at entry index {index}, which a checkpoint of size \
+                 {tree_size} does not commit: its inclusion cannot be proven against that root"
+            )));
+        }
+        check_inclusion(
+            &jcs(hop_envelope),
+            index,
+            tree_size,
+            &path_strings(hop, "inclusion_path")?,
+            root,
+            "governance chain hop",
+            run,
+        )?;
+    }
+    Ok(())
+}
+
+/// The receipt's container shapes (I-D §7.1: "The member shapes shown above are normative"),
+/// checked over the whole carried document before any of it is resolved or verified.
+///
+/// This is §7.5 step 3's "family-string, arity, and ordering checks the container shapes of
+/// Section 7.1 require", and it is deliberately independent of what verification later reaches
+/// for: an ill-shaped member on a path some earlier failure short-circuits is `invalid` all the
+/// same.
+fn check_container_shapes(receipt: &Value) -> Result<()> {
+    // I-D §7.1 marks its own extension points, and closing what it draws complete is the whole
+    // of the rule: an elided body (`{ ... }`) or a trailing `...` says the members are defined
+    // elsewhere — `claim.assurance` in §7.3, `governance.currency.material` in §7.4,
+    // `claim_material` in §7.2, an envelope's `payload`/`signatures` in §2.1, and an
+    // `anchors[]` entry's type-specific members in whatever format it names — and every other
+    // object in the container is drawn with its members complete.
+    check_closed_members(
+        receipt,
+        "receipt",
+        &[
+            "ahl_receipt_version",
+            "spec_version",
+            "claim",
+            "subject",
+            "envelope",
+            "keys",
+            "anchoring",
+            "governance",
+            "claim_material",
+            "anchors",
+        ],
+    )?;
+    let claim = obj(receipt, "claim")?;
+    check_closed_members(claim, "claim", &["type", "record_subject", "assurance", "note"])?;
+    if let Some(record_subject) = claim.get("record_subject") {
+        check_closed_members(record_subject, "claim.record_subject", &["dataset", "record"])?;
+    }
+    check_closed_members(
+        obj(receipt, "subject")?,
+        "subject",
+        &["statement_id", "entry_id", "entry_index", "manifest"],
+    )?;
+    check_closed_members(obj(receipt, "envelope")?, "envelope", &["payload", "signatures"])?;
+
+    check_keys_block(receipt)?;
+    check_anchoring_shapes(receipt)?;
+    check_governance_shapes(receipt)
+}
+
+/// The `anchoring` block's own shapes (I-D §7.1), split out of [`check_container_shapes`]
+/// only so each block's shape rules read as one piece.
+fn check_anchoring_shapes(receipt: &Value) -> Result<()> {
+    let anchoring = obj(receipt, "anchoring")?;
+    check_closed_members(
+        anchoring,
+        "anchoring",
+        &[
+            "adaptor",
+            "checkpoint",
+            "inclusion_path",
+            "witnesses",
+            "later_checkpoint",
+            "consistency_path",
+            "later_witnesses",
+        ],
+    )?;
+    check_closed_members(obj(anchoring, "adaptor")?, "anchoring.adaptor", &["id", "hash"])?;
+    for member in ["witnesses", "later_witnesses"] {
+        for element in cosignature_array(anchoring, member, &format!("anchoring.{member}"))? {
+            witness_cosignature_object(element)?;
+        }
+    }
+    check_family_hash_path(anchoring, "inclusion_path", "anchoring.inclusion_path")?;
+    check_family_hash_path(anchoring, "consistency_path", "anchoring.consistency_path")?;
+    Ok(())
+}
+
+/// The `governance` block's shapes, plus `anchors[]` (I-D §7.1).
+fn check_governance_shapes(receipt: &Value) -> Result<()> {
+    let governance = obj(receipt, "governance")?;
+    check_closed_members(
+        governance,
+        "governance",
+        &["genesis_entry_id", "chain", "rotation_proofs", "currency"],
+    )?;
+    check_closed_members(
+        obj(governance, "currency")?,
+        "governance.currency",
+        &["mode", "material"],
+    )?;
+    for (position, hop) in array(governance, "chain")?.iter().enumerate() {
+        check_closed_members(
+            hop,
+            &format!("governance.chain[{position}]"),
+            &["envelope", "entry_index", "inclusion_path"],
+        )?;
+        check_closed_members(
+            obj(hop, "envelope")?,
+            &format!("governance.chain[{position}].envelope"),
+            &["payload", "signatures"],
+        )?;
+        let what = format!("governance.chain[{position}].inclusion_path");
+        check_family_hash_path(hop, "inclusion_path", &what)?;
+    }
+    // I-D §7.1: `anchors[]` is material this verifier does not otherwise read — it computes
+    // no verdict from an external timestamp (§8.3 offers them as evidence a deployment can
+    // compose with checkpoints, not as an input to any rule here) — but "the member shapes
+    // shown above are normative", and a member no verifier could interpret is a schema failure
+    // whether or not THIS one has a use for it.
+    //
+    // Exactly what the container fixes is enforced, and nothing beyond it. The shape is
+    // `{ "type": "rfc3161 | bitcoin_ots", "target": "checkpoint_root", "target_hash":
+    // "sha256:<hex>", ... }`: three REQUIRED members, `target_hash` a digest under §2.1's
+    // strict rule, and a trailing ellipsis that leaves an anchor format's own type-specific
+    // members unconstrained. The example values of `type` and `target` are NOT read as a
+    // closed registry — this document registers no anchor types — so those two are held to
+    // being strings, which is what the shape states.
+    if let Some(value) = receipt.get("anchors") {
+        let elements = value.as_array().ok_or_else(|| {
+            ReceiptError::Malformed(
+                "`anchors`, where present, MUST be an array (I-D §7.1)".to_owned(),
+            )
+        })?;
+        for (position, element) in elements.iter().enumerate() {
+            let invalid =
+                |detail: &str| ReceiptError::Malformed(format!("`anchors[{position}]`: {detail}"));
+            if !element.is_object() {
+                return Err(invalid("MUST be an anchor object (I-D §7.1)"));
+            }
+            for member in ["type", "target"] {
+                if !element.get(member).is_some_and(Value::is_string) {
+                    return Err(invalid(&format!(
+                        "`{member}` is REQUIRED and MUST be a string (I-D §7.1)"
+                    )));
+                }
+            }
+            if !element.get("target_hash").and_then(Value::as_str).is_some_and(is_family_hash) {
+                return Err(invalid(
+                    "`target_hash` is REQUIRED, a `sha256:` family string in lowercase hex \
+                     (I-D §2.1, §7.1)",
+                ));
+            }
+        }
+    }
+
+    // I-D §7.1: `governance.rotation_proofs[]`'s own `witnesses` is "an array in the shape of
+    // `anchoring.witnesses[]`", so it takes the identical treatment — for EVERY element the
+    // member carries, including one the chain walk never has occasion to consume.
+    if let Some(value) = governance.get("rotation_proofs") {
+        let elements = value.as_array().ok_or_else(|| {
+            ReceiptError::GovernanceChainInvalid(
+                "`governance.rotation_proofs`, where present, MUST be an array (I-D §7.1)"
+                    .to_owned(),
+            )
+        })?;
+        for (position, element) in elements.iter().enumerate() {
+            check_closed_members(
+                element,
+                &format!("governance.rotation_proofs[{position}]"),
+                &["manifest_entry_index", "checkpoint", "inclusion_path", "witnesses"],
+            )?;
+            // I-D §7.1: the element's `checkpoint` is "a checkpoint in the receipt-borne form
+            // defined above", so its shape is one of "the family-string, arity, and ordering
+            // checks the container shapes of Section 7.1 require" that §7.5 step 3 settles —
+            // key-independent, decided before any induction, and reported as a structural
+            // failure rather than as a governance one. 4b(M) then reads a shape it can rely on.
+            checkpoint_object(obj(element, "checkpoint")?)?;
+            let what = format!("governance.rotation_proofs[{position}].witnesses");
+            for cosignature in cosignature_array(element, "witnesses", &what)? {
+                witness_cosignature_object(cosignature)?;
+            }
+            let what = format!("governance.rotation_proofs[{position}].inclusion_path");
+            check_family_hash_path(element, "inclusion_path", &what)?;
+        }
+    }
+    Ok(())
+}
+
+/// Require a cosignature's `witness_id` to be an identity the manifest version active for the
+/// checkpoint actually declares — WHATEVER the key's source (I-D §7.1: each
+/// `anchoring.witnesses[]` element carries "the witness identity as declared in the manifest").
+///
+/// For a `manifest-chain` key this is already implied, since the key bound to a manifest
+/// witness object carrying that identity. It is not implied for a `local-policy` key: policy
+/// establishes which KEY the verifier trusts, and no policy-side relation can establish that
+/// the corpus's own governance ever declared the witness. Without this, a verifier holding one
+/// trusted key would accept cosignatures under an identity the log's manifests never named,
+/// and the L3 requirement would be satisfied by a witness outside the corpus's governance.
+fn check_witness_declared(active_manifest: &Value, witness_id: &str, tree_size: u64) -> Result<()> {
+    if witness_key_set(active_manifest)?.iter().any(|(declared, ..)| declared == witness_id) {
+        return Ok(());
+    }
+    Err(ReceiptError::WitnessNotDeclared { witness_id: witness_id.to_owned(), tree_size })
+}
+
+/// The two `source` tokens I-D §7.1 admits for a key object, in the order it states them.
+const KEY_SOURCES: [&str; 2] = ["manifest-chain", "local-policy"];
+
+/// Validate the `keys` block's container shapes (I-D §7.1 "`keys`"), over EVERY entry the
+/// receipt carries, before any key is resolved.
+///
+/// This belongs to §7.5 step 3 — "the family-string, arity, and ordering checks the container
+/// shapes of Section 7.1 require" — and is separate from binding for a reason. Binding is
+/// deliberately tolerant per entry ([`bind_keys_by_group`]), because one receipt legitimately
+/// carries the same physical key bound to two different manifest versions; a shape defect on an
+/// entry no checkpoint happens to reach for would therefore never be reported at all. Shape is
+/// not tolerant: an ill-formed key object is `invalid` whether or not verification needs it.
+fn check_keys_block(receipt: &Value) -> Result<()> {
+    let keys = obj(receipt, "keys")?;
+    check_closed_members(keys, "keys", &["log", "witness", "producer"])?;
+    for group in ["log", "witness", "producer"] {
+        for (position, entry) in array(keys, group)?.iter().enumerate() {
+            let invalid = |detail: &str| {
+                ReceiptError::Malformed(format!("`keys.{group}[{position}]`: {detail}"))
+            };
+            if !entry.is_object() {
+                return Err(invalid("MUST be a key object (I-D §7.1)"));
+            }
+            if !entry.get("key_id").and_then(Value::as_str).is_some_and(is_family_hash) {
+                return Err(invalid(
+                    "`key_id` is REQUIRED, a `sha256:` family string in lowercase hex (I-D §7.1)",
+                ));
+            }
+            if !entry.get("pubkey").and_then(Value::as_str).is_some_and(is_family_base64) {
+                return Err(invalid(
+                    "`pubkey` is REQUIRED, a `base64:` family string under the strict \
+                     acceptance rule of I-D §2.1",
+                ));
+            }
+            // I-D §7.1: "`source` is exactly one of `\"manifest-chain\"` or
+            // `\"local-policy\"`." There is no third token and no default — an unrecognized
+            // one is a schema failure, never a source the verifier picks on the receipt's
+            // behalf. And "`local-policy` is an acceptable source only for witness keys the
+            // verifier already trusts, for the genesis anchor, and for authorized dataset
+            // keys": neither of the latter two is a `keys[]` entry, so within this block the
+            // token is admissible in the witness group and nowhere else.
+            let source = entry
+                .get("source")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("`source` is REQUIRED (I-D §7.1)"))?;
+            if !KEY_SOURCES.contains(&source) {
+                return Err(invalid(&format!(
+                    "`source` is `{source}`: I-D §7.1 admits exactly `manifest-chain` or \
+                     `local-policy`"
+                )));
+            }
+            if source == "local-policy" && group != "witness" {
+                return Err(invalid(
+                    "`local-policy` is an acceptable source only for witness keys (I-D §7.1)",
+                ));
+            }
+            // "`binding` is the object `{ \"entry_index\": <integer> }`, naming the entry
+            // index of the manifest statement the key is drawn from; it is REQUIRED where
+            // `source` is `\"manifest-chain\"`." Two rules, and the shape is the wider one:
+            // the member is REQUIRED only for one source, but WHEREVER it appears it is that
+            // object, because §7.1's member shapes are normative for every member it defines
+            // rather than only for the ones a given source obliges.
+            match entry.get("binding") {
+                None if source == "manifest-chain" => {
+                    return Err(invalid(
+                        "`binding` is REQUIRED where `source` is `manifest-chain` (I-D §7.1)",
+                    ))
+                }
+                None => {}
+                Some(binding) => {
+                    // The object has exactly one member, and it is an entry index: a
+                    // non-negative integer, so a float, a negative, or a string is not one.
+                    if !binding.get("entry_index").is_some_and(Value::is_u64) {
+                        return Err(invalid(
+                            "`binding.entry_index` is REQUIRED and MUST be a non-negative \
+                             integer (I-D §7.1)",
+                        ));
+                    }
+                    check_closed_members(
+                        binding,
+                        &format!("keys.{group}[{position}].binding"),
+                        &["entry_index"],
+                    )?;
+                }
+            }
+            // "A witness key object additionally carries `witness_id`, the identity under
+            // which the manifest declares that witness" — unconditional about the shape, and
+            // the identity it names is a manifest-declared one whatever the key's source: a
+            // `local-policy` key supplies the KEY the verifier trusts, never a witness
+            // identity of its own ([`check_witness_identity`]).
+            if group == "witness" && !entry.get("witness_id").is_some_and(Value::is_string) {
+                return Err(invalid("`witness_id` is REQUIRED on a witness key object (I-D §7.1)"));
+            }
+            // I-D §7.1: "a receipt-side entry carrying any member beyond those and
+            // `source`/`binding` is a schema failure." The member set is CLOSED, and closing it
+            // is what keeps the match meaningful: the match compares the members the two
+            // objects share, so an entry free to carry others could assert alongside the
+            // compared ones — `valid_from_index` among them — members nothing compares and a
+            // reader might believe. Applied to every entry, selected or not, since a schema
+            // failure is a property of the receipt rather than of what verification reached
+            // for.
+            let allowed: &[&str] = if group == "witness" {
+                &["witness_id", "key_id", "pubkey", "source", "binding"]
+            } else {
+                &["key_id", "pubkey", "source", "binding"]
+            };
+            check_closed_members(entry, &format!("keys.{group}[{position}]"), allowed)?;
+        }
+    }
+    Ok(())
+}
+
+/// `key_id -> ` [`ResolvedKey`] for `keys.log`/`keys.witness` entries that bound successfully
+/// at some checkpoint's active manifest index, plus, for every `key_id` that never did, the
+/// binding index its first failing entry actually carried.
+/// What one `keys.{group}[]` scan resolves against.
+struct KeyScope<'a> {
+    /// The manifest versions the induction has walked — the complete chain after it, a prefix
+    /// inside it.
+    manifests: &'a [(u64, &'a Value)],
+    /// The manifest version active for the checkpoint whose keys are being resolved, and
+    /// therefore the binding index an entry must name to be SELECTED here.
+    active_index: u64,
+    /// Where the induction stopped, if it did ([`Governance::unestablished_from`]).
+    unestablished_from: Option<u64>,
+    /// Whether `manifests` is the complete walk. Inside 4b(M) it is a prefix, so a binding the
+    /// walk has not reached yet says nothing about the entry.
+    complete: bool,
+}
+
+/// What binding one `keys.{group}[]` array produced: the keys that bound, the binding index
+/// each unbound one asked for, and the key ids that could not be resolved for want of LOCAL
+/// POLICY rather than for anything the receipt carries.
+type BoundKeys = (BTreeMap<String, ResolvedKey>, BTreeMap<String, u64>, BTreeSet<String>);
+
+/// Bind every `keys.{group}[]` entry against `active_index`, tolerantly per entry.
+///
+/// A `keys.log`/`keys.witness` entry that fails to bind at `active_index` is not necessarily
+/// wrong: a `propagation-complete` receipt legitimately carries entries for TWO checkpoints (A
+/// and D, each authenticated separately, format §2.2) that can be active under different
+/// manifest versions, so the same physical key may appear twice under different bindings.
+/// Binding is therefore tolerant per entry rather than all-or-nothing for the whole array: any
+/// entry that binds successfully is usable; an entry that doesn't is simply not usable FOR THIS
+/// CHECKPOINT, and only becomes an error if no entry for that `key_id` ever bound — in which
+/// case the error still names that entry's own (wrong) binding index, not `active_index`, so a
+/// genuinely mis-bound single entry is reported precisely.
+///
+/// Shared by [`verify_checkpoint`] (the primary `anchoring.checkpoint`) and
+/// [`authenticate_checkpoint`] (`later_checkpoint` and propagation's own declared D) — every
+/// receipt-borne checkpoint this crate authenticates resolves its keys the same way.
+fn bind_keys_by_group(
+    receipt: &Value,
+    policy: &TrustPolicy,
+    scope: &KeyScope<'_>,
+    group: &str,
+) -> Result<BoundKeys> {
+    let &KeyScope { manifests, active_index, unestablished_from, complete } = scope;
+    let keys = obj(receipt, "keys")?;
+    let mut bound = BTreeMap::new();
+    let mut attempted_index = BTreeMap::new();
+    let mut untrusted = BTreeSet::new();
+    for entry in array(keys, group)? {
+        check_key_id(entry)?;
+        let key_id = text(entry, "key_id")?.to_owned();
+        // I-D §7.1 judges a `manifest-chain` entry against the manifest version ITS BINDING
+        // names, not against the checkpoint being verified: "A `manifest-chain` key that matches
+        // no object in the manifest version its binding names, or that differs from the matching
+        // object in any compared member, is `invalid`." So every such entry is validated here,
+        // whether or not this checkpoint goes on to select it — an unused entry that matches
+        // nothing is as much a defect as a used one, and only the SELECTION below is conditional.
+        //
+        // Two cases are not defects. The named version may be one the walk has not reached yet
+        // (inside 4b(M), where `manifests` is a prefix), or one it stopped short of; neither is
+        // decidable here, so the entry is left unvalidated and unselected, and the assertion
+        // that would have used it already rests on `governance`.
+        if text(entry, "source")? == "manifest-chain" {
+            let binding_index = number(obj(entry, "binding")?, "entry_index")?;
+            match manifests.iter().find(|(index, _)| *index == binding_index).copied() {
+                Some((_, manifest)) => {
+                    match_manifest_key_object(entry, group, manifest)?;
+                }
+                None if complete
+                    && unestablished_from.is_none_or(|stopped| binding_index < stopped) =>
+                {
+                    return Err(ReceiptError::KeyNotBound { key_id, entry_index: binding_index });
+                }
+                None => {
+                    attempted_index.entry(key_id.clone()).or_insert(binding_index);
+                    continue;
+                }
+            }
+        }
+        match bind_log_or_witness_key(policy, manifests, entry, group, active_index) {
+            Ok(resolved) => {
+                bound.insert(key_id, resolved);
+            }
+            // The tolerance below is for `manifest-chain` entries only, and exists for one
+            // reason: a receipt authenticating two checkpoints legitimately carries the same
+            // physical key twice, bound to each checkpoint's own manifest version, so a
+            // failure at THIS `active_index` is not yet a defect. Neither of these two is of
+            // that kind. A `local-policy` key policy does not hold cannot bind at any active
+            // index, and an unrecognized `source` is a schema failure of the entry itself;
+            // tolerating either would replace a precise report with a missing-key one.
+            // An unrecognized `source` is a schema failure of the entry itself and ends the
+            // run. A `local-policy` key policy does not hold is the other thing entirely: a gap
+            // in the VERIFIER's configuration (I-D §7.1, §7.7). It is REMEMBERED here and
+            // reported nowhere: §7.1's obligation is conditional on use — "Every key USED in
+            // verification MUST appear in `keys`" — so an entry no cosignature names costs the
+            // run nothing, and the gap is recorded at the cosignature that actually reaches for
+            // it ([`verify_witness_cosignatures`]). The key is left unbound and remembered,
+            // because a cosignature naming it is unevaluated rather than bound to a missing key.
+            Err(ReceiptError::WitnessKeyNotTrusted { .. }) => {
+                untrusted.insert(key_id);
+            }
+            Err(error @ ReceiptError::Malformed(_)) => return Err(error),
+            Err(_) if !bound.contains_key(&key_id) => {
+                let index = obj(entry, "binding")
+                    .and_then(|b| number(b, "entry_index"))
+                    .unwrap_or(active_index);
+                attempted_index.entry(key_id).or_insert(index);
+            }
+            Err(_) => {}
+        }
+    }
+    Ok((bound, attempted_index, untrusted))
+}
+
+/// I-D §7.5 step 2, in one place: the pinned profile is held, at the pinned hash, this build
+/// can interpret it, it defines what the receipt asks of it, and any carried `raw` form
+/// reconciles.
+///
+/// The `unverifiable` outcomes and the `invalid` one are deliberately separated: "If the
+/// verifier possesses NO profile under that id, it lacks a capability and the result is
+/// `unverifiable`. If it possesses a profile under that id whose HASH DIFFERS from the
+/// receipt's, the receipt and the profile it names disagree, which is decidable from the bytes
+/// in hand, and the result is `invalid`."
+fn resolve_adaptor_profile<'a>(
+    policy: &'a TrustPolicy,
+    anchoring: &Value,
+    adaptor_id: &str,
+    adaptor: &Value,
+) -> Result<&'a AdaptorProfile> {
+    let profile = policy
+        .adaptor_profiles
+        .get(adaptor_id)
+        .ok_or_else(|| ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() })?;
+    if profile.hash() != text(adaptor, "hash")? {
+        return Err(ReceiptError::AdaptorHashMismatch { id: adaptor_id.to_owned() });
+    }
+    // The held document is the one the receipt names; whether this build can INTERPRET a
+    // receipt under that profile is the next question, and it is answered from the id alone
+    // (see [`check_profile_supported`]) — before the governance induction, never after it.
+    check_profile_supported(adaptor_id)?;
+    // I-D §7.1, §7.5 step 2: "WHERE `raw` is carried it MUST parse to the same values" — a
+    // capability boolean is not itself reconciliation. This build wires NO profile's `raw`
+    // parser into the verifier ([`TEST_ADAPTOR_PROFILE_ID`]'s own doc comment), so a policy
+    // asserting `checkpoint_raw: true` for ANY profile can never make good on that claim, and
+    // is refused here, once, as a POLICY defect — never silently downgraded to "accept `raw`
+    // unparsed" for every receipt this policy verifies.
+    if profile.capabilities.checkpoint_raw {
+        return Err(ReceiptError::AdaptorProfileMisconfigured {
+            id: adaptor_id.to_owned(),
+            capability: "a binary checkpoint framing for `checkpoint.raw`",
+        });
+    }
+    // I-D §7.1, §7.5 step 2: `continued_history` needs a consistency proof, and a profile
+    // that defines no serialization for one cannot supply it. That is a fact about the pinned
+    // profile and the receipt's own members, so it belongs to profile resolution — decided
+    // before step 3 reads the path it would have to recompute, and reported as unverifiable
+    // under that profile rather than as a defect in the proof.
+    if (anchoring.get("later_checkpoint").is_some() || anchoring.get("consistency_path").is_some())
+        && !profile.capabilities.consistency_proofs
+    {
+        return Err(ReceiptError::AdaptorCapabilityUnsupported {
+            id: adaptor_id.to_owned(),
+            capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
+        });
+    }
+    // I-D §7.5 step 2: "Where a raw checkpoint form is carried… verify that it parses to the
+    // same values as the JSON members."
+    reconcile_anchoring_raw(anchoring, adaptor_id)?;
+    Ok(profile)
+}
 
 fn verify_checkpoint(
     receipt: &Value,
+    policy: &TrustPolicy,
     governance: &Governance<'_>,
     profile: &AdaptorProfile,
     profile_id: &str,
-    budget: &mut Budget,
+    continued_history: bool,
+    run: &mut Run,
 ) -> Result<Anchoring> {
     let anchoring = obj(receipt, "anchoring")?;
-    let checkpoint = obj(anchoring, "checkpoint")?;
-    // Whether these are usable is a property of the pinned profile document, not of this
-    // verifier: `ahl-test-log-v1` defines neither, so receipts under it may carry neither.
-    if checkpoint.get("raw").is_some() && !profile.capabilities.checkpoint_raw {
-        return Err(ReceiptError::AdaptorCapabilityUnsupported {
-            id: profile_id.to_owned(),
-            capability: "a binary checkpoint framing for `anchoring.checkpoint.raw`",
-        });
-    }
+    let checkpoint = checkpoint_object(obj(anchoring, "checkpoint")?)?;
     let tree_size = number(checkpoint, "tree_size")?;
-    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
     let (active_index, active_manifest) = governance.active_for(tree_size)?;
+    let active_log = log_object(active_manifest)?;
+
+    // I-D §3.2: `anchoring.adaptor` must name the SAME profile the active manifest's own
+    // `log.adaptor` pins — checked before ANYTHING profile-specific, `raw` reconciliation and
+    // signature verification both included.
+    check_adaptor_binding(active_log, profile_id, profile)?;
 
     // The log id must match the manifest version active for the checkpoint (adaptor §5).
-    if text(obj(active_manifest, "log")?, "id")? != text(checkpoint, "log_id")? {
+    if text(active_log, "log_id")? != text(checkpoint, "log_id")? {
         return Err(ReceiptError::GovernanceChainInvalid(
             "checkpoint `log_id` is not the log the active manifest declares".to_owned(),
         ));
     }
 
-    // A `keys.log`/`keys.witness` entry that fails to bind at `active_index` is not necessarily
-    // wrong: a `propagation-complete` receipt legitimately carries entries for TWO checkpoints
-    // (A here, and D — authenticated separately, spec §2.2) that can be active under different
-    // manifest versions, so the same physical key may appear twice under different bindings.
-    // Binding is therefore tolerant per entry rather than all-or-nothing for the whole array:
-    // any entry that binds successfully is usable; an entry that doesn't is simply not usable
-    // FOR THIS CHECKPOINT, and only becomes an error if no entry for that `key_id` ever bound —
-    // in which case the error still names that entry's own (wrong) binding index, not
-    // `active_index`, so a genuinely mis-bound single entry is reported precisely.
-    let keys = obj(receipt, "keys")?;
-    let bind_all = |group: &str| -> Result<BoundAndAttempted> {
-        let mut bound = BTreeMap::new();
-        let mut attempted_index = BTreeMap::new();
-        for entry in array(keys, group)? {
-            check_key_id(entry)?;
-            let key_id = text(entry, "key_id")?.to_owned();
-            match bind_log_or_witness_key(governance, entry, group, active_index) {
-                Ok(pubkey) => {
-                    bound.insert(key_id, pubkey);
-                }
-                Err(_) if !bound.contains_key(&key_id) => {
-                    let index = obj(entry, "binding")
-                        .and_then(|b| number(b, "entry_index"))
-                        .unwrap_or(active_index);
-                    attempted_index.entry(key_id).or_insert(index);
-                }
-                Err(_) => {}
-            }
-        }
-        Ok((bound, attempted_index))
-    };
-    let (log_keys, log_attempted) = bind_all("log")?;
-    let (witness_keys, witness_attempted) = bind_all("witness")?;
+    let (log_keys, log_attempted, _) =
+        bind_keys_by_group(receipt, policy, &governance.scope_at(active_index), "log")?;
+    // A `local-policy` witness key the verifier does not hold is a gap in the VERIFIER's
+    // configuration (I-D §7.1, §7.7): it settles the witness assertion `unverifiable` for the
+    // cosignatures that name it and stops nothing else — not the checkpoint signature below,
+    // which is under a log key, and not the cosignatures naming keys that did resolve.
+    run.phase(Assertion::Witnesses);
+    let witness_binding =
+        bind_keys_by_group(receipt, policy, &governance.scope_at(active_index), "witness")?;
+    run.phase(Assertion::CheckpointAuthentication);
 
     let signing_key = log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| {
         let key_id = text(checkpoint, "key_id").unwrap_or_default().to_owned();
         let entry_index = log_attempted.get(&key_id).copied().unwrap_or(active_index);
         ReceiptError::KeyNotBound { key_id, entry_index }
     })?;
-    budget.spend(1)?;
+    run.spend(1)?;
     if !verify_signature(
-        &decode_pubkey(signing_key)?,
-        &checkpoint_signing_bytes(checkpoint)?,
+        &decode_pubkey(&signing_key.pubkey)?,
+        &checkpoint_signing_bytes_for(checkpoint, profile_id)?,
         text(checkpoint, "signature")?,
     )? {
         return Err(ReceiptError::CheckpointSignatureInvalid);
     }
 
+    // No witness key resolved means no cosignature over THIS checkpoint can be evaluated and
+    // the L3 rule below cannot be decided either. Both are the witness assertion's own
+    // `unverifiable` outcome, already recorded; `None` keeps "not evaluated" apart from "none
+    // verified", which §7.6 would otherwise read as an assurance disagreement. It is not a
+    // reason to stop: the later checkpoint below is a different checkpoint, with its own log
+    // signature and its own cosignatures, and §7.6 asks a separate question about it.
+    let witnessed = verify_witness_cosignatures(
+        anchoring,
+        "witnesses",
+        &WitnessContext { checkpoint, active_manifest, active_index, tree_size },
+        witness_binding,
+        run,
+    )?;
+    run.phase(Assertion::CheckpointAuthentication);
+
+    // 4f applies to `later_checkpoint` on the same terms, against the manifest version active
+    // for ITS tree size. Its consistency path was recomputed in step 3, unauthenticated; this
+    // is what makes both roots the log's.
+    //
+    // §7.6 states `continued_history` as its own rule — "`later_checkpoint`, `later_witnesses`,
+    // and `consistency_path` are present and verify" — so it is evaluated whatever happened to
+    // the PRIMARY checkpoint's cosignatures. `None` here means only that its own evaluation was
+    // blocked by a gap (a witness key local policy does not hold, for the later checkpoint's
+    // own cosignatures); a check that RAN and failed is `invalid` and ends the run, which is
+    // what keeps a defective later checkpoint from hiding behind an unrelated gap.
+    let continued = if continued_history {
+        authenticate_continued_history(
+            receipt, policy, governance, anchoring, profile, profile_id, run,
+        )?
+        .map(|()| true)
+    } else {
+        Some(false)
+    };
+    run.phase(Assertion::CheckpointAuthentication);
+
+    Ok(Anchoring { witnessed, continued_history: continued })
+}
+
+/// The checkpoint one cosignature set is about, and the manifest version active for it.
+#[derive(Clone, Copy)]
+struct WitnessContext<'a> {
+    checkpoint: &'a Value,
+    active_manifest: &'a Value,
+    active_index: u64,
+    tree_size: u64,
+}
+
+/// The witness half of 4f over one checkpoint: every carried cosignature verifies under the key
+/// the manifest version active for that checkpoint declares, and at L3 at least one does.
+///
+/// `Ok(Some(true))` — at least one cosignature verified. `Ok(Some(false))` — every carried
+/// cosignature was evaluated and none verified, at a level that does not require one.
+/// `Ok(None)` — at least one cosignature names a key local policy does not hold, and none of
+/// the others verified, so neither §7.6's `witnessed` rule nor the L3 rule can be decided from
+/// what this verifier holds. A cosignature that RAN and failed is `invalid` and ends the run.
+fn verify_witness_cosignatures(
+    anchoring: &Value,
+    member: &'static str,
+    context: &WitnessContext<'_>,
+    binding: BoundKeys,
+    run: &mut Run,
+) -> Result<Option<bool>> {
+    let &WitnessContext { checkpoint, active_manifest, active_index, tree_size } = context;
+    let (witness_keys, witness_attempted, untrusted) = binding;
+    let what = format!("anchoring.{member}");
+    run.phase(Assertion::Witnesses);
     let mut witnessed = false;
-    for cosignature in anchoring.get("witnesses").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+    let mut unevaluated = false;
+    for cosignature in cosignature_array(anchoring, member, &what)? {
+        let cosignature = witness_cosignature_object(cosignature)?;
         let witness_id = text(cosignature, "witness_id")?.to_owned();
         let key_id = text(cosignature, "key_id")?;
-        let pubkey = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
+        // A cosignature naming a key local policy does not hold is where the gap becomes real:
+        // §7.1's key obligation is conditional on USE, so it is recorded here rather than when
+        // the entry failed to bind, and this cosignature is unevaluated. Reporting it as a key
+        // that failed to bind would state a defect of the receipt over a key the verifier
+        // simply does not hold.
+        if untrusted.contains(key_id) {
+            unevaluated = true;
+            run.tolerate::<()>(Err(ReceiptError::WitnessKeyNotTrusted {
+                key_id: key_id.to_owned(),
+            }))?;
+            continue;
+        }
+        let resolved = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
             key_id: key_id.to_owned(),
             entry_index: witness_attempted.get(key_id).copied().unwrap_or(active_index),
         })?;
-        budget.spend(1)?;
+        check_witness_identity(resolved, key_id, &witness_id)?;
+        check_witness_declared(active_manifest, &witness_id, tree_size)?;
+        run.spend(1)?;
         if !verify_signature(
-            &decode_pubkey(pubkey)?,
+            &decode_pubkey(&resolved.pubkey)?,
             &cosignature_bytes(checkpoint, &witness_id),
             text(cosignature, "cosignature")?,
         )? {
@@ -981,24 +5173,141 @@ fn verify_checkpoint(
         }
         witnessed = true;
     }
-
-    // `continued_history` requires a later checkpoint plus a verifying consistency proof.
-    // A profile that defines no consistency-proof serialization cannot supply one, so the
-    // claim is unverifiable *under that profile* — reject rather than accept it unchecked.
-    let continued_history = anchoring.get("later_checkpoint").is_some();
-    if continued_history && !profile.capabilities.consistency_proofs {
-        return Err(ReceiptError::AdaptorCapabilityUnsupported {
-            id: profile_id.to_owned(),
-            capability: "a consistency-proof serialization for `anchoring.later_checkpoint`",
-        });
+    if witnessed {
+        return Ok(Some(true));
     }
-    if continued_history {
-        // A profile that does declare the capability still owes an actual verified proof;
-        // no such profile exists in this tranche, so nothing can reach acceptance here.
+    if unevaluated {
+        return Ok(None);
+    }
+    // I-D §3.3, §7.5: "At L3 a verifier accepts a checkpoint C only with a valid witness
+    // cosignature" — `active_manifest`'s `level` is already known to be exactly one of
+    // `L1`/`L2`/`L3` ([`manifest_scope_fields`] ran during `read_chain`), so this reads it
+    // rather than re-deriving anything. Reached only where every carried cosignature WAS
+    // evaluated, since otherwise "none verified" is not a fact this verifier established.
+    if active_manifest.get("level").and_then(Value::as_str) == Some("L3") {
+        return Err(ReceiptError::CheckpointUnwitnessed { tree_size });
+    }
+    Ok(Some(false))
+}
+
+/// The key-independent half of `continued_history` (I-D §7.5 step 3: "`consistency_path`
+/// recomputes between `anchoring.checkpoint.root_hash` and `later_checkpoint.root_hash` where
+/// `continued_history` is asserted"), returning whether a later checkpoint is carried at all.
+///
+/// Three things have to hold before the claim can be about anything, and each is decidable
+/// with no key in hand:
+///
+/// 1. **Both members are present.** §2.3 states the equivalence — `continued_history` is true
+///    *iff* `later_checkpoint` and `consistency_path` verify — so a later checkpoint with no
+///    proof, or a proof with no checkpoint, is malformed rather than a weaker claim. §7.1 adds
+///    `later_witnesses`, present if and only if `later_checkpoint` is.
+/// 2. **The later checkpoint takes the receipt-borne shape**, and is not SMALLER than the one
+///    the subject is included under: a "later" checkpoint at a smaller tree size proves no
+///    continued history at all; it is the size regression a witness refuses to cosign over.
+/// 3. **The proof verifies**, as an RFC 9162 §2.1.4 consistency proof from the subject
+///    checkpoint's `(tree_size, root_hash)` to the later checkpoint's. A proof that is
+///    structurally impossible for that pair of sizes is a failed proof, not a different error:
+///    a proof generated for some other pair must never validate a claim about this one.
+///
+/// What this establishes is a statement about CARRIED BYTES, exactly as every other step-3
+/// path result is: both roots are still unauthenticated structural commitments here.
+/// [`authenticate_continued_history`] is what makes them the log's, and only then does the
+/// claim's boundary begin. Even then it stops there: a consistency proof shows one tree is an
+/// append-only extension of another; it does not show that a checkpoint the cadence required
+/// was ever published (core spec §7.3), and no verdict rendered from it may say otherwise.
+fn check_continued_history_paths(
+    anchoring: &Value,
+    from_size: u64,
+    from_root: &Hash,
+    run: &mut Run,
+) -> Result<bool> {
+    match (anchoring.get("later_checkpoint"), anchoring.get("consistency_path")) {
+        (None, None) => {
+            // I-D §7.1: `later_witnesses` is "Present if and only if `later_checkpoint` is
+            // carried" — checked here too, before either member's own content is read, so a
+            // stray `later_witnesses` with no `later_checkpoint` at all cannot slip past this
+            // gate unexamined.
+            if anchoring.get("later_witnesses").is_some() {
+                return Err(ReceiptError::Malformed(
+                    "`anchoring.later_witnesses` is present without `later_checkpoint` (I-D \
+                     §7.1: present if and only if `later_checkpoint` is carried)"
+                        .to_owned(),
+                ));
+            }
+            return Ok(false);
+        }
+        (Some(_), None) => {
+            return Err(ReceiptError::Malformed(
+                "`anchoring.consistency_path` is REQUIRED whenever `later_checkpoint` is \
+                 present (§2.1)"
+                    .to_owned(),
+            ))
+        }
+        (None, Some(_)) => {
+            return Err(ReceiptError::Malformed(
+                "`anchoring.later_checkpoint` is REQUIRED whenever `consistency_path` is \
+                 present (§2.1)"
+                    .to_owned(),
+            ))
+        }
+        (Some(_), Some(_)) => {}
+    }
+    if anchoring.get("later_witnesses").is_none() {
+        return Err(ReceiptError::Malformed(
+            "`anchoring.later_witnesses` is REQUIRED whenever `later_checkpoint` is carried \
+             (I-D §7.1)"
+                .to_owned(),
+        ));
+    }
+
+    let later = checkpoint_object(obj(anchoring, "later_checkpoint")?)?;
+    let to_size = number(later, "tree_size")?;
+    if to_size < from_size {
         return Err(ReceiptError::ConsistencyPathInvalid);
     }
+    let to_root = parse_hash_hex(text(later, "root_hash")?)?;
+    let path = path_strings(anchoring, "consistency_path")?;
+    let proof = crate::consistency_from_hex(from_size, to_size, &path)?;
+    run.spend(1)?;
+    match crate::verify_consistency_proof(&proof, from_root, &to_root) {
+        Ok(true) => Ok(true),
+        // `Ok(false)` is a proof that does not open the pair; `Err` is a proof that could not
+        // exist for these sizes at all. Neither establishes continued history, and reporting
+        // them apart would only invite treating the second as a transport problem.
+        Ok(false) | Err(_) => Err(ReceiptError::ConsistencyPathInvalid),
+    }
+}
 
-    Ok(Anchoring { tree_size, root, witnessed, continued_history })
+/// The authenticated half of `continued_history` (I-D §7.5.1 4f: "`later_checkpoint` and its
+/// cosignatures in `anchoring.later_witnesses[]` are validated the same way against the
+/// manifest version active for ITS tree size").
+///
+/// Its log signature is verified against a key declared by the manifest version active for
+/// **its own** `tree_size`, not the subject checkpoint's (§7.1): a key a later manifest
+/// replaced must not validate a checkpoint issued under the later state, and the reverse is
+/// equally true. Its cosignatures are validated against that same version's witness set.
+///
+/// Called only where [`check_continued_history_paths`] has already established that both
+/// members are carried and that the consistency path opens the pair.
+// `profile`/`profile_id` thread the §7.1 raw-checkpoint reconciliation into
+// `authenticate_checkpoint`, identically to every other receipt-borne checkpoint this crate
+// reads; bundling them would only rename this list.
+#[allow(clippy::too_many_arguments)]
+fn authenticate_continued_history(
+    receipt: &Value,
+    policy: &TrustPolicy,
+    governance: &Governance<'_>,
+    anchoring: &Value,
+    profile: &AdaptorProfile,
+    profile_id: &str,
+    run: &mut Run,
+) -> Result<Option<()>> {
+    let later = checkpoint_object(obj(anchoring, "later_checkpoint")?)?;
+    // The later checkpoint's own log signature is checkpoint authentication and is decided
+    // whatever became of the primary checkpoint's cosignatures; a failure here is `invalid`.
+    run.phase(Assertion::CheckpointAuthentication);
+    authenticate_checkpoint(receipt, policy, governance, later, profile, profile_id, run)?;
+    verify_later_witnesses(receipt, policy, governance, anchoring, later, run)
 }
 
 /// Verify an inclusion path carried bare (adaptor profile §2.3) against a root.
@@ -1009,9 +5318,9 @@ fn check_inclusion(
     path: &[String],
     root: &Hash,
     what: &'static str,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
-    budget.spend(1)?;
+    run.spend(1)?;
     let proof = proof_from_hex(leaf_index, tree_size, path)?;
     if crate::verify_inclusion_proof(leaf, &proof, root)? {
         Ok(())
@@ -1041,12 +5350,22 @@ impl Enumeration {
     }
 }
 
-fn verify_enumeration(
+/// Decode enumeration material and authenticate it against the checkpoint root.
+///
+/// This is KEY-INDEPENDENT work of exactly the class I-D §7.5 step 3 collects — "Each is an
+/// integer comparison or a hash recomputation" — so it can, and for governance currency MUST,
+/// run before any signature is verified: §7.5.1 4b walks "the manifest statements of
+/// `governance.chain[]`, merged in entry-index order with the `key` statements the enumeration
+/// material carries", which makes those statements an INPUT to the induction rather than
+/// something the induction produces. As in step 3, `root` is at this point an unauthenticated
+/// structural commitment; 4f is what upgrades every result here from a statement about carried
+/// bytes to a statement about the log's state.
+fn decode_enumeration(
     material: &Value,
     root: &Hash,
     tree_size: u64,
     what: &'static str,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<Enumeration> {
     let range = obj(material, "range")?;
     let from_index = number(range, "from_index")?;
@@ -1076,7 +5395,18 @@ fn verify_enumeration(
                 detail: format!("entry {offset} claims index {claimed}, expected {expected}"),
             });
         }
-        envelopes.push(obj(entry, "envelope")?.clone());
+        let envelope = obj(entry, "envelope")?;
+        // The version read does NOT happen here. I-D §7.5 step 1 exempts an entry an
+        // enumeration alone carries: its "version is read only after its own-index signature
+        // check has passed (Section 7.5.1 4b and 4d): one that does not verify is void with no
+        // version or type validation at all, so that no non-verifying enumeration-only entry can
+        // make a run `unverifiable` merely by declaring a version." So the read moves behind the
+        // signature — into 4b's phase 2 for a governance statement the induction takes, and
+        // after 4d's own-index check for every other enumerated envelope
+        // ([`verify_enumerated_envelopes`]) — and the decode reads nothing of the payload but
+        // its shape.
+        payload_of(envelope)?;
+        envelopes.push(envelope.clone());
     }
 
     let proof = range_proof::decode(text(obj(material, "range_proof")?, "adaptor_form")?)?;
@@ -1091,7 +5421,7 @@ fn verify_enumeration(
             ),
         });
     }
-    budget.spend(u64::try_from(envelopes.len()).unwrap_or(u64::MAX).saturating_add(1))?;
+    run.spend(u64::try_from(envelopes.len()).unwrap_or(u64::MAX).saturating_add(1))?;
     let leaves: Vec<Vec<u8>> = envelopes.iter().map(jcs).collect();
     if !range_proof::verify_over_leaves(&proof, &leaves, root)? {
         return Err(ReceiptError::RangeProofInvalid {
@@ -1103,43 +5433,161 @@ fn verify_enumeration(
     Ok(Enumeration { from_index, to_index, entries: envelopes })
 }
 
+/// I-D §7.5.1 4d over material [`decode_enumeration`] has already authenticated.
+/// I-D §7.5.1 4d over the chain hops the induction skipped as void duplicates (I-D §2.1).
+///
+/// §7.5 step 4: "Establish the key state, and verify EVERY CARRIED ENVELOPE, by the procedure of
+/// the next subsection." §7.5.1 4d: "With K established, verify every carried envelope that is
+/// not part of the induction... An envelope carrying a non-verifying entry, or an entry naming a
+/// key not active at that index, is invalid however many other entries verify." A void duplicate
+/// is carried and was not walked, so it is verified here — at its own entry index, under
+/// completed K, in the same phase and by the same rule as the subject's own envelope.
+///
+/// Past an induction stop the key state at such an index was never established, so the check
+/// does not run: the envelope-validity assertion rests on `governance` and says so, exactly as
+/// the subject's does.
+///
+/// Returns the entry indexes it VERIFIED. The set lets the enumerated sweep skip one repeated
+/// envelope-signature verification of the same envelope: under enumerated governance the same
+/// manifest is also carried by the enumerated range (§7.5.1 4c requires the chain to show every
+/// manifest the range reveals), and repeating the signature check there would charge the §7.8
+/// verification-work budget a second time for one 4d duty. Other charges over that entry — the
+/// range proof, for one — are separate work and stay where they are; §7.8 makes the budget
+/// verifier-local policy and defines no unit of work.
+fn verify_void_chain_envelopes(
+    governance: &Governance<'_>,
+    run: &mut Run,
+) -> Result<BTreeSet<u64>> {
+    let mut verified = BTreeSet::new();
+    for (index, envelope) in &governance.void_chain {
+        if governance.established_at(*index) {
+            verify_envelope_at(envelope, governance, *index, run)?;
+            verified.insert(*index);
+        }
+    }
+    Ok(verified)
+}
+
+fn verify_enumerated_envelopes(
+    enumeration: &Enumeration,
+    governance: &Governance<'_>,
+    verified_directly: &BTreeSet<u64>,
+    run: &mut Run,
+) -> Result<()> {
+    // I-D §7.5.1 4d: with K established, every carried envelope that is NOT part of the
+    // induction is verified under the envelope signature rule of §2.1 at ITS OWN entry index —
+    // enumerated material included, and no subset of it. What a failure MEANS is decided by
+    // RELIANCE: "For every other carried envelope — a purported competing-trigger envelope, an
+    // entry of a propagation prefix, any entry an enumeration reveals — a non-verifying envelope
+    // is VOID (Section 2.1): it is excluded before any authority comparison, it is never
+    // effective and never traversed, it does not affect the result, and the verifier reports it
+    // as an informative item naming its entry index." Nothing here is an envelope the receipt
+    // rests on, so nothing here is `invalid`: the run carries on and the entry is recorded.
+    // §8.4 still puts validity and authority as two tests in order — "Validity and
+    // authorization are separate tests, applied in that order" — so only a VALID envelope is
+    // ever tested for authority, and a void one "is never effective, whoever signed it, and it
+    // is not a challenge" (4e).
+    //
+    // This runs after the range proof, so every envelope verified here has already been shown
+    // to be the entry the log committed at that index, rather than carried bytes claiming to
+    // be. It is the one choke point all three enumerated forms pass through — governance
+    // currency, competing-trigger candidates, and the propagation-completeness prefix.
+    for (offset, envelope) in enumeration.entries.iter().enumerate() {
+        // 4d's scope is "every carried envelope that is NOT part of the induction", and the
+        // exclusion is load-bearing rather than a convenience. A `manifest` or `key` statement
+        // was already verified by [`read_chain`] under 4b phase 1, "against K AS ESTABLISHED SO
+        // FAR — the governance state in force immediately before this statement's own entry
+        // index", and its effect applied only afterwards (phase 3). Verifying it a second time
+        // under COMPLETED K at its own index applies a different state to the same envelope: a
+        // `key` statement retiring the very key that signed it is conforming — it is signed
+        // under the pre-effect state — yet post-effect that key is no longer resolvable at that
+        // index, so the second check would reject a statement the induction accepted. Deciding
+        // 4d by the state that already includes a statement's own effect is not what 4b/4d
+        // ask for.
+        //
+        // Membership is decided by what the induction WALKED, at the entry index it walked it
+        // at — not by statement type. The enumerated `key` statements ARE the induction's second
+        // stream and the enumerated `manifest` statements are in the chain it walked
+        // ([`check_manifest_completeness`] requires it, before 4d runs at all), so a governance
+        // statement the induction walked is exempt for the reason above. A VOID duplicate
+        // (I-D §2.1) is not: the induction skipped it, so nothing has verified it, and 4d's
+        // "every carried envelope that is not part of the induction" reaches it. Exempting by
+        // type would exempt it too, since it carries the same type — and the same statement id —
+        // as the copy that governs.
+        let index = enumeration.from_index + offset as u64;
+        // Already verified, and already charged: the indexes the induction walked (4b phase 1)
+        // and the void chain hops the direct 4d sweep just verified. §7.8's work budget counts
+        // verifications, so one carried envelope must cost one.
+        if governance.walked_indexes.contains(&index) || verified_directly.contains(&index) {
+            continue;
+        }
+        if !evaluate_envelope_at(envelope, governance, index, run)? {
+            // Void: no version read, no type validation, no effect anywhere. §7.5 step 1 exempts
+            // an enumeration-only entry from the version read "until its own-index signature
+            // check has passed... so that no non-verifying enumeration-only entry can make a run
+            // `unverifiable` merely by declaring a version".
+            continue;
+        }
+        // §7.1: a carried statement declaring an unsupported `ahl_version` "is `unverifiable` as
+        // for any carried statement" — a finding, and not the end of the run, which §7.5 step 1
+        // reserves for the receipt's own `ahl_receipt_version`. This entry is one the enumeration
+        // alone carries and the receipt does not rest on: nothing of it is validated under rules
+        // this document does not have, and it is SET ASIDE — neither a competing candidate nor a
+        // statement the closure traverses, on the same footing as a void entry. It is reported as
+        // a FINDING rather than an informative item, because unlike a void entry it is not a
+        // fact about the artifact: this verifier cannot read it, and a verifier of that revision
+        // could.
+        if let Err(error @ ReceiptError::UnsupportedVersion { .. }) =
+            check_ahl_version(payload_of(envelope)?)
+        {
+            run.record_gap(error);
+            run.set_aside(index);
+            continue;
+        }
+        // Phase 2 for a non-induction enumerated envelope, and strictly after 4d's signature:
+        // I-D §7.5.1 4b states the three-phase order "for both types" of governance statement,
+        // and the reason it gives is general — "Type-specific validation MUST NOT run on
+        // material whose signature has not verified... Running that work first lets anyone able
+        // to hand a verifier a receipt drive it." Nothing about that argument is peculiar to
+        // governance statements, so §2.2's common payload fields are checked here rather than
+        // at the decode. This remains the one choke point all three enumerated forms pass
+        // through — governance currency, competing-trigger candidates, and the
+        // propagation-completeness prefix — before any claim-specific check reads a payload.
+        common_payload_fields(payload_of(envelope)?)?;
+    }
+
+    Ok(())
+}
+
+/// All three enumerated forms that are read AFTER K exists: decode, authenticate, then 4d.
+fn verify_enumeration(
+    material: &Value,
+    governance: &Governance<'_>,
+    root: &Hash,
+    tree_size: u64,
+    what: &'static str,
+    run: &mut Run,
+) -> Result<Enumeration> {
+    let enumeration = decode_enumeration(material, root, tree_size, what, run)?;
+    // No direct-sweep exemption here: these are the CLAIM's own ranges (competing triggers, the
+    // completeness prefix), each verified as its own carried material. What the governance path
+    // exempts is the one duty discharged twice over one envelope — the 4d sweep over the void
+    // chain hops, which runs before the currency range's own sweep.
+    verify_enumerated_envelopes(&enumeration, governance, &BTreeSet::new(), run)?;
+    Ok(enumeration)
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Verify an Evidence Receipt against locally configured policy.
+/// Read the two container versions and act on them, per I-D §7.5 step 1.
 ///
-/// Implements the receipt format's §5 algorithm in order: parse and versions and §3.1 limits;
-/// adaptor-profile resolution; checkpoint, key binding, witness cosignatures and inclusion;
-/// governance chain from the configured genesis anchor; the §3 claim-material schema; the §2.3
-/// cross-field consistency rules; and finally the rendered boundary.
-///
-/// # Errors
-///
-/// Returns the [`ReceiptError`] variant naming the first rule that rejected the receipt.
-pub fn verify_receipt(receipt: &Value, policy: &TrustPolicy) -> Result<Verdict> {
-    let encoded = jcs(receipt);
-    if encoded.len() > policy.limits.max_decoded_bytes {
-        return Err(ReceiptError::LimitExceeded("decoded size budget"));
-    }
-    let mut budget = Budget::new(policy.limits);
-    let verdict = verify_nested(receipt, policy, &mut budget, 0)?;
-    Ok(Verdict { embedded_receipts: budget.embedded, ..verdict })
-}
-
-/// Verify a receipt at nesting `depth`, sharing the whole tree's resource budget.
-// The §5 algorithm is a fixed ordered sequence of steps; splitting it into helpers that each
-// take the growing set of intermediate results would obscure the order the format mandates.
-#[allow(clippy::too_many_lines)]
-fn verify_nested(
-    receipt: &Value,
-    policy: &TrustPolicy,
-    budget: &mut Budget,
-    depth: usize,
-) -> Result<Verdict> {
-    budget.enter(depth)?;
-
-    // --- §5 step 1: versions, identifiers -------------------------------------------
+/// Both are read before anything else because revision 0.4 "verifies no material issued under
+/// any earlier revision" (§2.2, §7.1): a version this build does not implement is a capability
+/// gap, [`ReceiptError::UnsupportedVersion`] — `unverifiable` under §7.7, never `invalid` —
+/// and no rule this document states applies to the rest of the bytes.
+fn check_receipt_versions(receipt: &Value) -> Result<()> {
     for (field, expected) in
         [("ahl_receipt_version", RECEIPT_VERSION), ("spec_version", SPEC_VERSION)]
     {
@@ -1152,9 +5600,162 @@ fn verify_nested(
             });
         }
     }
+    Ok(())
+}
+
+/// Verify an Evidence Receipt against locally configured policy, and report the §7.7 result
+/// with the findings it reduces from.
+///
+/// Implements I-D §7.5's algorithm in the order it fixes: step 1, versions before anything
+/// else, then parsing, the §7.8 limits and identifier recomputation; step 2, adaptor-profile
+/// resolution; step 3, the key-independent structural and path checks over the whole carried
+/// document, no signature among them; step 4, the governance bootstrap of §7.5.1 as an
+/// induction from the configured genesis anchor, with the authenticated checkpoint validation
+/// of 4f; step 5, the claim-material requirements of §7.2; step 6, the cross-field rules of
+/// §7.6; and step 7, the result of §7.7 together with the boundary rendered from it, never
+/// stronger than what was proven.
+///
+/// # What the report contains
+///
+/// [`Report::result`] is the scalar value of §7.7 — one receipt, one value — and
+/// [`Report::findings`] is the per-assertion detail §7.7 requires a verifier to report
+/// alongside it, since "the result alone does not say which assertion produced it". A finding
+/// is never a result: a receipt whose content binding is `unverifiable` reports `unverifiable`
+/// as its result AND `verified` on the assertions that did hold.
+///
+/// How far the findings go depends on what stopped the run. An `invalid` finding decides the
+/// result, so the run ends there and the assertions after it are not reported at all. An
+/// `unverifiable` finding does not decide it — `invalid` still dominates — so the run carries
+/// on with every assertion that does not rest on the material it was short of, which is what
+/// lets a defect reached later dominate a capability gap reached earlier. What each gap
+/// reaches is [`prerequisites`], and an assertion resting on an unverifiable one is itself
+/// `unverifiable` with a detail naming that prerequisite. Two conditions end the run even so:
+/// an unsupported version, which §7.5 step 1 follows with "no further processing", and an
+/// exhausted verifier-local budget, which §7.8 requires to fail closed.
+///
+/// [`Report::verdict`] is present if and only if the result is [`Outcome::Verified`]: §7.7
+/// permits only that value to be "rendered in words that assert the property", and no result is
+/// ever represented by rewriting the receipt's own assurance fields.
+///
+/// # Errors
+///
+/// Returns [`ExecutionError`] for a run that did not COMPLETE, which is not a statement about
+/// the receipt and carries none of the three values (§7.7). This build reaches no such
+/// condition today: every rejection it can produce is a completed run reported through
+/// [`Report::result`].
+pub fn verify_receipt_report(
+    receipt: &Value,
+    policy: &TrustPolicy,
+) -> core::result::Result<Report, ExecutionError> {
+    let mut run = Run::new(policy.limits);
+    let outcome = verify_root(receipt, policy, &mut run);
+    Ok(run.into_report(outcome, receipt))
+}
+
+/// Verify an Evidence Receipt against locally configured policy.
+///
+/// The single-value form of [`verify_receipt_report`], for callers that report one rejection
+/// rather than a report: `Ok` if and only if the §7.7 result is [`Outcome::Verified`], and
+/// otherwise the rejection behind the finding that decided the result — the `invalid` one if
+/// there is one, since `invalid` dominates, and otherwise the first `unverifiable` one.
+///
+/// The findings themselves are not reachable through this signature, so a caller that must
+/// distinguish `invalid` from `unverifiable`, or show which assertion produced the result,
+/// wants [`verify_receipt_report`]. [`ReceiptError::class`] gives the value of a single
+/// rejection.
+///
+/// # Errors
+///
+/// Returns the [`ReceiptError`] variant naming the rule that decided the result.
+pub fn verify_receipt(receipt: &Value, policy: &TrustPolicy) -> Result<Verdict> {
+    let mut run = Run::new(policy.limits);
+    let verdict = verify_root(receipt, policy, &mut run)?;
+    // A rejection the run recorded and carried on from still decides the result, and this
+    // signature has exactly one way to report it.
+    run.dominating_deferred().map_or(Ok(verdict), Err)
+}
+
+/// The §7.5 algorithm over the outermost receipt, shared by both entry points.
+fn verify_root(receipt: &Value, policy: &TrustPolicy, run: &mut Run) -> Result<Verdict> {
+    // I-D §7.5 step 1: "Read `ahl_receipt_version` and act on it BEFORE ANY OTHER CHECK,
+    // including schema validation... THEN parse the receipt, enforce the resource limits of
+    // Section 7.8." The order decides what the holder of a receipt is told. A version this
+    // build does not implement is `unverifiable` under §7.7 at ANY size, and reporting the
+    // decoded-size budget first would send its holder to produce a smaller receipt that this
+    // verifier would refuse just the same — a verifier-local budget presented as the reason a
+    // fixed capability gap stopped the run.
+    //
+    // This crate is handed an ALREADY-PARSED document, so the parse-size cap §7.8 places
+    // before that read has no work left to bound here: the decision costs two member lookups
+    // on a parsed object, and nothing is decoded, canonicalized or hashed to reach it. The
+    // §7.8 decoded-size budget — the verifier-local one, measured over the whole receipt's
+    // canonical form — is enforced immediately afterwards, still ahead of every semantic and
+    // cryptographic check, which is where the rest of step 1 puts it.
+    check_receipt_versions(receipt)?;
+    let encoded = jcs(receipt);
+    if encoded.len() > policy.limits.max_decoded_bytes {
+        return Err(ReceiptError::BudgetExhausted {
+            budget: DECODED_SIZE_BUDGET,
+            in_force: policy.limits.max_decoded_bytes as u64,
+        });
+    }
+    let verdict = verify_nested(receipt, policy, run, 0)?;
+    Ok(Verdict { embedded_receipts: run.embedded, ..verdict })
+}
+
+/// Verify a receipt at nesting `depth`, sharing the whole tree's resource budget.
+// The §7.5 algorithm is a fixed ordered sequence of steps; splitting it into helpers that each
+// take the growing set of intermediate results would obscure the order the I-D mandates.
+#[allow(clippy::too_many_lines)]
+fn verify_nested(
+    receipt: &Value,
+    policy: &TrustPolicy,
+    run: &mut Run,
+    depth: usize,
+) -> Result<Verdict> {
+    // --- §7.5 step 1: versions, identifiers -----------------------------------------
+    // Re-read here rather than assumed from the caller: an embedded receipt reaches this
+    // function without passing through [`verify_receipt`], and §7.5 step 1's rule is about
+    // every receipt, the embedded ones included (§7.1).
+    //
+    // It runs BEFORE [`Run::enter`], because §7.5 step 1 is explicit about the order — "Read
+    // `ahl_receipt_version` and act on it before any other check, including schema validation.
+    // THEN parse the receipt, enforce the resource limits of Section 7.8" — and the two
+    // outcomes are not interchangeable at any depth. An unsupported version is a fixed property
+    // of the artifact, `unverifiable` under §7.7 for every verifier; the nesting-depth and
+    // embedded-count caps are §7.8 limits this verifier reports as `invalid`. Entering first
+    // would tell the holder of a deeply nested receipt of an unsupported revision that the
+    // nesting is the defect, and a verifier configured with a deeper limit would then report
+    // the version instead — two verifiers contradicting each other over one artifact. The read
+    // itself is two member lookups on an already-parsed object, so nothing is decoded, hashed
+    // or recursed into ahead of the budget it precedes.
+    // The dependence I-D §7.7 draws between findings is between the assertions of ONE receipt,
+    // so each receipt starts with none and the enclosing receipt's state is put back before
+    // this one's verdict is returned. The enclosing PHASE goes back with it: an embedded
+    // receipt is verified inside its parent's claim-material step, and the parent's remaining
+    // phases are its own.
+    let enclosing_block = std::mem::take(&mut run.blocked);
+    let enclosing_phase = run.scope.take();
+    run.phase(Assertion::Versions);
+    check_receipt_versions(receipt)?;
+    // I-D §7.8's FIXED limits: a property of the artifact's structure, not a budget.
+    run.phase(Assertion::Structure);
+    run.enter(depth)?;
+    run.pass(Assertion::ResourceLimits);
 
     let envelope = obj(receipt, "envelope")?;
     let subject = obj(receipt, "subject")?;
+    // I-D §2.2 / §7.1 / §7.5 step 1: every carried statement's `ahl_version` is checked
+    // BEFORE validating that statement — id recomputation and every other per-envelope check
+    // included, the subject's own envelope included. Reading `payload_of` needs no trust in
+    // `subject`'s own copied fields, so it can run first; checking version on it before
+    // touching `subject.statement_id`/`entry_id` is what keeps a foreign-version subject from
+    // being reported `invalid` over a copied identifier this document has no rules for.
+    let payload = payload_of(envelope)?;
+    run.phase(Assertion::Versions);
+    check_ahl_version(payload)?;
+    run.pass(Assertion::Versions);
+    run.phase(Assertion::Structure);
     if text(subject, "statement_id")? != statement_id(envelope)? {
         return Err(ReceiptError::IdentifierMismatch { field: "statement_id" });
     }
@@ -1162,117 +5763,396 @@ fn verify_nested(
         return Err(ReceiptError::IdentifierMismatch { field: "entry_id" });
     }
     let subject_index = number(subject, "entry_index")?;
-    let payload = payload_of(envelope)?;
     let subject_type = statement_type(payload)?.to_owned();
 
-    // --- §5 step 2: adaptor profile -------------------------------------------------
+    // --- §7.5 step 2: adaptor profile ---------------------------------------------
+    // I-D §3.2, §7.5 step 2: "MUST recompute the digest over the artifact rather than trusting
+    // any value carried with it, and MUST reject a receipt whose pinned digest does not match
+    // the artifact held." Two DIFFERENT facts, two DIFFERENT outcomes: the profile id itself
+    // not being held at all is `unverifiable` ([`ReceiptError::AdaptorUnknown`]); the profile
+    // being held but its RECOMPUTED digest disagreeing with what the receipt pins is `invalid`
+    // ([`ReceiptError::AdaptorHashMismatch`]) — the receipt names a document policy can prove
+    // is not the one it trusts, never conflated into the same outcome as simply not knowing
+    // the profile.
+    run.phase(Assertion::AdaptorProfile);
     let adaptor = obj(obj(receipt, "anchoring")?, "adaptor")?;
     let adaptor_id = text(adaptor, "id")?;
-    let profile = policy
-        .adaptor_profiles
-        .get(adaptor_id)
-        .filter(|profile| profile.hash == text(adaptor, "hash").unwrap_or_default())
-        .ok_or_else(|| ReceiptError::AdaptorUnknown { id: adaptor_id.to_owned() })?;
-
-    // --- §5 step 4 (chain structure first: key binding depends on it) ---------------
-    let governance = read_chain(receipt, policy)?;
-
-    // --- §5 step 3: checkpoint, keys, cosignatures, inclusion -----------------------
-    let anchoring = verify_checkpoint(receipt, &governance, profile, adaptor_id, budget)?;
-    if subject_index >= anchoring.tree_size {
-        return Err(ReceiptError::EntryIndexBeyondCheckpoint {
-            entry_index: subject_index,
-            tree_size: anchoring.tree_size,
-        });
+    let anchoring_block = obj(receipt, "anchoring")?;
+    // A capability gap here does not end the run (I-D §7.7): what the profile document fixes is
+    // the checkpoint serialization, so the assertions that rest on it are exactly checkpoint
+    // authentication and the witness cosignatures over it ([`prerequisites`]). Step 3's paths,
+    // the governance induction, envelope validity, the cross-field rules, claim material and
+    // the content binding are all decided without it, and are checked.
+    let resolution = resolve_adaptor_profile(policy, anchoring_block, adaptor_id, adaptor);
+    let profile = run.tolerate(resolution)?;
+    if profile.is_some() {
+        run.pass(Assertion::AdaptorProfile);
     }
-    check_inclusion(
-        &jcs(envelope),
-        subject_index,
-        anchoring.tree_size,
-        &path_strings(obj(receipt, "anchoring")?, "inclusion_path")?,
-        &anchoring.root,
-        "subject",
-        budget,
-    )?;
 
-    // --- §5 step 4: chain anchoring and signatures ----------------------------------
-    for hop in array(obj(receipt, "governance")?, "chain")? {
-        let index = number(hop, "entry_index")?;
-        let hop_envelope = obj(hop, "envelope")?;
-        check_inclusion(
-            &jcs(hop_envelope),
-            index,
-            anchoring.tree_size,
-            &path_strings(hop, "inclusion_path")?,
-            &anchoring.root,
-            "governance chain hop",
-            budget,
-        )?;
-        verify_envelope_at(hop_envelope, &governance, index, budget)?;
-    }
-    verify_envelope_at(envelope, &governance, subject_index, budget)?;
-    // Every producer key the receipt lists must be in force at the subject's entry index under
-    // the §7.2 snapshot rule, bound to the governance statement that put it there (§2.2).
-    bind_producer_keys(receipt, &governance, subject_index)?;
+    // --- §7.5 step 3: key-independent structural and path checks --------------------
+    // "No signature and no cosignature is verified in this step." The checkpoint's own members
+    // are read here only as the structural commitment the carried material is bound to; that
+    // the log issued this root is established at 4f and nowhere earlier.
+    run.phase(Assertion::Structure);
+    check_container_shapes(receipt)?;
+    run.pass(Assertion::Structure);
+    run.phase(Assertion::Anchoring);
+    let checkpoint = checkpoint_object(obj(anchoring_block, "checkpoint")?)?;
+    let tree_size = number(checkpoint, "tree_size")?;
+    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
+    check_key_independent_paths(receipt, envelope, subject_index, tree_size, &root, run)?;
+    let continued_history = check_continued_history_paths(anchoring_block, tree_size, &root, run)?;
+    run.pass(Assertion::Anchoring);
 
-    // --- §2.1 / §4: governance currency ---------------------------------------------
-    let claim = obj(receipt, "claim")?;
-    let assurance_block = obj(claim, "assurance")?;
-    let assurance = Assurance {
-        governance: text(assurance_block, "governance")?.to_owned(),
-        competing_triggers: text(assurance_block, "competing_triggers")?.to_owned(),
-        witnessed: flag(assurance_block, "witnessed")?,
-        continued_history: flag(assurance_block, "continued_history")?,
-        content_binding: text(assurance_block, "content_binding")?.to_owned(),
-    };
+    // Still step 3, and the last of it: the governance currency mode, and — under `enumerated`
+    // — the currency material itself, decoded and recomputed against `root`.
+    //
+    // The mode is a container token, and the two facts read from it here are both decidable
+    // without a key. The material has to be in hand this early because I-D §7.5.1 4b walks
+    // "the manifest statements of `governance.chain[]`, MERGED in entry-index order with the
+    // `key` statements the enumeration material carries": those statements are an INPUT to the
+    // induction, and §7.4 makes enumeration material their only carrier. What runs here is a
+    // range-proof recomputation against the same `root_hash` step 3's inclusion paths run
+    // against, on the same terms — an unauthenticated structural commitment, upgraded wholesale
+    // by 4f — so it precedes every signature without making any signature's outcome depend on
+    // material no key vouches for.
+    run.phase(Assertion::Governance);
     let currency = obj(obj(receipt, "governance")?, "currency")?;
     let mode = text(currency, "mode")?;
+    if !GOVERNANCE_MODES.contains(&mode) {
+        return Err(ReceiptError::Malformed(format!("unknown governance mode `{mode}`")));
+    }
+    // Enumerated currency and a later checkpoint cannot both be evidenced. §2.1 requires the
+    // governance material to cover through `later_checkpoint.tree_size`; §4 fixes enumerated
+    // material at exactly `[0, tree_size(C))` for the receipt's verified checkpoint, which §3
+    // binds to `anchoring.checkpoint`. Since a later checkpoint is at a greater tree size, no
+    // range satisfies both rules, and the format defines no second authenticated range.
+    //
+    // The tempting move is to verify the enumeration through the anchoring checkpoint, accept
+    // the later checkpoint separately, and call the receipt good. That reports as established a
+    // coverage requirement nothing in the receipt proves: a manifest anchored between the two
+    // checkpoints could have rotated the log key set, and the enumeration would never show it.
+    // A defective format is a reason not to fabricate evidence; it is not a reason to declare
+    // missing evidence verified. So the combination is refused, under an error naming the
+    // conflict rather than pretending some rule failed — and refused BEFORE the material is
+    // decoded, since it is a contradiction between two members of the container alone.
+    // Declared mode is unaffected: it makes no currency claim in the first place (§2.1).
+    if mode == "enumerated" && anchoring_block.get("later_checkpoint").is_some() {
+        return Err(ReceiptError::FormatConflict {
+            combination:
+                "enumerated governance currency together with `anchoring.later_checkpoint`",
+            conflict: "receipt format §2.1 requires governance material covering through \
+                       `later_checkpoint.tree_size`, while §4 fixes enumerated material at \
+                       exactly [0, tree_size(anchoring.checkpoint)); no range satisfies both, so \
+                       the coverage §2.1 mandates is absent and the receipt is refused rather \
+                       than accepted on unproven governance",
+        });
+    }
+    let currency_enumeration = match mode {
+        "enumerated" => Some(decode_governance_enumeration(currency, &root, tree_size, run)?),
+        // I-D §7.4: "`governance.chain[]` carries manifest statements; producer-key transitions
+        // are `key` statements, and those reach a verifier only through enumeration material."
+        // Declared mode carries none, so the induction's second stream is empty and the key
+        // state is exactly what the presented chain implies (§7.5.1 4c).
+        _ => None,
+    };
+    let key_statements =
+        currency_enumeration.as_ref().map_or_else(Vec::new, enumerated_key_statements);
+
+    // --- §7.5 step 4: the governance bootstrap, as an induction (4a-4c) -------------
+    let mut governance =
+        read_chain(receipt, policy, profile, adaptor_id, &key_statements, mode, run)?;
+    // 4c under enumerated governance: what the induction walked is everything the range holds.
+    // 4c compares the manifests the induction WALKED against the manifests the range reveals,
+    // so it says nothing where the induction stopped short: the omission it would report is the
+    // verifier's own stopping point, not the receipt's.
+    if let Some(enumeration) = &currency_enumeration {
+        if governance.unestablished_from.is_none() {
+            // The second way the walk can stop, and the SAME state transition as the first: a
+            // VERIFYING governance statement of a revision this document does not define leaves
+            // K "unestablished at and after its index" (I-D §7.5.1 4b), and every K-dependent
+            // check from there on rests on `governance`. The induction reaches such a statement
+            // itself when it is a `key` statement; a manifest is not one of its two streams, so
+            // 4c is where one is met — and the stop it installs is `Governance`'s own, so both
+            // paths leave the run in one state rather than two.
+            if let Some(stopped_at) = check_manifest_completeness(enumeration, &governance, run)? {
+                governance.unestablished_from = Some(stopped_at);
+            }
+        }
+    }
+    run.pass(Assertion::Governance);
+
+    // --- §7.5.1 4f: authenticated checkpoint validation -----------------------------
+    // Only on passing this do step 3's path results become claims about the log's state
+    // rather than about carried bytes.
+    run.phase(Assertion::CheckpointAuthentication);
+    // 4f resolves the checkpoint's log key from the manifest version active for it, and "MUST
+    // NOT resolve a checkpoint-verification or cosignature-validating key from a manifest
+    // version whose log or witness key set was not established by the governance-key
+    // induction". Where the induction stopped below this checkpoint's tree size, that version
+    // is exactly such a manifest, so 4f does not run at all.
+    let established = governance.established_for_tree_size(tree_size);
+    let anchoring = match profile.filter(|_| established) {
+        Some(profile) => Some(verify_checkpoint(
+            receipt,
+            policy,
+            &governance,
+            profile,
+            adaptor_id,
+            continued_history,
+            run,
+        )?),
+        None => None,
+    };
+    run.pass(Assertion::CheckpointAuthentication);
+    run.phase(Assertion::Witnesses);
+    run.pass(Assertion::Witnesses);
+
+    // --- §7.5.1 4d: the remaining carried envelopes ---------------------------------
+    // The subject's own envelope is verified separately, against K FINAL at ITS OWN entry
+    // index (I-D §7.5.1 4d "remaining carried envelopes") — a later, distinct step from the
+    // induction above, not a repetition of it.
+    // I-D §7.4 makes one rejection here `unverifiable` rather than `invalid`: a declared-mode
+    // envelope naming a producer key that mode does not carry. §7.7's reduction is over every
+    // required finding, and `invalid` dominates `unverifiable`, so the run records that finding
+    // and carries on — the assertions after it rest on the same unresolved key and are reported
+    // as resting on it, while a defect reached later still decides the result.
+    run.phase(Assertion::EnvelopeValidity);
+    // §2.1 wants a key active at the envelope's own entry index, which the induction must have
+    // established for that index. Where it did not, the envelope is not checked against a key
+    // state that was never in force; the assertion rests on `governance` and says so.
+    let envelope_valid = if governance.established_at(subject_index) {
+        let envelope_outcome = verify_envelope_at(envelope, &governance, subject_index, run);
+        run.tolerate(envelope_outcome)?
+    } else {
+        None
+    };
+    // The void chain hops are verified here, once. Under enumerated governance the same
+    // envelopes reappear in the range, and the sweep below skips exactly these indexes.
+    let void_verified = verify_void_chain_envelopes(&governance, run)?;
+    // I-D §2.2's common payload fields, checked only now that the subject's own signature has
+    // verified — the same rule chain hops get, applied to the one carried envelope that is
+    // never itself a chain hop.
+    run.phase(Assertion::Structure);
+    common_payload_fields(payload)?;
+    // Every producer key the receipt lists must be in force at the subject's entry index under
+    // the §7.2 snapshot rule, bound to the governance statement that put it there (§2.2).
+    // The receipt's own `keys.producer[]` listing, bound to the governance state that put each
+    // key in force (I-D §7.1, §2.2) — a governance fact rather than a signature.
+    run.phase(Assertion::Governance);
+    if governance.established_at(subject_index) {
+        bind_producer_keys(receipt, &governance, subject_index)?;
+    }
+    run.phase(Assertion::EnvelopeValidity);
+    // Recorded either way: where the check ran and held this is `verified`, and where it was
+    // tolerated or skipped the finding already says `unverifiable` — [`Run::record`] keeps the
+    // dominating outcome, and [`prerequisites`] settles the skipped case as resting on
+    // `governance`.
+    let _ = envelope_valid;
+    run.pass(Assertion::EnvelopeValidity);
+
+    // --- §2.1 / §4: governance currency ---------------------------------------------
+    run.phase(Assertion::CrossField);
+    let claim = obj(receipt, "claim")?;
+    let claim_type = text(claim, "type")?.to_owned();
+    let assurance = read_assurance(obj(claim, "assurance")?, &claim_type)?;
     if assurance.governance != mode {
         return Err(ReceiptError::AssuranceMismatch { field: "governance" });
     }
-    if assurance.witnessed != anchoring.witnessed {
-        return Err(ReceiptError::AssuranceMismatch { field: "witnessed" });
-    }
-    if assurance.continued_history != anchoring.continued_history {
-        return Err(ReceiptError::AssuranceMismatch { field: "continued_history" });
+    // §7.6 compares these two assurance members against what 4f ESTABLISHED, so each is
+    // decidable only where 4f ran. Where the profile that fixes the checkpoint serialization
+    // was not resolved, or where the witness keys could not be resolved from local policy, the
+    // comparison is not a cross-field disagreement the receipt's bytes settle — it is the
+    // checkpoint or witness assertion, already reported `unverifiable`, and asserting a
+    // mismatch here would report a verifier-local gap as a defect of the artifact.
+    if let Some(anchoring) = &anchoring {
+        if let Some(witnessed) = anchoring.witnessed {
+            if assurance.witnessed != witnessed {
+                return Err(ReceiptError::AssuranceMismatch { field: "witnessed" });
+            }
+        }
+        if let Some(continued_history) = anchoring.continued_history {
+            if assurance.continued_history != continued_history {
+                return Err(ReceiptError::AssuranceMismatch { field: "continued_history" });
+            }
+        }
     }
 
-    let claim_type = text(claim, "type")?.to_owned();
-    let enumeration = match mode {
-        "declared" => {
+    // §7.5.1 4d over the currency material. The decode and the range checks already ran at
+    // step 3, because the induction consumed the `key` statements they authenticate; what is
+    // left is the envelope-signature rule over the enumerated entries the induction did NOT
+    // walk, which needs the completed K and therefore belongs here.
+    let enumeration = match &currency_enumeration {
+        None => {
             if !DECLARED_MODE_TYPES.contains(&claim_type.as_str()) {
                 return Err(ReceiptError::AssuranceMismatch { field: "governance" });
             }
             None
         }
-        "enumerated" => {
-            Some(verify_governance_enumeration(currency, &governance, &anchoring, budget)?)
+        Some(enumeration) => {
+            run.phase(Assertion::EnvelopeValidity);
+            // Every enumerated envelope is verified under K at its own entry index, and the
+            // range reaches past the point the induction stopped at. Verifying the prefix alone
+            // would report a partial check as a complete one, so the whole assertion rests on
+            // `governance` instead.
+            if governance.unestablished_from.is_none() {
+                verify_enumerated_envelopes(enumeration, &governance, &void_verified, run)?;
+            }
+            run.phase(Assertion::CrossField);
+            Some(enumeration)
         }
-        other => return Err(ReceiptError::Malformed(format!("unknown governance mode `{other}`"))),
     };
 
-    // --- §2.3: subject-level cross-field consistency --------------------------------
-    let manifest_declared = subject.get("manifest").is_some();
+    // --- §2.3 / I-D §7.6: subject-level cross-field consistency ----------------------
+    // I-D §7.1: `subject.manifest` is `"sha256:<manifest version id>"`. Read once, strictly:
+    // an ill-typed member read as PRESENT for the presence rule below and then as ABSENT by a
+    // later `as_str` would skip the binding check that authenticates the copy entirely.
+    let carried_manifest = match subject.get("manifest") {
+        None => None,
+        Some(Value::String(value)) if is_family_hash(value) => Some(value.as_str()),
+        Some(_) => {
+            return Err(ReceiptError::Malformed(
+                "`subject.manifest`, where present, is a `sha256:` manifest version id under \
+                 the strict acceptance rule (I-D §2.1, §7.1)"
+                    .to_owned(),
+            ))
+        }
+    };
+    let manifest_declared = carried_manifest.is_some();
     if manifest_declared == (subject_type == "manifest") {
         return Err(ReceiptError::SubjectManifestPresence { statement_type: subject_type });
     }
+    // I-D §7.6: "`subject.manifest` equals the subject envelope's `payload.manifest` for
+    // every subject other than a manifest statement. The payload's `manifest` member is
+    // covered by the subject's signature; the receipt's copy is not, so this equality is the
+    // only thing that authenticates the copy. Section 6.3 anchors the descriptor check to the
+    // version this member names, and that check establishes nothing without this rule." And:
+    // "The manifest version named by `subject.manifest` is PRESENT in `governance.chain`... and
+    // that element's `entry_index` is strictly smaller than `subject.entry_index`. A named
+    // version absent from the chain, or anchored at or after the subject, cannot have governed
+    // the subject."
+    if let Some(claimed) = carried_manifest {
+        // Both of these are §7.6 rules over what the receipt itself carries: "A receipt failing
+        // any of them is `invalid`; none of them is ever a capability gap, and none is
+        // downgraded." They are therefore read off the RAW chain index — every version the
+        // chain carries, at the entry index step 3 proved for it — and hold whether or not the
+        // induction later stopped somewhere. They are checked before the equality rule below so
+        // that each is reportable on its own; all three are `invalid` on `cross-field`.
+        let carried_at = governance.chain_index.get(claimed).copied().ok_or_else(|| {
+            ReceiptError::SubjectManifestBindingInvalid(format!(
+                "`subject.manifest` (`{claimed}`) is not PRESENT in `governance.chain`; a named \
+                 version absent from the chain cannot have governed the subject (I-D §7.6)"
+            ))
+        })?;
+        if carried_at >= subject_index {
+            return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
+                "`subject.manifest` (`{claimed}`) is anchored at entry index {carried_at}, not \
+                 strictly before subject.entry_index {subject_index}; a version anchored at or \
+                 after the subject cannot have governed it (I-D §7.6)"
+            )));
+        }
+        let payload_manifest = text(payload, "manifest")?;
+        if claimed != payload_manifest {
+            return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
+                "`subject.manifest` (`{claimed}`) does not equal the subject envelope's own \
+                 `payload.manifest` (`{payload_manifest}`) (I-D §7.6)"
+            )));
+        }
+        // I-D §2.2: "the manifest version active at the statement's entry index — that is, the
+        // manifest statement with the greatest entry index smaller than the statement's own."
+        // Presence in the chain and being strictly before the subject are necessary but NOT
+        // sufficient — `payload.manifest` must name exactly THAT manifest, never a stale,
+        // superseded one, or content-binding descriptor resolution takes `ddig` from the wrong
+        // manifest version (I-D §6.3).
+        //
+        // Which version is ACTIVE at an index is read off the induction's own walk, so where
+        // the induction stopped below that index the question has no answer here: the rule is
+        // left unevaluated and the cross-field finding says so, rather than comparing against a
+        // state that was superseded by the very statement the walk could not authenticate.
+        if governance.established_at(subject_index) {
+            let active =
+                governance.active_manifest_version_id_at(subject_index).ok_or_else(|| {
+                    ReceiptError::SubjectManifestBindingInvalid(format!(
+                "no manifest version is active at subject.entry_index {subject_index} (I-D §2.2)"
+            ))
+                })?;
+            if claimed != active {
+                return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
+                    "`subject.manifest` (`{claimed}`) is not the manifest version ACTIVE at \
+                 subject.entry_index {subject_index} (`{active}`) (I-D §2.2, §7.6)"
+                )));
+            }
+        }
+    }
     let record_subject = check_record_subject(claim, payload, &claim_type, &subject_type)?;
+    // §7.6 lists `witnessed` and `continued_history` among the cross-field rules, and each is
+    // decidable only where 4f evaluated it. Where one was not — no profile to authenticate a
+    // checkpoint with, or a cosignature under a key local policy does not hold — the cross-field
+    // finding is `unverifiable` naming that prerequisite rather than `verified`: a rule that was
+    // skipped is not a rule that held. The rules that WERE evaluated still fail `invalid` above.
+    let unevaluated: Vec<Assertion> = anchoring.as_ref().map_or_else(
+        || vec![Assertion::CheckpointAuthentication],
+        |anchoring| {
+            if anchoring.witnessed.is_none() || anchoring.continued_history.is_none() {
+                vec![Assertion::Witnesses]
+            } else {
+                Vec::new()
+            }
+        },
+    );
+    // The §7.6 rules decidable from the container alone are settled; the ones over embedded
+    // material are reached inside step 5 and, where one of them fires, replace this finding.
+    run.pass_resting_on(Assertion::CrossField, &unevaluated);
 
-    // --- §5 step 5: the §3 claim-material schema ------------------------------------
+    // --- §7.5 step 5: the §7.2 claim-material requirements --------------------------
     let ctx = ClaimCtx {
         receipt,
         policy,
         governance: &governance,
         anchoring_checkpoint: obj(obj(receipt, "anchoring")?, "checkpoint")?,
+        profile,
+        profile_id: adaptor_id,
         payload,
         subject_index,
         claim_type: &claim_type,
         assurance: &assurance,
         record_subject: record_subject.as_ref(),
-        enumeration: enumeration.as_ref(),
+        enumeration,
         depth,
     };
-    verify_claim_material(&ctx, budget)?;
+    run.phase(Assertion::ClaimMaterial);
+    // The authority-dependent types resolve producer keys at entry indexes of their own
+    // (§7.5.1 4e) and authenticate further checkpoints, so their material cannot be settled
+    // against a key state the induction did not establish. Every other type's material is
+    // paths, shapes and commitments, and is checked as usual.
+    let needs_established_keys =
+        AUTHORITY_DEPENDENT_TYPES.contains(&claim_type.as_str()) && !established;
+    if !needs_established_keys {
+        verify_claim_material(&ctx, run)?;
+    }
+    // The content-binding step inside claim material sets its own phase; put this receipt's
+    // claim material back before the assertion is recorded.
+    run.phase(Assertion::ClaimMaterial);
+    // §7.5.1 4e is "applied ONLY to envelopes already valid under 4d", and only these types
+    // reach it, so only for them does the claim's own material rest on the governance state and
+    // on the subject's envelope. Every other type's material is paths, shapes and commitments,
+    // which are decidable without either.
+    if AUTHORITY_DEPENDENT_TYPES.contains(&claim_type.as_str()) {
+        run.pass_resting_on(
+            Assertion::ClaimMaterial,
+            &[Assertion::Governance, Assertion::EnvelopeValidity],
+        );
+    } else {
+        run.pass(Assertion::ClaimMaterial);
+    }
+    // I-D §7.7: the content binding is a required assertion "if and only if its own
+    // `assurance.content_binding` is not `none`". Where it is required and the run reached the
+    // end of claim material without recording it, it held.
+    if assurance.content_binding != "none" {
+        run.pass(Assertion::ContentBinding);
+    }
+    run.blocked = enclosing_block;
+    run.scope = enclosing_phase;
 
     Ok(Verdict {
         boundary: render(&claim_type, &assurance),
@@ -1280,8 +6160,144 @@ fn verify_nested(
         subject_entry_index: subject_index,
         subject_statement_id: text(subject, "statement_id")?.to_owned(),
         assurance,
-        embedded_receipts: budget.embedded,
+        embedded_receipts: run.embedded,
     })
+}
+
+/// Claim types whose §7.2 material carries the competing-trigger range.
+///
+/// `trigger-effective` carries it directly — its row is "`trigger-declared` material plus
+/// `{ \"checkpoint_C\", \"competing\": { \"corpus_range\" } }`", and it "REQUIRES
+/// `governance: \"enumerated\"` and `competing_triggers: \"enumerated\"`". The other two carry
+/// it through the embedded `trigger-effective` receipt §7.2 REQUIRES of them, which is verified
+/// in full, range included; §7.2 does not itself require the token of them, so for those two
+/// the value is PERMITTED rather than mandatory. Every other type carries no such range in any
+/// of its material, so §7.6's "only where the range required by Section 7.2 is present" makes
+/// `enumerated` an assertion nothing in the receipt could support.
+const COMPETING_RANGE_TYPES: [&str; 3] =
+    ["trigger-effective", "disposition-effective", "propagation-complete"];
+
+/// The claim types whose §7.2 material carries record bytes at all — the only two a content
+/// binding can be about.
+///
+/// Both rows carry `record_bytes`/`output_bytes` "if and only if `content_binding` is not
+/// `none`". No other row carries content evidence in any form, so a non-`none` binding on one
+/// of them is, in §7.6's words, "a combination the type cannot satisfy", and is `invalid`
+/// rather than downgraded. A `trigger-*` receipt's content evidence lives in its EMBEDDED
+/// `record-*` receipt, which carries its own assurance block and is verified as its own claim.
+const CONTENT_EVIDENCE_TYPES: [&str; 2] = ["record-ingested", "record-derived"];
+
+/// The `declared` governance mode of I-D §7.4: chain validity from genesis only, carrying no
+/// producer-key transitions.
+const DECLARED_MODE: &str = "declared";
+
+/// The two governance modes of I-D §7.4.
+const GOVERNANCE_MODES: [&str; 2] = [DECLARED_MODE, "enumerated"];
+
+/// The two competing-trigger values of I-D §7.3.
+const COMPETING_TRIGGER_VALUES: [&str; 2] = ["not-checked", "enumerated"];
+
+/// The three content-binding values of I-D §7.3.
+const CONTENT_BINDINGS: [&str; 3] = ["none", "plain-verified", "keyed-authorized"];
+
+/// Read `claim.assurance`, holding every member to the domain I-D §7.3 gives it and to the
+/// claim types §7.2's material can satisfy (§7.6).
+///
+/// Centralised deliberately. Each member used to be validated wherever some path first read
+/// it, which left the members that path never reaches unchecked: a `statement-anchored` receipt
+/// could assert `competing_triggers: \"enumerated\"` or `content_binding: \"plain-verified\"`
+/// and be accepted, because nothing in that claim type's verification looks at either. §7.3
+/// gives every member a closed domain and §7.6 ties two of them to the claim type, and both are
+/// decidable from the receipt's own bytes the moment the block is read.
+///
+/// `witnessed` and `continued_history` are booleans, so [`flag`] IS their domain check; each is
+/// then compared against what verification actually established, which no token check could do.
+fn read_assurance(assurance: &Value, claim_type: &str) -> Result<Assurance> {
+    let mismatch = |field: &'static str| ReceiptError::AssuranceMismatch { field };
+
+    let governance = text(assurance, "governance")?.to_owned();
+    if !GOVERNANCE_MODES.contains(&governance.as_str()) {
+        return Err(mismatch("governance"));
+    }
+
+    let competing_triggers = text(assurance, "competing_triggers")?.to_owned();
+    if !COMPETING_TRIGGER_VALUES.contains(&competing_triggers.as_str()) {
+        return Err(mismatch("competing_triggers"));
+    }
+    match (competing_triggers.as_str(), claim_type) {
+        // §7.2: `trigger-effective` "REQUIRES ... `competing_triggers: \"enumerated\"`".
+        (value, "trigger-effective") if value != "enumerated" => {
+            return Err(mismatch("competing_triggers"))
+        }
+        ("enumerated", other) if !COMPETING_RANGE_TYPES.contains(&other) => {
+            return Err(mismatch("competing_triggers"))
+        }
+        _ => {}
+    }
+
+    let content_binding = text(assurance, "content_binding")?.to_owned();
+    if !CONTENT_BINDINGS.contains(&content_binding.as_str()) {
+        return Err(mismatch("content_binding"));
+    }
+    if content_binding != "none" && !CONTENT_EVIDENCE_TYPES.contains(&claim_type) {
+        return Err(mismatch("content_binding"));
+    }
+
+    Ok(Assurance {
+        governance,
+        competing_triggers,
+        witnessed: flag(assurance, "witnessed")?,
+        continued_history: flag(assurance, "continued_history")?,
+        canonicalization_namespace: check_canonicalization_namespace(assurance)?,
+        content_binding,
+    })
+}
+
+/// The two namespaces I-D §7.3 defines for a canonicalization identifier.
+const CANONICALIZATION_NAMESPACES: [&str; 2] = ["public", "private-use"];
+
+/// Read and validate `assurance.canonicalization_namespace` (I-D §7.3, §7.6).
+///
+/// §7.3: "REQUIRED where `content_binding` is not `none`, and absent otherwise… `private-use`,
+/// where the carried descriptor's `canonicalization` identifier begins `x-`… or `public`
+/// otherwise." §7.6 states the same as a cross-field rule: "present if and only if
+/// `assurance.content_binding` is not `none`, and is `private-use` if and only if the carried
+/// descriptor's `canonicalization` identifier begins `x-`".
+///
+/// The presence rule and the token set are decidable here, from the assurance block alone. The
+/// half that needs the descriptor is checked where the descriptor is parsed
+/// ([`check_namespace_matches_descriptor`]) — the receipt has one only where it carries content
+/// evidence, which is exactly where this member is required.
+fn check_canonicalization_namespace(assurance: &Value) -> Result<Option<String>> {
+    let bound = text(assurance, "content_binding")? != "none";
+    let mismatch = || ReceiptError::AssuranceMismatch { field: "canonicalization_namespace" };
+    match (bound, assurance.get("canonicalization_namespace")) {
+        (false, None) => Ok(None),
+        (true, Some(value)) => value
+            .as_str()
+            .filter(|token| CANONICALIZATION_NAMESPACES.contains(token))
+            .map(|token| Some(token.to_owned()))
+            .ok_or_else(mismatch),
+        // A content binding without the member, or the member without a content binding: the
+        // same if-and-only-if, read from either side.
+        (true, None) | (false, Some(_)) => Err(mismatch()),
+    }
+}
+
+/// The half of I-D §7.6's namespace rule that needs the carried descriptor: `private-use` if
+/// and only if that descriptor's `canonicalization` identifier begins `x-`.
+///
+/// Checked on the descriptor the receipt CARRIES, which the equality rule of §6.3 has just
+/// required to be the manifest's declared one, and before the capability outcome of §6.3 is
+/// reached: an `x-` identifier is by construction one this build does not implement, so
+/// deciding the namespace afterwards would let an `unverifiable` capability gap mask a
+/// disagreement decidable from the receipt's own bytes.
+fn check_namespace_matches_descriptor(assurance: &Assurance, canonicalization: &str) -> Result<()> {
+    let private_use = canonicalization.starts_with("x-");
+    if (assurance.canonicalization_namespace.as_deref() == Some("private-use")) == private_use {
+        return Ok(());
+    }
+    Err(ReceiptError::AssuranceMismatch { field: "canonicalization_namespace" })
 }
 
 /// Claim types §4 permits in `declared` mode.
@@ -1293,62 +6309,165 @@ const DECLARED_MODE_TYPES: [&str; 5] = [
     "disposition-declared",
 ];
 
+/// I-D §7.5.1 4d for one carried envelope: verified under COMPLETED K, at its OWN entry index.
+///
+/// A failure is decided by [`envelope_outcome`] under the receipt's governance mode, so a
+/// declared-mode receipt naming a producer key the mode does not carry a transition for is
+/// reported as §7.4's `unverifiable` rather than as a defect.
 fn verify_envelope_at(
     envelope: &Value,
     governance: &Governance<'_>,
     index: u64,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let keys = governance.producer_pubkeys_at(index);
-    budget.spend(1)?;
-    if crate::verify_envelope(envelope, |key_id| keys.get(key_id).cloned())? {
-        Ok(())
-    } else {
-        Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index })
+    run.spend(1)?;
+    let check = crate::check_envelope(envelope, |key_id| keys.get(key_id).cloned())?;
+    envelope_outcome(&check, governance.mode, index)
+}
+
+/// The §2.1 envelope rule over an envelope the receipt does NOT rest on, under 4d's reliance
+/// rule: `Ok(true)` where it verifies, `Ok(false)` where it is VOID.
+///
+/// I-D §7.5.1 4d: "For every other carried envelope — a purported competing-trigger envelope, an
+/// entry of a propagation prefix, any entry an enumeration reveals — a non-verifying envelope is
+/// VOID (Section 2.1): it is excluded before any authority comparison, it is never effective and
+/// never traversed, it does not affect the result, and the verifier reports it as an informative
+/// item naming its entry index." The reason it gives is the log contract: "a log anchors opaque
+/// bytes and validates none, so were a void entry a defect of every later receipt, any party
+/// able to anchor one envelope could disable every enumerated claim of that log from that index
+/// on."
+///
+/// The §2.1 subset rule is unchanged and applies per envelope: an envelope carrying one
+/// non-verifying entry is non-verifying whatever else verifies. What differs by reliance is only
+/// what that means for the RESULT.
+fn evaluate_envelope_at(
+    envelope: &Value,
+    governance: &Governance<'_>,
+    index: u64,
+    run: &mut Run,
+) -> Result<bool> {
+    let keys = governance.producer_pubkeys_at(index);
+    run.spend(1)?;
+    let check = crate::check_envelope(envelope, |key_id| keys.get(key_id).cloned())?;
+    match check {
+        crate::EnvelopeCheck::Verified => Ok(true),
+        crate::EnvelopeCheck::SignatureInvalid => {
+            run.void(index, VoidReason::SignatureInvalid);
+            Ok(false)
+        }
+        crate::EnvelopeCheck::KeyNotResolved { .. } => {
+            run.void(index, VoidReason::KeyNotActive);
+            Ok(false)
+        }
     }
 }
 
-/// Verify enumerated governance currency: the presented chain is the complete set of
-/// manifest/key entries in the enumerated range (§4).
-fn verify_governance_enumeration(
+/// Decode and authenticate the `enumerated` governance currency material (I-D §7.4), ahead of
+/// the induction that consumes it.
+///
+/// Two facts are established here, both key-independent. The range proof binds `entries` to the
+/// checkpoint root, so the `key` statements the induction is about to walk are the entries the
+/// log committed at those indexes rather than bytes the presenter chose. And the range is
+/// exactly `[0, tree_size(C))`, which is what §7.4 fixes for enumerated currency and what
+/// §7.5.1 4c leans on: "Under `enumerated` governance the range proof over exactly
+/// `[0, tree_size(C))` forecloses omission, so K at each index IS the state that was in force."
+/// Anything narrower would feed the induction a key stream with holes in it — a receipt
+/// enumerating only `[0, 1)` could hide a later key retirement and validate a signature with a
+/// key the corpus had already retired — so the width is checked before the stream is used, not
+/// after.
+fn decode_governance_enumeration(
     currency: &Value,
-    governance: &Governance<'_>,
-    anchoring: &Anchoring,
-    budget: &mut Budget,
+    root: &Hash,
+    tree_size: u64,
+    run: &mut Run,
 ) -> Result<Enumeration> {
     let material = obj(currency, "material")?;
-    let enumeration =
-        verify_enumeration(material, &anchoring.root, anchoring.tree_size, "governance", budget)?;
-
-    // Format §4: enumerated currency is an authenticated range over **exactly**
-    // `[0, tree_size(C))`, where C is the receipt's verified checkpoint. Anything narrower
-    // proves nothing about authority: a receipt that enumerated only `[0, 1)` could hide a
-    // later key retirement and validate a signature with a key the corpus had already retired.
-    // Claim types that name a checkpoint bind it field-exact to `anchoring.checkpoint` (§3),
-    // so `anchoring.tree_size` is `tree_size(C)` for every enumerated claim type.
-    if enumeration.from_index != 0 || enumeration.to_index != anchoring.tree_size {
+    let enumeration = decode_enumeration(material, root, tree_size, "governance", run)?;
+    if enumeration.from_index != 0 || enumeration.to_index != tree_size {
         return Err(ReceiptError::GovernanceRangeNotComplete {
             got_from: enumeration.from_index,
             got_to: enumeration.to_index,
-            tree_size: anchoring.tree_size,
+            tree_size,
         });
     }
+    Ok(enumeration)
+}
 
-    let presented: BTreeSet<u64> = governance.manifests.iter().map(|(index, _)| *index).collect();
-    let mut presented_all = presented;
-    presented_all.extend(governance.events.iter().map(|e| e.entry_index));
+/// The `key` statements the enumeration carries, with their entry indexes, ascending.
+///
+/// I-D §7.5.1 4b's second induction stream. Selecting them by the LITERAL `type` value is not
+/// type-specific VALIDATION of unsigned material — 4b(K)'s checks, §2.2's common payload fields
+/// among them, still run inside phase 2, after phase 1 — it is the selection the merge is
+/// defined in terms of, over bytes the range proof has already bound to the checkpoint root.
+/// See [`statement_type_literal`] for why an unreadable `type` is a non-selection rather than
+/// an error here.
+fn enumerated_key_statements(enumeration: &Enumeration) -> Vec<(u64, &Value)> {
+    let mut out = Vec::new();
+    for (offset, envelope) in enumeration.entries.iter().enumerate() {
+        if statement_type_literal(envelope) == Some("key") {
+            out.push((enumeration.from_index + offset as u64, envelope));
+        }
+    }
+    out
+}
 
+/// I-D §7.5.1 4c under `enumerated` governance: the carried chain is the complete set of
+/// MANIFEST statements in the enumerated range.
+///
+/// The enumerated `key` statements need no such check — they are the induction's own second
+/// stream, so an enumerated `key` statement is walked by construction. A manifest is different:
+/// the chain is where manifests travel (§7.1), and one anchored inside the range but absent
+/// from the chain would change which version is active at some index while the induction never
+/// saw it. This runs immediately after the induction and BEFORE 4f, because 4f resolves its
+/// checkpoint key from "the manifest version active for the checkpoint being verified...
+/// established under the receipt's governance mode": a chain with a manifest missing has not
+/// established that version, and reporting the omission is more honest than reporting the key
+/// binding that fails downstream of it.
+/// Returns the entry index the walk must be treated as having stopped at, where the range
+/// reveals a VERIFYING governance statement of a revision this document does not define.
+fn check_manifest_completeness(
+    enumeration: &Enumeration,
+    governance: &Governance<'_>,
+    run: &mut Run,
+) -> Result<Option<u64>> {
+    // What the CHAIN carries, not what the induction applied: an element skipped as a void
+    // duplicate (I-D §2.1) is carried, and 4c asks whether the chain shows the range's manifests.
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
         let index = enumeration.from_index + offset as u64;
-        let kind = statement_type(payload_of(envelope)?)?;
-        if matches!(kind, "manifest" | "key") && !presented_all.contains(&index) {
+        if statement_type_literal(envelope) == Some("manifest")
+            && !governance.chain_indexes.contains(&index)
+        {
+            // I-D §7.4: enumerated currency proves the presented statements are "the only
+            // VERIFYING manifest and key entries in that range — a void entry (Section 7.5.1
+            // 4d) is not a governance statement and its absence from the chain is not an
+            // omission". 4b says the same from the other side: "A VERIFYING enumerated
+            // `manifest` entry of this revision that is absent from `governance.chain[]` is an
+            // omission and is `invalid`; only a non-verifying purported manifest is void." So
+            // the signature decides which this is, and it is evaluated at the entry's own index.
+            if !evaluate_envelope_at(envelope, governance, index, run)? {
+                continue;
+            }
+            // It verifies — so before its absence is called an omission, its revision decides
+            // whether this document has anything to say about it at all. 4b: "A VERIFYING
+            // purported governance entry that declares an `ahl_version` this revision does not
+            // define is neither: it is not inducted, K is unestablished at and after its index,
+            // the governance finding is `unverifiable`." A statement this verifier cannot
+            // interpret is not one it can call missing from a chain, and §7.4's omission rule
+            // reaches verifying manifest entries OF THIS REVISION.
+            if let Err(error @ ReceiptError::UnsupportedVersion { .. }) =
+                check_ahl_version(payload_of(envelope)?)
+            {
+                run.record_gap(error);
+                return Ok(Some(index));
+            }
             return Err(ReceiptError::GovernanceChainInvalid(format!(
-                "enumeration reveals a `{kind}` statement at entry index {index} that the \
+                "enumeration reveals a `manifest` statement at entry index {index} that the \
                  presented chain omits"
             )));
         }
     }
-    Ok(enumeration)
+    Ok(None)
 }
 
 /// Enforce the §3 subject rule and the §2.3 `record_subject` match.
@@ -1405,6 +6524,12 @@ struct ClaimCtx<'a> {
     /// The checkpoint this receipt already verified in §5 step 3 — signature, witness
     /// cosignature and inclusion path. Claim checkpoints bind to it (§3).
     anchoring_checkpoint: &'a Value,
+    /// The pinned adaptor profile, where local policy resolved one (§7.5 step 2). `None` makes
+    /// every checkpoint this claim's material carries unauthenticatable, which is the
+    /// checkpoint-authentication assertion's own `unverifiable` outcome rather than a defect in
+    /// the claim material.
+    profile: Option<&'a AdaptorProfile>,
+    profile_id: &'a str,
     payload: &'a Value,
     subject_index: u64,
     claim_type: &'a str,
@@ -1436,16 +6561,16 @@ impl ClaimCtx<'_> {
     }
 }
 
-fn verify_claim_material(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
+fn verify_claim_material(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     match ctx.claim_type {
         "statement-anchored" => Ok(()),
-        "record-ingested" => verify_record_ingested(ctx),
-        "record-derived" => verify_record_derived(ctx, budget),
-        "trigger-declared" => verify_trigger(ctx, budget, "trigger-declared"),
-        "trigger-effective" => verify_trigger(ctx, budget, "trigger-effective"),
-        "disposition-declared" => verify_disposition(ctx, budget, "trigger-declared"),
-        "disposition-effective" => verify_disposition(ctx, budget, "trigger-effective"),
-        "propagation-complete" => verify_propagation_complete(ctx, budget),
+        "record-ingested" => verify_record_ingested(ctx, run),
+        "record-derived" => verify_record_derived(ctx, run),
+        "trigger-declared" => verify_trigger(ctx, run, "trigger-declared"),
+        "trigger-effective" => verify_trigger(ctx, run, "trigger-effective"),
+        "disposition-declared" => verify_disposition(ctx, run, "trigger-declared"),
+        "disposition-effective" => verify_disposition(ctx, run, "trigger-effective"),
+        "propagation-complete" => verify_propagation_complete(ctx, run),
         "governance-state" => verify_governance_state(ctx),
         other => Err(ReceiptError::Malformed(format!("`{other}` is not a registry claim type"))),
     }
@@ -1453,48 +6578,200 @@ fn verify_claim_material(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
 
 /// `record-ingested` (§3): the subject ingestion introduces the record; optional content
 /// binding recomputes the commitment from carried canonical bytes.
-fn verify_record_ingested(ctx: &ClaimCtx<'_>) -> Result<()> {
+fn verify_record_ingested(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     ctx.require_subject_type("ingestion")?;
     let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
-    verify_content_binding(ctx, dataset, record, "record_bytes")
+    let binding = verify_content_binding(ctx, run, dataset, record, "record_bytes");
+    run.settle_content_binding(binding)
 }
 
 /// Recompute a commitment from carried canonical bytes per the dataset's declared mode
 /// (§2.1, spec §2.4). `content_binding: "none"` requires the evidence fields to be absent.
+///
+/// The callers pass the outcome through [`Run::tolerate`], because a content binding is the one
+/// assertion I-D §7.7 has other assertions reported around rather than behind: "A
+/// `record-ingested` receipt asserting a content binding the verifier cannot compute has result
+/// `unverifiable`... and its report MUST show the anchoring and introduction findings as
+/// `verified` and the content-binding finding as `unverifiable`." A capability gap here
+/// therefore records its finding and lets the claim-material step finish; a defect still ends
+/// the run, since `invalid` has already decided the result.
+///
+/// Everything past the `"none"` case is I-D revision 0.4, §2.6 and §6.3:
+///
+/// 1.  The governing manifest is the one NAMED BY THE SUBJECT STATEMENT's own `manifest`
+///     binding (I-D §2.2) — the manifest statement's STATEMENT id (I-D §2.4.5), not its entry
+///     id, and not merely whichever manifest happens to be active at the subject's entry
+///     index.
+/// 2.  `claim_material`'s own `canonicalization`/`media_type` MUST equal (I-D §2.6 descriptor
+///     equality — identical normalized forms) that manifest's declared descriptor; a mismatch,
+///     or a missing `claim_material.canonicalization`, is `invalid`.
+/// 3.  For an identifier this build implements, wrong `media_type` presence is `invalid` for
+///     this dataset's binding (I-D §2.6 "Presence is a producer duty and is never a syntactic
+///     matter"); for one it does not implement, the finding is `unverifiable`
+///     ([`ReceiptError::CanonicalizationUnsupported`]), never `invalid`, and never
+///     rehabilitated to `content_binding: "none"`.
+/// 4.  The carried bytes are the record AS RECEIVED; this verifier APPLIES the canonicalization
+///     procedure (`jcs`: parse then re-serialize through [`crate::jcs`]; `exact-bytes`: the
+///     octets unchanged) before recomputing the commitment. Bytes that fail the procedure make
+///     this dataset's finding `invalid` ([`ReceiptError::CanonicalizationFailed`]), not a panic
+///     and not a run-aborting error unrelated to this binding.
+// I-D §2.6/§6.3 fold four checks into one recomputation — descriptor resolution, descriptor
+// equality, media-type presence, and the canonicalization procedure — and splitting them into
+// helpers each carrying the growing set of intermediate values would obscure the order the I-D
+// itself fixes for them.
+#[allow(clippy::too_many_lines)]
 fn verify_content_binding(
     ctx: &ClaimCtx<'_>,
+    run: &mut Run,
     dataset: &str,
     record: &str,
     field: &'static str,
 ) -> Result<()> {
     let material = ctx.material()?;
+    // The two presence rules below are not the content binding itself, and neither is a
+    // required assertion of a receipt that asserts `content_binding: "none"` — §7.7 makes the
+    // content binding required "if and only if its own `assurance.content_binding` is not
+    // `none`". They keep the assertions their own rules belong to: §7.6's "a combination the
+    // type cannot satisfy" is a cross-field disagreement, and §7.2's "carried together or not
+    // at all" is claim material.
+    run.phase(Assertion::CrossField);
+    // I-D §7.2, both record rows: the bytes and `canonicalization` are present "if and only if
+    // `content_binding` is not `none`, together with `media_type` if and only if the descriptor
+    // requires it". Presence is therefore settled from the assurance field alone, BEFORE any of
+    // the three members is read for its value. A descriptor carried under `none` is a receipt
+    // asserting evidence its own assurance says it has not got — §7.6: "a combination the type
+    // cannot satisfy is `invalid` rather than downgraded" — and ignoring it would let a
+    // receipt carry a descriptor that no check ever compares against the manifest's.
+    let has_bytes = material.get(field).is_some();
+    let has_canonicalization = material.get("canonicalization").is_some();
     if ctx.assurance.content_binding == "none" {
-        return if material.get(field).is_some() {
+        return if has_bytes || has_canonicalization || material.get("media_type").is_some() {
             Err(ReceiptError::AssuranceMismatch { field: "content_binding" })
         } else {
             Ok(())
         };
     }
+    // Neither member is evidence without the other, so they stand or fall together: bytes with
+    // no descriptor cannot be canonicalized, and a descriptor with no bytes canonicalizes
+    // nothing. Whichever is absent is the one named.
+    run.phase(Assertion::ClaimMaterial);
+    if has_bytes != has_canonicalization {
+        return Err(if has_bytes { ctx.missing("canonicalization") } else { ctx.missing(field) });
+    }
 
-    let (_, manifest) = ctx.governance.active_for(ctx.subject_index + 1)?;
-    let declared_mode =
-        text(obj(obj(manifest, "datasets")?, dataset)?, "commitment_mode")?.to_owned();
+    // From here the receipt's own content binding is what is being settled.
+    run.phase(Assertion::ContentBinding);
+    let manifest_version_id = text(ctx.payload, "manifest")?;
+    let (_, manifest) = ctx.governance.manifest_for_binding(manifest_version_id)?;
+    let declared = obj(obj(manifest, "datasets")?, dataset)?;
+    let declared_mode = text(declared, "commitment_mode")?.to_owned();
+    // `datasets_object` already validated this manifest's descriptor syntax at manifest-schema
+    // time (I-D §6.3 row 1); this reconstruction is what actually computes `ddig`.
+    let canonicalization = text(declared, "canonicalization")?.to_owned();
+    let media_type = declared.get("media_type").and_then(Value::as_str).map(str::to_owned);
+    let descriptor = CanonicalizationDescriptor::new(canonicalization, media_type)?;
+
+    // I-D §6.3: claim_material's descriptor MUST equal the manifest's declared one, under the
+    // descriptor equality of §2.6 (identical normalized forms — comparing normalized members,
+    // never raw declared bytes).
+    let claimed_canonicalization = material
+        .get("canonicalization")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ctx.missing("canonicalization"))?
+        .to_owned();
+    // A wrong-typed `media_type` is `invalid`, never read as absent: read as absent it would
+    // compare equal to a declared descriptor that carries none (I-D §2.6 descriptor equality).
+    let claimed_media_type = match material.get("media_type") {
+        None => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => {
+            return Err(ReceiptError::Malformed(
+                "`claim_material.media_type`, where present, MUST be a string (I-D §2.6)"
+                    .to_owned(),
+            ))
+        }
+    };
+    let claimed_descriptor =
+        CanonicalizationDescriptor::new(claimed_canonicalization, claimed_media_type)?;
+
+    // I-D §7.6: `assurance.canonicalization_namespace` "is `private-use` if and only if the
+    // carried descriptor's `canonicalization` identifier begins `x-`", and §7.3 calls the
+    // member "computable from the receipt alone". So it is decided HERE — on the carried
+    // descriptor, the moment it is parsed — before the descriptor-equality rule below compares
+    // it against the manifest's declared one (already read above), and well before §6.3's
+    // unsupported-procedure outcome, which an `x-` identifier would otherwise always reach
+    // first and report as unverifiable.
+    check_namespace_matches_descriptor(ctx.assurance, claimed_descriptor.canonicalization())?;
+    if claimed_descriptor.canonicalization() != descriptor.canonicalization()
+        || claimed_descriptor.media_type() != descriptor.media_type()
+    {
+        return Err(ReceiptError::ClaimDescriptorMismatch {
+            dataset: dataset.to_owned(),
+            claimed: describe_descriptor(&claimed_descriptor),
+            declared: describe_descriptor(&descriptor),
+            manifest_version_id: manifest_version_id.to_owned(),
+        });
+    }
+
+    // I-D §2.6: presence is capability-gated — `descriptor::media_type_required` returns
+    // `None` for an identifier this build does not implement, and that case falls through to
+    // the canonicalization step below, which reports it as unverifiable rather than as a
+    // presence defect this verifier has no grounds to assert.
+    match descriptor::media_type_required(descriptor.canonicalization()) {
+        Some(required) if required != descriptor.media_type().is_some() => {
+            let detail = if required {
+                "MUST carry `media_type` (I-D §2.6)"
+            } else {
+                "MUST NOT carry `media_type` (I-D §2.6)"
+            };
+            return Err(ReceiptError::MediaTypePresenceInvalid {
+                dataset: dataset.to_owned(),
+                identifier: descriptor.canonicalization().to_owned(),
+                detail,
+            });
+        }
+        _ => {}
+    }
+
+    let ddig = descriptor.ddig();
     let encoded = material.get(field).and_then(Value::as_str).ok_or_else(|| ctx.missing(field))?;
-    let bytes = B64
+    let received = B64
         .decode(crate::strip_prefix(encoded, "base64:")?)
         .map_err(|source| ReceiptError::Ahl(AhlError::Base64(source)))?;
 
-    let recomputed = match ctx.assurance.content_binding.as_str() {
-        "plain-verified" if declared_mode == "plain" => commit_plain(dataset, &bytes),
-        "keyed-authorized" if declared_mode == "keyed" => {
-            let key = ctx.policy.dataset_keys.get(dataset).ok_or_else(|| {
-                ReceiptError::ContentBindingMismatch {
-                    mode: "keyed-authorized".to_owned(),
-                    recomputed: "<no dataset key held>".to_owned(),
-                    claimed: record.to_owned(),
+    // I-D §2.6 / §7.2: `received` is the record AS RECEIVED; the verifier canonicalizes it
+    // before recomputing the commitment.
+    let bytes = match descriptor.canonicalization() {
+        "jcs" => {
+            let value: Value = serde_json::from_slice(&received).map_err(|source| {
+                ReceiptError::CanonicalizationFailed {
+                    dataset: dataset.to_owned(),
+                    identifier: "jcs".to_owned(),
+                    detail: source.to_string(),
                 }
             })?;
-            commit_keyed(key, dataset, &bytes)?
+            jcs(&value)
+        }
+        "exact-bytes" => received,
+        other => {
+            return Err(ReceiptError::CanonicalizationUnsupported {
+                dataset: dataset.to_owned(),
+                identifier: other.to_owned(),
+            })
+        }
+    };
+
+    let recomputed = match ctx.assurance.content_binding.as_str() {
+        "plain-verified" if declared_mode == "plain" => commit_plain(dataset, &ddig, &bytes)?,
+        "keyed-authorized" if declared_mode == "keyed" => {
+            // I-D §7.3, §7.7: holding no key for the dataset is a capability gap on THIS
+            // dataset's content binding, never a demonstrated defect, so it is reported under
+            // its own `unverifiable` variant rather than as a commitment that did not match.
+            let key =
+                ctx.policy.dataset_keys.get(dataset).ok_or_else(|| {
+                    ReceiptError::DatasetKeyNotHeld { dataset: dataset.to_owned() }
+                })?;
+            commit_keyed(key, dataset, &ddig, &bytes)?
         }
         // A binding mode the dataset's declared commitment mode cannot satisfy (§2.1).
         mode => {
@@ -1516,8 +6793,21 @@ fn verify_content_binding(
     }
 }
 
+/// Render a descriptor's normalized form for an error message (I-D §2.6 descriptor equality).
+fn describe_descriptor(descriptor: &CanonicalizationDescriptor) -> String {
+    descriptor.media_type().map_or_else(
+        || format!("{{canonicalization: {}}}", descriptor.canonicalization()),
+        |media_type| {
+            format!(
+                "{{canonicalization: {}, media_type: {media_type}}}",
+                descriptor.canonicalization()
+            )
+        },
+    )
+}
+
 /// `record-derived` (§3): one output record's derivation, unbatched or through the batch tree.
-fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
+fn verify_record_derived(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     ctx.require_subject_type("derivation")?;
     let material = ctx.material()?;
     let output = obj(material, "output")?;
@@ -1529,7 +6819,19 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
         });
     }
 
-    if let Some(root) = ctx.payload.get("outputs_root").and_then(Value::as_str) {
+    // Which branch a derivation takes turns on this member's presence (I-D §2.4.2), so a
+    // wrong-typed one is `invalid` rather than a receipt quietly checked under the other
+    // branch's rules.
+    let outputs_root = match ctx.payload.get("outputs_root") {
+        None => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(ReceiptError::Malformed(
+                "`outputs_root`, where present, MUST be a string (I-D §2.4.2)".to_owned(),
+            ))
+        }
+    };
+    if let Some(root) = outputs_root {
         let leaf = material.get("batch_leaf").ok_or_else(|| ctx.missing("batch_leaf"))?;
         if (text(leaf, "dataset")?.to_owned(), text(leaf, "record")?.to_owned()) != claimed {
             return Err(ReceiptError::ClaimMaterialPathInvalid { what: "batch_leaf" });
@@ -1543,9 +6845,9 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
             &path_strings(material, "leaf_path")?,
             &parse_hash_hex(root)?,
             "batch output leaf",
-            budget,
+            run,
         )?;
-        verify_input_members(ctx, leaf, budget)?;
+        verify_input_members(ctx, leaf, run)?;
     } else {
         let listed = array(ctx.payload, "outputs")?.iter().any(|entry| {
             entry.get("dataset").and_then(Value::as_str) == Some(claimed.0.as_str())
@@ -1556,31 +6858,139 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
         }
     }
 
-    verify_content_binding(ctx, &claimed.0, &claimed.1, "output_bytes")
+    let binding = verify_content_binding(ctx, run, &claimed.0, &claimed.1, "output_bytes");
+    run.settle_content_binding(binding)
 }
 
-/// Optional `input_members` (§3): each proves one input's membership in the leaf's input set.
-fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -> Result<()> {
+/// `input_members` (I-D §7.2): each proves one input's membership in the leaf's input set.
+///
+/// §7.2's `record-derived` row carries the member "only where `batch_leaf.inputs` is the
+/// input-set form, proving the listed inputs and no others", and §2.7 gives the two forms
+/// `inputs` may take: the full array of input objects, or `{input_set_root, input_set_count}`.
+/// So the member is REQUIRED under one form and forbidden under the other, and each direction
+/// is its own defect:
+///
+/// *   Under the input-set form the leaf commits its inputs by ROOT and lists none of them, so
+///     without the members the derivation's inputs are not carried at all. Accepting the leaf
+///     anyway would let a batch derivation claim outputs while keeping every input unstated —
+///     the one thing the input-set form exists to make provable.
+/// *   Under the full-array form the leaf lists its inputs itself and commits no root, so
+///     there is nothing for a membership path to open; a carried member could only be about
+///     some other tree.
+///
+/// "The listed inputs and no others" is a statement about the WHOLE set, so the members must
+/// cover it exactly: one member per committed leaf, at distinct indexes, each opening the
+/// committed root. A short list proves a subset and would let a producer disclose the
+/// convenient inputs and withhold the rest under a root that says how many there were.
+///
+/// Once the set is complete it is also a TREE, and §2.7 states one set of rules "identical for
+/// every AHL tree — outputs, input sets, and dispositions": ascending order by the UTF-8 bytes
+/// of each leaf's canonical commitment string, commitment strings that are family strings under
+/// §2.1, and no duplicates. Membership paths do not reach any of that, so the assembled set is
+/// validated through [`ValidatedLeafSet::open`] — the same gate every other tree in this crate
+/// passes through.
+fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, run: &mut Run) -> Result<()> {
     let material = ctx.material()?;
-    let Some(members) = material.get("input_members").and_then(Value::as_array) else {
-        return Ok(());
+    // Where present, the member is an array; a wrong type is `invalid` and is never read as
+    // absent, which would silently skip every input-membership proof the receipt carries.
+    let members = match material.get("input_members") {
+        None => None,
+        Some(Value::Array(members)) => Some(members),
+        Some(_) => {
+            return Err(ReceiptError::Malformed(
+                "`claim_material.input_members`, where present, MUST be an array (I-D §7.2)"
+                    .to_owned(),
+            ))
+        }
     };
     let inputs = leaf.get("inputs").ok_or_else(|| ctx.missing("batch_leaf.inputs"))?;
-    let root = text(inputs, "input_set_root")?;
-    let count = number(inputs, "input_set_count")?;
-    for member in members {
-        let input = obj(member, "input")?;
-        check_inclusion(
-            &jcs(input),
-            number(member, "input_index")?,
-            count,
-            &path_strings(member, "input_path")?,
-            &parse_hash_hex(root)?,
-            "input-set member",
-            budget,
-        )?;
+    match inputs {
+        Value::Array(_) => {
+            if members.is_some() {
+                return Err(ReceiptError::Malformed(
+                    "`claim_material.input_members` is carried ONLY where `batch_leaf.inputs` \
+                     is the input-set form; the full-array form of I-D §2.7 lists its inputs in \
+                     the leaf and commits no `input_set_root` for a member to open (I-D §7.2)"
+                        .to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        Value::Object(_) => {
+            let members = members.ok_or_else(|| ctx.missing("input_members"))?;
+            let root = text(inputs, "input_set_root")?;
+            let count = number(inputs, "input_set_count")?;
+            let mut opened = BTreeMap::new();
+            for member in members {
+                let input = obj(member, "input")?;
+                let index = number(member, "input_index")?;
+                check_inclusion(
+                    &jcs(input),
+                    index,
+                    count,
+                    &path_strings(member, "input_path")?,
+                    &parse_hash_hex(root)?,
+                    "input-set member",
+                    run,
+                )?;
+                if opened.insert(index, input.clone()).is_some() {
+                    return Err(ReceiptError::TreeMaterialInvalid {
+                        root: root.to_owned(),
+                        detail: format!(
+                            "two `input_members` entries open index {index}; the set is proven \
+                             once per committed leaf (I-D §7.2)"
+                        ),
+                    });
+                }
+            }
+            // Every index opened is distinct and, by `check_inclusion`, smaller than `count`,
+            // so an equal cardinality is exactly the committed set.
+            if opened.len() as u64 != count {
+                return Err(ReceiptError::TreeMaterialInvalid {
+                    root: root.to_owned(),
+                    detail: format!(
+                        "commits {count} input(s), {} proven by `input_members` — I-D §7.2 \
+                         requires \"the listed inputs and no others\"",
+                        opened.len()
+                    ),
+                });
+            }
+            // I-D §2.7 states one set of tree rules, "identical for every AHL tree — outputs,
+            // input sets, and dispositions": leaves sorted by `record`, "comparing the UTF-8
+            // bytes of the canonical commitment string in ascending lexicographic order",
+            // commitment strings that are family strings under §2.1 with "one failing the rules
+            // there rejected", and "duplicate leaves are prohibited". Membership paths alone do
+            // not reach any of that. They prove each carried input is a committed leaf at the
+            // index it claims, but a producer choosing the leaf ORDER decides the tree, so a set
+            // built in some other order — or over a leaf whose `record` is not a canonical
+            // commitment string — opens its own root perfectly well and is still not an AHL
+            // tree. Passing the complete set, ordered by `input_index`, through the same
+            // [`ValidatedLeafSet::open`] every other tree in this crate goes through is what
+            // applies those rules here rather than restating them; it recomputes the root over
+            // the assembled set as well, so the members must be the leaves of THIS tree in the
+            // order the rules fix, not merely leaves of some tree with this root.
+            ValidatedLeafSet::open(root, count, opened.into_values().collect()).map_err(
+                |source| ReceiptError::TreeMaterialInvalid {
+                    root: root.to_owned(),
+                    detail: source.to_string(),
+                },
+            )?;
+            Ok(())
+        }
+        _ => Err(ReceiptError::Malformed(
+            "`batch_leaf.inputs` is either the full array of input objects or the input-set \
+             form `{input_set_root, input_set_count}` (I-D §2.7)"
+                .to_owned(),
+        )),
     }
-    Ok(())
+}
+
+/// Render a `(dataset, record)` pair for an error message.
+///
+/// Record identity is the PAIR (I-D §2.4.2, §7.6), so a message naming the commitment alone
+/// would print two identical strings for exactly the mismatch this reports.
+fn describe_record(pair: Option<&(String, String)>) -> String {
+    pair.map_or_else(String::new, |(dataset, record)| format!("{dataset}/{record}"))
 }
 
 /// An embedded receipt, verified recursively under the shared §3.1 budget.
@@ -1600,7 +7010,7 @@ fn verify_embedded(
     slot: &'static str,
     expected: &'static str,
     permitted: &[&str],
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<Embedded> {
     let embedded =
         ctx.material()?.get(slot).filter(|v| v.is_object()).ok_or_else(|| ctx.missing(slot))?;
@@ -1609,13 +7019,26 @@ fn verify_embedded(
     // cache entry; two receipts about the same statement with different claim material are
     // each verified in full.
     let key = sha256_hex(&jcs(embedded));
-    let verdict = if let Some(cached) = budget.verified.get(&key) {
-        cached.clone()
+    // The path this embedded receipt's findings are recorded under. Pushed before descending
+    // and popped only on success: a rejection inside the embedded receipt is recorded at the
+    // embedded receipt's own path as the run unwinds.
+    run.path.push(slot.to_owned());
+    let verdict = if let Some((verdict, findings)) = run.verified.get(&key).cloned() {
+        // Served from the cache, and still reported: I-D §7.7 gives the embedding receipt a
+        // finding for every required assertion of the receipt it embeds, and a second
+        // occurrence of one receipt is a second place a reader looks for them.
+        for finding in findings {
+            run.record(finding.assertion, finding.outcome, finding.detail, finding.rests_on);
+        }
+        verdict
     } else {
-        let verdict = verify_nested(embedded, ctx.policy, budget, ctx.depth + 1)?;
-        budget.verified.insert(key, verdict.clone());
+        let before = run.findings.len();
+        let verdict = verify_nested(embedded, ctx.policy, run, ctx.depth + 1)?;
+        let findings = run.findings[before..].to_vec();
+        run.verified.insert(key, (verdict.clone(), findings));
         verdict
     };
+    run.path.pop();
 
     if !permitted.contains(&verdict.claim_type.as_str()) {
         return Err(ReceiptError::EmbeddedClaimTypeMismatch {
@@ -1624,17 +7047,17 @@ fn verify_embedded(
             got: verdict.claim_type,
         });
     }
-    let record = obj(embedded, "claim")?.get("record_subject").map(|subject| {
-        (
-            subject.get("dataset").and_then(Value::as_str).unwrap_or_default().to_owned(),
-            subject.get("record").and_then(Value::as_str).unwrap_or_default().to_owned(),
-        )
-    });
+    let record = match obj(embedded, "claim")?.get("record_subject") {
+        None => None,
+        Some(subject) => {
+            Some((text(subject, "dataset")?.to_owned(), text(subject, "record")?.to_owned()))
+        }
+    };
     Ok(Embedded { verdict, entry_index: number(obj(embedded, "subject")?, "entry_index")?, record })
 }
 
 /// `trigger-declared` / `trigger-effective` (§3).
-fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result<()> {
+fn verify_trigger(ctx: &ClaimCtx<'_>, run: &mut Run, kind: &str) -> Result<()> {
     let subject_type = statement_type(ctx.payload)?;
     if !matches!(subject_type, "retraction" | "correction") {
         return Err(ReceiptError::Malformed(format!(
@@ -1642,11 +7065,24 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
             ctx.claim_type
         )));
     }
-    let (_, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
+    // I-D §2.4.2: "Closure traversal uses the `(dataset, record)` pair only." Record identity
+    // is that PAIR, so every reference below is matched on both members. A commitment string
+    // alone is not an identity: §2.6 puts `dsid` in the commitment preimage, which makes the
+    // same bytes in two datasets commit differently, but it does not stop a producer NAMING a
+    // commitment beside the wrong dataset — and a verifier recomputes the commitment only
+    // where content evidence is carried. Comparing the commitment alone would accept an
+    // introduction of a different dataset's record as the introduction of this one.
+    let subject_record = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
+    let (dataset, _) = subject_record;
 
     // The introduction proof establishes who may retract (§3 authority note).
     let introduction =
-        verify_embedded(ctx, "introduction", "introduction", &INTRODUCTION_TYPES, budget)?;
+        verify_embedded(ctx, "introduction", "introduction", &INTRODUCTION_TYPES, run)?;
+    // The two rules below are §7.6 cross-field rules — "Every embedded receipt's
+    // `record_subject` and entry indexes match the referencing material" — reached from inside
+    // the claim-material step because that is where the embedded receipt is opened. The
+    // assertion follows the rule, not the step.
+    run.phase(Assertion::CrossField);
     // Spec §2.3.3: a trigger anchored at a smaller entry index than the record's introduction
     // is never effective — authority cannot predate the introduction that creates it.
     if introduction.entry_index >= ctx.subject_index {
@@ -1656,23 +7092,31 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
             outer: ctx.subject_index,
         });
     }
-    if introduction.record.as_ref().map(|(_, r)| r.as_str()) != Some(record.as_str()) {
+    // I-D §7.6: "Every embedded receipt's `record_subject`... match the referencing material —
+    // trigger to introduction record".
+    if introduction.record.as_ref() != Some(subject_record) {
         return Err(ReceiptError::EmbeddedSubjectMismatch {
             what: "introduction",
-            got: introduction.record.map_or_else(String::new, |(_, r)| r),
-            want: record.clone(),
+            got: describe_record(introduction.record.as_ref()),
+            want: describe_record(Some(subject_record)),
         });
     }
+    run.phase(Assertion::ClaimMaterial);
 
     if subject_type == "correction" {
-        let replacement = text(ctx.payload, "replacement")?.to_owned();
+        // I-D §2.4.3: a correction carries ONE `dataset`, governing both `record` and
+        // `replacement`, so the replacement's identity is that same dataset paired with the
+        // new commitment — never the commitment on its own (I-D §7.6: "correction to
+        // replacement introduction").
+        let replacement = (dataset.clone(), text(ctx.payload, "replacement")?.to_owned());
         let embedded = verify_embedded(
             ctx,
             "replacement_introduction",
             "introduction",
             &INTRODUCTION_TYPES,
-            budget,
+            run,
         )?;
+        run.phase(Assertion::CrossField);
         // Spec §2.3.3: a correction's replacement must be introduced at an entry index no
         // greater than the correction's.
         if embedded.entry_index > ctx.subject_index {
@@ -1682,13 +7126,14 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
                 outer: ctx.subject_index,
             });
         }
-        if embedded.record.as_ref().map(|(_, r)| r.as_str()) != Some(replacement.as_str()) {
+        if embedded.record.as_ref() != Some(&replacement) {
             return Err(ReceiptError::EmbeddedSubjectMismatch {
                 what: "replacement introduction",
-                got: embedded.record.map_or_else(String::new, |(_, r)| r),
-                want: replacement,
+                got: describe_record(embedded.record.as_ref()),
+                want: describe_record(Some(&replacement)),
             });
         }
+        run.phase(Assertion::ClaimMaterial);
     }
 
     // Scope is what makes a trigger meaningful at all; a scopeless one is malformed (§2.3.3).
@@ -1697,8 +7142,8 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
     if kind == "trigger-effective" {
         // "Effective" is exactly the authority claim: an unauthorized trigger is a challenge
         // (spec §2.3.3) and can never be effective, however well anchored it is.
-        verify_trigger_authority(ctx, &introduction, budget)?;
-        verify_competing_triggers(ctx, &introduction, budget)?;
+        verify_trigger_authority(ctx, &introduction, run)?;
+        verify_competing_triggers(ctx, &introduction, run)?;
     } else if ctx.assurance.competing_triggers != "not-checked" {
         return Err(ReceiptError::AssuranceMismatch { field: "competing_triggers" });
     }
@@ -1743,7 +7188,7 @@ fn checkpoints_agree(carried: &Value, reference: &Value, field: &'static str) ->
 /// signature, witness cosignature and inclusion path this verifier actually checked.
 /// `propagation-complete` is the deliberate exception: its `corpus_checkpoint` is the
 /// propagation's own declared D, generally *earlier* than A, and is authenticated by
-/// [`authenticate_declared_checkpoint`] plus prefix recomputation instead.
+/// [`authenticate_checkpoint`] plus prefix recomputation instead.
 fn bind_checkpoint(ctx: &ClaimCtx<'_>, carried: &Value, field: &'static str) -> Result<u64> {
     checkpoints_agree(carried, ctx.anchoring_checkpoint, field)?;
     number(ctx.anchoring_checkpoint, "tree_size")
@@ -1798,41 +7243,42 @@ fn authority_at(
     Ok(&declared_keys & &in_force)
 }
 
-/// Whether the envelope at `index` is a trigger signed — cryptographically, not just by
-/// claimed `key_id` — by the record's authority.
+/// Whether the ALREADY-VALID envelope at `index` is a trigger signed by the record's authority.
 ///
-/// Receipt format §5 step 3a splits this into two separate tests, in order:
+/// I-D §8.4 fixes two separate tests, in that order — "Validity and authorization are separate
+/// tests, applied in that order" — and this function is the SECOND of them only. §7.5.1 4e says
+/// so directly: authorization is "applied only to envelopes already valid under 4d". The trigger
+/// is authorized if and only if at least one of its signers holds a key in the authority key set
+/// active at `index`. Core spec §2.3.3 requires a trigger to be "signed by the record's
+/// authority", not signed *exclusively* by authority keys — a trigger genuinely co-signed by the
+/// authority AND some other active producer key is still authorized. That is also why the two
+/// tests must stay separate rather than being merged into one resolver restricted to authority
+/// keys: such a resolver would fail the whole envelope over any additional, genuinely valid
+/// co-signer, misclassifying an authorized trigger as a challenge.
 ///
-/// 1. **Envelope validity**: EVERY entry in `signatures` MUST resolve to a producer key active
-///    at `index` and MUST verify (`crate::verify_envelope`'s AND-all semantics). An envelope
-///    carrying even one non-verifying or unresolvable entry is invalid outright, regardless of
-///    its other entries — a candidate's `signatures[].key_id` naming an authority key proves
-///    nothing on its own, since the `sig` bytes are controlled by whoever assembled the
-///    statement, who may be a party without authority.
-/// 2. **Authorization**, tested only once the envelope is valid: the trigger is authorized iff
-///    AT LEAST ONE of those verified signers is in the authority key set active at `index`.
-///    Core spec §2.3.3 requires a trigger to be "signed by the record's authority", not signed
-///    *exclusively* by authority keys — a trigger genuinely co-signed by the authority AND some
-///    other active producer key is still authorized.
+/// # Precondition
 ///
-/// Splitting the two tests this way, rather than restricting step 1's resolver to authority
-/// keys, is what makes a legitimately co-signed trigger classify correctly: restricting
-/// resolution to authority keys would make ANY additional, genuinely valid co-signer from a
-/// non-authority key fail the whole envelope, misclassifying an authorized trigger as a
-/// challenge.
+/// The envelope has already passed 4d at `index` — every entry in `signatures` resolved to a
+/// producer key active there and verified over `JCS(payload)`. Both call sites establish it,
+/// and neither can be reached otherwise: [`verify_trigger_authority`] takes the subject's own
+/// envelope, which [`verify_nested`] verifies through [`verify_envelope_at`] before any claim
+/// material is read, and [`verify_competing_triggers`] takes candidates out of an
+/// [`Enumeration`] whose every non-induction envelope [`verify_enumeration`] has verified at its
+/// own index. Re-checking the signature here would therefore never reject anything, while
+/// leaving the impression that a caller MAY hand this function unvalidated material — the one
+/// reading §8.4's ordering rules out. A false return means a valid envelope whose signers hold
+/// no authority, which §7.5.1 4e calls a challenge and "not a defect".
 fn is_authorized_trigger(
     ctx: &ClaimCtx<'_>,
     envelope: &Value,
     dataset: &str,
     by_ingestion: bool,
     index: u64,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<bool> {
-    budget.spend(1)?;
-    let pubkeys = ctx.governance.producer_pubkeys_at(index);
-    if !crate::verify_envelope(envelope, |key_id| pubkeys.get(key_id).cloned())? {
-        return Ok(false);
-    }
+    // The §7.8 budget is charged per candidate examined: resolving the authority key set walks
+    // the governance state at `index`, which is per-candidate work whatever it concludes.
+    run.spend(1)?;
     let authority = authority_at(ctx, dataset, by_ingestion, index)?;
     let signers: BTreeSet<String> = array(envelope, "signatures")?
         .iter()
@@ -1846,19 +7292,20 @@ fn is_authorized_trigger(
 ///
 /// Format §5 step 3a requires this to be a real cryptographic check, not a `key_id` name match:
 /// a signature entry that merely *names* an authority key proves nothing on its own, since the
-/// `sig` bytes are controlled by whoever assembled the envelope. This routes through the same
-/// `is_authorized_trigger` machinery `verify_competing_triggers` uses, so the receipt's own
-/// envelope must actually verify (every entry, against a key active at `ctx.subject_index`) and
-/// at least one of its genuine signers must be the record's authority.
+/// `sig` bytes are controlled by whoever assembled the envelope. That check has already run by
+/// the time this is reached — [`verify_nested`] verifies the subject's own envelope under I-D
+/// §7.5.1 4d, at its own entry index, before any claim material is read — so what remains here
+/// is 4e's authority comparison over signers already known genuine, through the same
+/// [`is_authorized_trigger`] that `verify_competing_triggers` uses.
 fn verify_trigger_authority(
     ctx: &ClaimCtx<'_>,
     introduction: &Embedded,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
     let envelope = obj(ctx.receipt, "envelope")?;
     let by_ingestion = introduced_by_ingestion(introduction);
-    if !is_authorized_trigger(ctx, envelope, dataset, by_ingestion, ctx.subject_index, budget)? {
+    if !is_authorized_trigger(ctx, envelope, dataset, by_ingestion, ctx.subject_index, run)? {
         let signers: BTreeSet<String> = array(envelope, "signatures")?
             .iter()
             .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
@@ -1872,11 +7319,17 @@ fn verify_trigger_authority(
     Ok(())
 }
 
-/// The §3 competing-trigger enumeration required by `trigger-effective`.
+/// The §7.2 competing-trigger enumeration required by `trigger-effective`.
+///
+/// Every candidate's envelope has already been verified at its own entry index by
+/// [`verify_enumeration`] — §7.2: "Every competing candidate's envelope MUST be verified under
+/// Section 2.1 before authority is compared" — so what remains here is purely the §7.5.1 4e
+/// authority comparison over envelopes already known valid. A candidate that fails validity
+/// never reaches this point: it is `invalid` for the run, not a challenge.
 fn verify_competing_triggers(
     ctx: &ClaimCtx<'_>,
     introduction: &Embedded,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let introduction_index = introduction.entry_index;
     if ctx.assurance.competing_triggers != "enumerated" || ctx.assurance.governance != "enumerated"
@@ -1891,8 +7344,14 @@ fn verify_competing_triggers(
     let competing = obj(material, "competing")?;
     let range_material = obj(competing, "corpus_range")?;
 
-    let enumeration =
-        verify_enumeration(range_material, &root, tree_size, "competing triggers", budget)?;
+    let enumeration = verify_enumeration(
+        range_material,
+        ctx.governance,
+        &root,
+        tree_size,
+        "competing triggers",
+        run,
+    )?;
 
     // The range must be the complete corpus prefix, or the prefix from the record's
     // introduction — sound because a trigger anchored before the introduction is never
@@ -1911,8 +7370,8 @@ fn verify_competing_triggers(
     // Among the **effective** triggers naming the record, the greatest entry index governs
     // (spec §2.3.3); the subject must be that one.
     //
-    // Effectiveness is decided before the index comparison, not after. A trigger signed by a
-    // key that is not the record's authority anchors as a challenge and is "never traversed" —
+    // Effectiveness is decided before the index comparison, not after. A VALID trigger signed
+    // by a key that is not the record's authority anchors as a challenge, "never traversed" —
     // so it can never displace an earlier valid trigger, however much later it sits in the
     // log. Selecting by index first and filtering afterwards would let anyone who can get a
     // statement anchored unseat the governing trigger of a record they have no authority over.
@@ -1922,6 +7381,15 @@ fn verify_competing_triggers(
     let mut challenges = Vec::new();
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
         let index = enumeration.from_index + offset as u64;
+        // I-D §7.5.1 4d and 4e: a void entry "is excluded before any authority comparison", and
+        // "a trigger whose envelope does not verify is void and never effective, whoever signed
+        // it, and it is not a challenge". The 4d sweep over this range has already decided which
+        // those are. §7.2's `trigger-effective` row says the same of this comparison: a
+        // purported candidate that does not verify is "never a challenge, never effective, and
+        // not a defect of this receipt".
+        if run.is_void(index) {
+            continue;
+        }
         let payload = payload_of(envelope)?;
         if !matches!(statement_type(payload)?, "retraction" | "correction")
             || payload.get("dataset").and_then(Value::as_str) != Some(dataset.as_str())
@@ -1929,7 +7397,7 @@ fn verify_competing_triggers(
         {
             continue;
         }
-        if is_authorized_trigger(ctx, envelope, dataset, by_ingestion, index, budget)? {
+        if is_authorized_trigger(ctx, envelope, dataset, by_ingestion, index, run)? {
             governing = Some(index);
         } else {
             challenges.push(index);
@@ -1937,7 +7405,7 @@ fn verify_competing_triggers(
     }
     if !challenges.is_empty() {
         // Surfaced, as §2.3.3 requires — but not traversed, and not permitted to govern.
-        budget.spend(challenges.len() as u64)?;
+        run.spend(challenges.len() as u64)?;
     }
     if governing != Some(ctx.subject_index) {
         return Err(ReceiptError::ClosureMismatch(format!(
@@ -1951,15 +7419,14 @@ fn verify_competing_triggers(
 }
 
 /// `disposition-declared` / `disposition-effective` (§3).
-fn verify_disposition(
-    ctx: &ClaimCtx<'_>,
-    budget: &mut Budget,
-    trigger_kind: &'static str,
-) -> Result<()> {
+fn verify_disposition(ctx: &ClaimCtx<'_>, run: &mut Run, trigger_kind: &'static str) -> Result<()> {
     ctx.require_subject_type("propagation")?;
     let material = ctx.material()?;
-    let trigger = verify_embedded(ctx, "trigger", trigger_kind, &[trigger_kind], budget)?;
+    let trigger = verify_embedded(ctx, "trigger", trigger_kind, &[trigger_kind], run)?;
 
+    // §7.6 again, reached from inside claim material: the embedded receipt's subject and entry
+    // index against the material that references it.
+    run.phase(Assertion::CrossField);
     // The propagation must name the trigger the embedded receipt proves (spec §2.3.4).
     if text(ctx.payload, "trigger")? != trigger.verdict.subject_statement_id {
         return Err(ReceiptError::EmbeddedSubjectMismatch {
@@ -1977,6 +7444,7 @@ fn verify_disposition(
         });
     }
 
+    run.phase(Assertion::ClaimMaterial);
     let leaf = material.get("disposition_leaf").ok_or_else(|| ctx.missing("disposition_leaf"))?;
     let leaf_record = (text(leaf, "dataset")?.to_owned(), text(leaf, "record")?.to_owned());
     if ctx.record_subject != Some(&leaf_record) {
@@ -2002,76 +7470,127 @@ fn verify_disposition(
         &path_strings(material, "leaf_path")?,
         &parse_hash_hex(text(ctx.payload, "affected_root")?)?,
         "disposition leaf",
-        budget,
+        run,
     )
 }
 
-/// Authenticate the propagation's declared checkpoint D as a real, log-signed checkpoint.
+/// Authenticate a checkpoint the receipt carries alongside its own anchoring checkpoint.
 ///
-/// D is carried as a full signed checkpoint object (format §3). Its signature is checked
-/// against a log key that both appears in the receipt's `keys.log` block *and* is declared by
-/// the manifest version active for **D's** own tree size — not A's. The two can differ: a
-/// manifest anchored between D and A rotates the log key set, and a checkpoint issued under
-/// the earlier state must be validated by the earlier key (format §2.2).
-fn authenticate_declared_checkpoint(
-    ctx: &ClaimCtx<'_>,
+/// Two claim shapes need this: the propagation's declared checkpoint D (format §3) and
+/// `anchoring.later_checkpoint` (§2.1). Both are carried as full signed checkpoint objects, and
+/// both are validated the same way — the signature is checked against a log key that appears in
+/// the receipt's `keys.log` block *and* is declared by the manifest version active for **that
+/// checkpoint's own** tree size, never for the anchoring checkpoint's. The two can differ: a
+/// manifest anchored between them rotates the log key set, and a checkpoint issued under one
+/// state must be validated by that state's key (format §2.2).
+fn authenticate_checkpoint(
+    receipt: &Value,
+    policy: &TrustPolicy,
+    governance: &Governance<'_>,
     declared: &Value,
-    budget: &mut Budget,
+    profile: &AdaptorProfile,
+    profile_id: &str,
+    run: &mut Run,
 ) -> Result<()> {
     let key_id = text(declared, "key_id")?;
     let tree_size = number(declared, "tree_size")?;
-    let (active_index, active_manifest) = ctx.governance.active_for(tree_size)?;
+    let (active_index, active_manifest) = governance.active_for(tree_size)?;
+    let active_log = log_object(active_manifest)?;
 
-    // The log id must match the manifest version active for D, exactly as it must for A
-    // (adaptor §5) — D gets no relaxed check just because it is the earlier checkpoint.
-    if text(obj(active_manifest, "log")?, "id")? != text(declared, "log_id")? {
+    // I-D §3.2: the same adaptor-binding check every other checkpoint gets, applied here
+    // under THIS checkpoint's own active manifest — a manifest anchored between the primary
+    // checkpoint and this one could in principle pin a different adaptor.
+    check_adaptor_binding(active_log, profile_id, profile)?;
+
+    // The log id must match the manifest version active for this checkpoint, exactly as it must
+    // for the anchoring one (adaptor §5) — no relaxed check for the second checkpoint.
+    if text(active_log, "log_id")? != text(declared, "log_id")? {
         return Err(ReceiptError::GovernanceChainInvalid(
             "checkpoint `log_id` is not the log the active manifest declares".to_owned(),
         ));
     }
 
-    // D's log key resolves against the manifest active for D's *own* tree size, and its
-    // `keys.log` entry binds to that same manifest version (format §2.2) — the normal
-    // source/binding contract, not a byte-equality shortcut. `active_index` can differ from
-    // A's: a manifest anchored between D and A rotates the log key set, and a checkpoint issued
-    // under the earlier state must be validated by the earlier key.
-    // The same `key_id` may appear more than once in `keys.log` — a receipt authenticating two
-    // checkpoints (D here, A elsewhere) can legitimately carry the same physical log key bound
-    // to each checkpoint's own active manifest. Take whichever entry actually binds at D's
-    // `active_index`, not merely the first entry with a matching `key_id` (that could be the
-    // one meant for A).
-    let mut last_error = None;
-    let mut pubkey = None;
-    for entry in array(obj(ctx.receipt, "keys")?, "log")? {
-        if text(entry, "key_id").ok() != Some(key_id) {
-            continue;
-        }
-        check_key_id(entry)?;
-        match bind_log_or_witness_key(ctx.governance, entry, "log", active_index) {
-            Ok(bound) => {
-                pubkey = Some(bound);
-                break;
-            }
-            Err(e) => last_error = Some(e),
-        }
-    }
-    let pubkey = pubkey.ok_or_else(|| {
-        last_error.unwrap_or(ReceiptError::KeyNotBound {
-            key_id: key_id.to_owned(),
-            entry_index: active_index,
-        })
+    // `declared` is `anchoring.later_checkpoint` or `propagation-complete`'s own declared
+    // checkpoint D. The first had its `raw` reconciled at §7.5 step 2 with the rest of the
+    // `anchoring` block ([`reconcile_anchoring_raw`]); D is claim material rather than an
+    // `anchoring` member, so this is the call that covers it, and repeating the check for
+    // `later_checkpoint` costs one absent-member read.
+    reconcile_checkpoint_raw(declared, profile_id)?;
+
+    // The log key resolves against the manifest active for this checkpoint's *own* tree size,
+    // and its `keys.log` entry binds to that same manifest version (format §2.2) — the normal
+    // source/binding contract, not a byte-equality shortcut. `active_index` can differ from the
+    // anchoring checkpoint's: a manifest anchored between them rotates the log key set, and a
+    // checkpoint issued under one state must be validated by that state's key. The same
+    // `key_id` may appear more than once in `keys.log` — a receipt authenticating two
+    // checkpoints can legitimately carry the same physical log key bound to each checkpoint's
+    // own active manifest — so this resolves against THIS checkpoint's own `active_index`,
+    // exactly as [`verify_checkpoint`] does for the primary checkpoint.
+    let (log_keys, log_attempted, _) =
+        bind_keys_by_group(receipt, policy, &governance.scope_at(active_index), "log")?;
+    let signing_key = log_keys.get(key_id).ok_or_else(|| {
+        let entry_index = log_attempted.get(key_id).copied().unwrap_or(active_index);
+        ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
     })?;
 
-    budget.spend(1)?;
-    if verify_signature(
-        &decode_pubkey(&pubkey)?,
-        &checkpoint_signing_bytes(declared)?,
+    run.spend(1)?;
+    if !verify_signature(
+        &decode_pubkey(&signing_key.pubkey)?,
+        &checkpoint_signing_bytes_for(declared, profile_id)?,
         text(declared, "signature")?,
     )? {
-        Ok(())
-    } else {
-        Err(ReceiptError::CheckpointSignatureInvalid)
+        return Err(ReceiptError::CheckpointSignatureInvalid);
     }
+
+    Ok(())
+}
+
+/// Verify `anchoring.later_witnesses[]` against `later_checkpoint` (I-D §7.1: "Present if and
+/// only if `later_checkpoint` is carried. An array in the shape of `anchoring.witnesses[]`,
+/// each element a cosignature over `later_checkpoint` rather than over `anchoring.checkpoint`,
+/// and validated under the manifest version active for `later_checkpoint.tree_size`... At L3…
+/// a receipt asserting `continued_history` MUST carry at least one element that verifies, and
+/// one that does not is `invalid` for that assertion; below L3 the array MAY be empty").
+///
+/// Distinct from `anchoring.checkpoint`'s own witnesses in exactly one respect: WHICH bytes a
+/// cosignature is computed over (`later_checkpoint`, not the primary checkpoint) and WHICH
+/// manifest version's witness key set validates it (the one active for `later_checkpoint`'s
+/// own `tree_size`). The cosignatures travel as a SIBLING to `later_checkpoint`, never nested
+/// inside it: the log signs `later_checkpoint` itself, and a witness cosigns that SAME signed
+/// object verbatim (adaptor §6/§11: "the signed checkpoint object, INCLUDING its signature
+/// member") — nesting cosignatures into it would change the very bytes both the log's
+/// signature and each cosignature's own preimage are computed over.
+///
+/// This has NO counterpart for `propagation-complete`'s declared checkpoint D: format §7.2
+/// authenticates D "by either a consistency proof from D to the receipt's checkpoint or
+/// recomputation of D's prefix root from the enumerated prefix" — no cosignature requirement
+/// on D at all, so [`authenticate_checkpoint`] (shared by both D and `later_checkpoint`) never
+/// touches witnesses, and this function exists only for `later_checkpoint`.
+fn verify_later_witnesses(
+    receipt: &Value,
+    policy: &TrustPolicy,
+    governance: &Governance<'_>,
+    anchoring: &Value,
+    later_checkpoint: &Value,
+    run: &mut Run,
+) -> Result<Option<()>> {
+    let tree_size = number(later_checkpoint, "tree_size")?;
+    let (active_index, active_manifest) = governance.active_for(tree_size)?;
+
+    run.phase(Assertion::Witnesses);
+    let binding =
+        bind_keys_by_group(receipt, policy, &governance.scope_at(active_index), "witness")?;
+    let established = verify_witness_cosignatures(
+        anchoring,
+        "later_witnesses",
+        &WitnessContext { checkpoint: later_checkpoint, active_manifest, active_index, tree_size },
+        binding,
+        run,
+    )?;
+    // §7.6 asks whether `later_witnesses` verifies, so "none verified at a level that requires
+    // none" answers it as much as "one verified" does; only a cosignature this verifier could
+    // not evaluate leaves the rule undecided.
+    Ok(established.map(|_| ()))
 }
 
 /// `propagation-complete` (§3): the anchored affected set equals the recomputable closure.
@@ -2079,7 +7598,7 @@ fn authenticate_declared_checkpoint(
 // binding, prefix enumeration, tree material, trigger effectiveness, closure — and each step
 // consumes the previous one's output; splitting it would only scatter that chain.
 #[allow(clippy::too_many_lines)]
-fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
+fn verify_propagation_complete(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     ctx.require_subject_type("propagation")?;
     if ctx.assurance.governance != "enumerated" {
         return Err(ReceiptError::AssuranceMismatch { field: "governance" });
@@ -2109,7 +7628,27 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
             member: "tree_size".to_owned(),
         });
     }
-    authenticate_declared_checkpoint(ctx, carried_d, budget)?;
+    // Format §7.2: D is authenticated "by either a consistency proof from D to the receipt's
+    // checkpoint or recomputation of D's prefix root from the enumerated prefix" — no
+    // cosignature requirement on D at all, unlike `anchoring.later_checkpoint`
+    // ([`verify_later_witnesses`]).
+    // Authenticating D is checkpoint authentication, and rests on the profile that fixes the
+    // checkpoint serialization exactly as the receipt's own checkpoint does. Where none was
+    // resolved, the assertion is already reported `unverifiable`; the prefix work below is
+    // structural and still runs.
+    if let Some(profile) = ctx.profile {
+        run.phase(Assertion::CheckpointAuthentication);
+        authenticate_checkpoint(
+            ctx.receipt,
+            ctx.policy,
+            ctx.governance,
+            carried_d,
+            profile,
+            ctx.profile_id,
+            run,
+        )?;
+        run.phase(Assertion::ClaimMaterial);
+    }
 
     // The prefix is `[0, tree_size(D))`, and its range proof is checked against **A's** root:
     // A is the checkpoint this verifier signature-checked and saw witness-cosigned. Verifying
@@ -2118,7 +7657,14 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
     // prefix of A, which is what makes D usable without a second proof mechanism.
     let root = parse_hash_hex(text(ctx.anchoring_checkpoint, "root_hash")?)?;
     let tree_size = declared_size;
-    let prefix = verify_enumeration(prefix_material, &root, anchor_size, "corpus prefix", budget)?;
+    let prefix = verify_enumeration(
+        prefix_material,
+        ctx.governance,
+        &root,
+        anchor_size,
+        "corpus prefix",
+        run,
+    )?;
     if prefix.from_index != 0 || prefix.to_index != tree_size {
         return Err(ReceiptError::RangeProofInvalid {
             what: "corpus prefix",
@@ -2169,7 +7715,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
     // competing-trigger checks establishes that this trigger governs.
     let trigger_statement = text(ctx.payload, "trigger")?.to_owned();
     let trigger =
-        verify_embedded(ctx, "trigger", "trigger-effective", &["trigger-effective"], budget)?;
+        verify_embedded(ctx, "trigger", "trigger-effective", &["trigger-effective"], run)?;
     if trigger.verdict.subject_statement_id != trigger_statement {
         return Err(ReceiptError::EmbeddedSubjectMismatch {
             what: "trigger",
@@ -2203,24 +7749,47 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
         ));
     }
 
-    budget.spend(u64::try_from(prefix.entries.len()).unwrap_or(u64::MAX))?;
-    let closure = affected_set(&prefix.entries, &trees, trigger_index, prefix.entries.len())
-        .map_err(|source| match source {
-            AhlError::MissingTreeMaterial(root) => ReceiptError::TreeMaterialInvalid {
-                root,
-                detail: "no leaf material carried".to_owned(),
-            },
-            AhlError::TreeRootMismatch { root, recomputed } => ReceiptError::TreeMaterialInvalid {
-                root,
-                detail: format!("recomputes to {recomputed}"),
-            },
-            AhlError::TreeCountMismatch { root, declared, got } => {
-                ReceiptError::TreeMaterialInvalid {
-                    root,
-                    detail: format!("commits {declared} leaves, {got} carried"),
-                }
+    run.spend(u64::try_from(prefix.entries.len()).unwrap_or(u64::MAX))?;
+    // I-D §2.1: a void envelope is "never traversed by closure"; §7.5.1 4d says the same of an
+    // entry of a propagation prefix. Positions are preserved — an entry index is a position in
+    // this prefix — and each void one is replaced by material the walk reads nothing from, so it
+    // contributes no edge and no seed. The prefix's own root was recomputed above over the
+    // CARRIED bytes, which is what the checkpoint commits; voiding is about traversal, not about
+    // what the log anchored.
+    let traversable: Vec<Value> = prefix
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(offset, entry)| {
+            let index = prefix.from_index + offset as u64;
+            if run.is_void(index) {
+                Value::Null
+            } else {
+                entry.clone()
             }
-            other => ReceiptError::Ahl(other),
+        })
+        .collect();
+    let closure =
+        affected_set(&traversable, &trees, trigger_index, traversable.len()).map_err(|source| {
+            match source {
+                AhlError::MissingTreeMaterial(root) => ReceiptError::TreeMaterialInvalid {
+                    root,
+                    detail: "no leaf material carried".to_owned(),
+                },
+                AhlError::TreeRootMismatch { root, recomputed } => {
+                    ReceiptError::TreeMaterialInvalid {
+                        root,
+                        detail: format!("recomputes to {recomputed}"),
+                    }
+                }
+                AhlError::TreeCountMismatch { root, declared, got } => {
+                    ReceiptError::TreeMaterialInvalid {
+                        root,
+                        detail: format!("commits {declared} leaves, {got} carried"),
+                    }
+                }
+                other => ReceiptError::Ahl(other),
+            }
         })?;
 
     let anchored: BTreeSet<(String, String)> = dispositions
@@ -2342,9 +7911,12 @@ fn render(claim_type: &str, assurance: &Assurance) -> String {
     } else {
         "; the anchoring checkpoint carries no verified witness cosignature"
     });
-    if !assurance.continued_history {
-        boundary.push_str("; no claim of continued append-only history beyond that checkpoint");
-    }
+    boundary.push_str(if assurance.continued_history {
+        "; the log's history continued to be append-only through the later checkpoint carried, \
+         which is not evidence that every checkpoint the cadence required was published"
+    } else {
+        "; no claim of continued append-only history beyond that checkpoint"
+    });
     boundary.push_str(match assurance.content_binding.as_str() {
         "plain-verified" => "; record content verified against the commitment",
         "keyed-authorized" => {
@@ -2353,4 +7925,530 @@ fn render(claim_type: &str, assurance: &Assurance) -> String {
         _ => "; record content not verified",
     });
     boundary
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    use super::{
+        chain_version_index, log_key_set, verify_enumerated_envelopes, verify_rotation_proof,
+        verify_void_chain_envelopes, witness_key_set, AdaptorCapabilities, AdaptorProfile,
+        Assertion, Enumeration, Governance, Limits, Outcome, ReceiptError, RotationContext, Run,
+        TrustPolicy, MAX_EMBEDDED_RECEIPTS, TEST_ADAPTOR_PROFILE_ID,
+    };
+    use crate::{
+        checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, sha256_hex, statement_id,
+        tree_root, TestKey,
+    };
+    use std::collections::BTreeSet;
+
+    /// I-D §6.2: "Each manifest version's log and witness key objects replace the prior set in
+    /// full" — a SET, not a sequence, so re-listing the same key objects in a different order
+    /// is NOT a governance-key rotation (I-D §7.1). `log_key_set`/`witness_key_set` back the
+    /// rotation-detection comparison in `read_chain`, and this is the case a full receipt
+    /// vector cannot exercise: reordering a manifest's carried `log`/`witnesses` array changes
+    /// that manifest envelope's JCS bytes, and so its leaf hash, invalidating the governance
+    /// chain hop's own committed inclusion path before the rotation check is ever reached —
+    /// the same structural constraint documented for the `media_type` presence test in
+    /// `tests/vectors.rs`.
+    /// I-D §2.1: "A producer MUST NOT anchor two envelopes bearing the same statement id. If
+    /// duplicates nevertheless occur, the envelope with the smallest entry index governs and
+    /// later ones are void."
+    ///
+    /// The two scenarios this covers are the ones §7.6 reads off the raw chain: with the
+    /// induction STOPPED, a subject naming a manifest that is also duplicated later must be
+    /// judged against the GOVERNING index — the ordering rule asks whether the named version is
+    /// anchored strictly before the subject, and a void copy anchored after it answers nothing;
+    /// and without a stop, the same duplicate is void, so it never becomes the version a
+    /// `subject.manifest` reference resolves to and the receipt's outcome is whatever the rest
+    /// of its material earns.
+    ///
+    /// Tested on the index the rules consume rather than end to end, for a structural reason:
+    /// §7.5 step 3 proves every chain element's `entry_index` by recomputing its inclusion path
+    /// at that index, and §7.1 requires the chain STRICTLY ascending, so a duplicate statement
+    /// id in a chain needs the same envelope genuinely anchored at two entry indexes. This
+    /// corpus's log contains no such pair, and a fabricated second index cannot open the
+    /// checkpoint root.
+    #[test]
+    fn a_duplicate_statement_id_is_governed_by_its_smallest_index() {
+        let envelope = json!({
+            "payload": { "type": "manifest", "ahl_version": "0.4", "issued_at": "2026-01-01T00:00:00Z" },
+            "signatures": [],
+        });
+        let governing = statement_id(&envelope).expect("a well-formed envelope");
+        let later = json!({
+            "payload": { "type": "manifest", "ahl_version": "0.4", "issued_at": "2026-06-01T00:00:00Z" },
+            "signatures": [],
+        });
+        let chain = vec![
+            json!({ "envelope": envelope, "entry_index": 0 }),
+            json!({ "envelope": later, "entry_index": 25 }),
+            // The same statement, anchored again after the rotation: void.
+            json!({ "envelope": envelope, "entry_index": 30 }),
+        ];
+
+        let (index, carried) = chain_version_index(&chain).expect("a well-formed chain");
+        assert_eq!(
+            index.get(&governing),
+            Some(&0),
+            "the smallest entry index governs; the later copy is void (I-D §2.1)"
+        );
+        // A subject at entry index 20 naming that version passes §7.6's ordering rule against
+        // the governing index and would fail it against the void copy's.
+        assert!(index[&governing] < 20);
+        // Every carried index is still reported, void copies included: §7.5.1 4c asks what the
+        // CHAIN carries against what the range reveals.
+        assert_eq!(carried, std::collections::BTreeSet::from([0, 25, 30]));
+
+        // And the rule the induction applies to the same chain, walked in ascending order: the
+        // first envelope bearing a statement id governs, later ones are void and are skipped
+        // whole — no effect, no rotation proof consumed, no version to resolve to. With no
+        // induction stop the receipt's outcome is therefore whatever the rest of its material
+        // earns: a void element neither adds evidence nor withdraws any.
+        let mut governing_ids = std::collections::BTreeSet::new();
+        let void: Vec<bool> = chain
+            .iter()
+            .map(|hop| {
+                let id = statement_id(&hop["envelope"]).expect("a well-formed envelope");
+                !governing_ids.insert(id)
+            })
+            .collect();
+        assert_eq!(void, vec![false, false, true]);
+    }
+
+    /// I-D §7.5 step 4: "Establish the key state, and verify EVERY CARRIED ENVELOPE, by the
+    /// procedure of the next subsection." §7.5.1 4d: "With K established, verify every carried
+    /// envelope that is not part of the induction... An envelope carrying a non-verifying entry,
+    /// or an entry naming a key not active at that index, is invalid however many other entries
+    /// verify."
+    ///
+    /// A void duplicate (I-D §2.1) is carried and was not walked, so 4d reaches it. Void of
+    /// EFFECT is not void of verification: it applies nothing to K, resolves no version and
+    /// consumes no rotation proof, and it still has to verify at its own entry index.
+    ///
+    /// Driven through [`verify_void_chain_envelopes`] — the function `verify_nested` calls —
+    /// rather than end to end, for the reason
+    /// [`a_duplicate_statement_id_is_governed_by_its_smallest_index`] states: a chain duplicate
+    /// needs the same envelope genuinely anchored at two entry indexes, and step 3 proves each
+    /// index by an inclusion path the corpus's log cannot produce for a second one. The same
+    /// holds for an enumerated `key` duplicate, whose index is fixed by the range proof.
+    #[test]
+    fn a_void_duplicate_is_still_verified_under_4d() {
+        fn governance<'a>(
+            manifest: &'a Value,
+            void: &'a Value,
+            unestablished_from: Option<u64>,
+        ) -> Governance<'a> {
+            Governance {
+                mode: "enumerated",
+                manifests: vec![(0, manifest)],
+                events: Vec::new(),
+                manifest_by_version_id: std::collections::BTreeMap::new(),
+                chain_index: std::collections::BTreeMap::new(),
+                walked_indexes: std::collections::BTreeSet::from([0]),
+                void_chain: vec![(30, void)],
+                chain_indexes: std::collections::BTreeSet::from([0, 30]),
+                unestablished_from,
+            }
+        }
+
+        let producer = TestKey::from_seed_hex("producer", &"11".repeat(32)).expect("32-byte seed");
+        let manifest = json!({
+            "type": "manifest",
+            "keys": [ { "key_id": producer.key_id(), "pubkey": producer.pubkey() } ],
+        });
+        let payload = json!({ "type": "key", "ahl_version": "0.4" });
+        let signed = |key: &TestKey| {
+            json!({
+                "payload": payload,
+                "signatures": [ {
+                    "key_id": key.key_id(),
+                    "sig": key.sign(&jcs(&payload)),
+                } ],
+            })
+        };
+        let verifying = signed(&producer);
+        let mut defective = signed(&producer);
+        defective["signatures"][0]["sig"] = json!(producer.sign(b"other bytes entirely"));
+
+        // The induction walked the genesis alone; the duplicate at entry index 30 is void, and
+        // its index is therefore not among the ones the enumerated sweep exempts.
+        assert!(!governance(&manifest, &verifying, None).walked_indexes.contains(&30));
+
+        // A void duplicate that verifies costs the run nothing.
+        let mut run = Run::new(Limits::default());
+        verify_void_chain_envelopes(&governance(&manifest, &verifying, None), &mut run)
+            .expect("a void duplicate whose signature verifies");
+        assert!(run.findings.is_empty(), "{:#?}", run.findings);
+
+        // One that does not verify is `invalid`, however void its effect.
+        let mut run = Run::new(Limits::default());
+        run.phase(Assertion::EnvelopeValidity);
+        let error = verify_void_chain_envelopes(&governance(&manifest, &defective, None), &mut run)
+            .expect_err("a void duplicate whose signature does not verify");
+        assert!(
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 30 }),
+            "{error}"
+        );
+        assert_eq!(error.class(), Outcome::Invalid);
+        // The phase it is raised in is the one that reports it: 4d is envelope validity.
+        assert_eq!(run.attribute(&error), Assertion::EnvelopeValidity);
+
+        // Past an induction stop the key state at that index was never established, so the
+        // check does not run and the assertion rests on `governance` instead.
+        let mut run = Run::new(Limits::default());
+        let verified =
+            verify_void_chain_envelopes(&governance(&manifest, &defective, Some(25)), &mut run)
+                .expect("no key state was established at entry index 30");
+        assert!(verified.is_empty(), "an unverified index is not an exempt one");
+    }
+
+    /// One envelope-signature verification per carried envelope under 4d — the repeated
+    /// signature check is the one charge this suppresses, not every charge over that entry.
+    ///
+    /// Under enumerated governance the void chain hop is also an entry of the range, since
+    /// §7.5.1 4c requires the chain to show every manifest the range reveals. Verifying it in
+    /// both sweeps would charge it twice, and §7.8's budget is a count: a receipt whose budget
+    /// is sized for the work it needs would then exhaust it and be reported `unverifiable` over
+    /// nothing the receipt did, which §7.7 keeps for capability gaps alone.
+    #[test]
+    fn a_void_duplicate_is_charged_to_the_work_budget_once() {
+        let producer = TestKey::from_seed_hex("producer", &"11".repeat(32)).expect("32-byte seed");
+        let manifest = json!({
+            "type": "manifest",
+            "keys": [ { "key_id": producer.key_id(), "pubkey": producer.pubkey() } ],
+        });
+        let payload = json!({
+            "type": "key",
+            "ahl_version": "0.4",
+            "issued_at": "2026-01-01T00:00:00Z",
+            "manifest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        });
+        let envelope = json!({
+            "payload": payload,
+            "signatures": [ {
+                "key_id": producer.key_id(),
+                "sig": producer.sign(&jcs(&payload)),
+            } ],
+        });
+        // One object, carried twice: as the chain's void hop and as the range's entry at the
+        // same index.
+        let enumeration = Enumeration { from_index: 30, to_index: 31, entries: vec![envelope] };
+        let governance = Governance {
+            mode: "enumerated",
+            manifests: vec![(0, &manifest)],
+            events: Vec::new(),
+            manifest_by_version_id: std::collections::BTreeMap::new(),
+            chain_index: std::collections::BTreeMap::new(),
+            walked_indexes: std::collections::BTreeSet::from([0]),
+            void_chain: vec![(30, &enumeration.entries[0])],
+            chain_indexes: std::collections::BTreeSet::from([0, 30]),
+            unestablished_from: None,
+        };
+
+        // A budget of exactly one signature check: the count this receipt's material needs.
+        let mut run = Run::new(Limits { max_work_units: 1, ..Limits::default() });
+        let verified = verify_void_chain_envelopes(&governance, &mut run)
+            .expect("the void duplicate verifies");
+        assert_eq!(run.work, 1, "one envelope, one charge");
+
+        verify_enumerated_envelopes(&enumeration, &governance, &verified, &mut run)
+            .expect("the range's copy of it is not verified a second time");
+        assert_eq!(run.work, 1, "and not charged a second time");
+
+        // Without the exemption the same run exhausts a budget sized for its own work, which is
+        // the defect: `unverifiable` over nothing the receipt did.
+        let mut run = Run::new(Limits { max_work_units: 1, ..Limits::default() });
+        verify_void_chain_envelopes(&governance, &mut run).expect("the void duplicate verifies");
+        let error =
+            verify_enumerated_envelopes(&enumeration, &governance, &BTreeSet::new(), &mut run)
+                .expect_err("the second charge exhausts the budget");
+        assert!(matches!(error, ReceiptError::BudgetExhausted { .. }), "{error}");
+        assert_eq!(error.class(), Outcome::Unverifiable);
+    }
+
+    /// A manifest binding the induction never reached is a capability gap, not a defect.
+    ///
+    /// I-D §7.7 divides the two: material the receipt was required to carry and does not is
+    /// `invalid`, while "a capability the verifier lacks, a local configuration it has not been
+    /// given" is `unverifiable`. A manifest version absent from a chain the induction walked in
+    /// full is the first; the same version absent because the induction stopped at a rotation
+    /// it could not authenticate is the second, and a better-equipped verifier resolves it from
+    /// the same bytes.
+    ///
+    /// Tested here rather than through a vector because no receipt in this corpus can reach the
+    /// lookup with an unresolvable binding: the descriptor is read only where
+    /// `assurance.content_binding` is not `none`, and every statement anchored after the
+    /// corpus's one rotation either binds the PRE-rotation manifest (entry 34, stale by
+    /// construction) or carries no content evidence at all (the triggers, the key statements,
+    /// and the batch at entry 37, whose input-set trees are deliberately non-conforming).
+    #[test]
+    fn a_manifest_beyond_the_induction_is_unverifiable_not_invalid() {
+        let payload = json!({ "type": "manifest" });
+        let by_version_id =
+            std::collections::BTreeMap::from([("sha256:v1".to_owned(), (0u64, &payload))]);
+        // The chain CARRIES both versions; the walk reached only the first.
+        let chain_index = std::collections::BTreeMap::from([
+            ("sha256:v1".to_owned(), 0u64),
+            ("sha256:v2".to_owned(), 25u64),
+        ]);
+        let governance = |unestablished_from| Governance {
+            mode: "declared",
+            manifests: vec![(0, &payload)],
+            events: Vec::new(),
+            manifest_by_version_id: by_version_id.clone(),
+            chain_index: chain_index.clone(),
+            walked_indexes: std::collections::BTreeSet::from([0, 25]),
+            void_chain: Vec::new(),
+            chain_indexes: std::collections::BTreeSet::from([0, 25]),
+            unestablished_from,
+        };
+
+        // Walked in full: a version the walk reached and does not hold is material the receipt
+        // owed, and so is one the chain does not carry at all.
+        for version in ["sha256:v2", "sha256:absent"] {
+            let error = governance(None)
+                .manifest_for_binding(version)
+                .expect_err("the walk holds no such version");
+            assert!(matches!(error, ReceiptError::GovernanceChainInvalid(_)), "{error}");
+            assert_eq!(error.class(), Outcome::Invalid);
+        }
+
+        // Stopped, and the version is one the chain does not carry AT ALL: still `invalid` —
+        // the stop says nothing about a version no element of the chain ever named.
+        let error = governance(Some(25))
+            .manifest_for_binding("sha256:absent")
+            .expect_err("the chain carries no such version");
+        assert!(matches!(error, ReceiptError::GovernanceChainInvalid(_)), "{error}");
+        assert_eq!(error.class(), Outcome::Invalid);
+
+        // Stopped at a rotation: the same lookup is a gap in what this verifier could
+        // establish, and never a statement about the artifact.
+        let error = governance(Some(25))
+            .manifest_for_binding("sha256:v2")
+            .expect_err("the induction never reached that version");
+        assert!(
+            matches!(error, ReceiptError::GovernanceRotationUnverifiable { entry_index: 25 }),
+            "{error}"
+        );
+        assert_eq!(error.class(), Outcome::Unverifiable);
+        assert_eq!(error.assertion(), Assertion::Governance);
+
+        // A version the induction did reach resolves either way.
+        assert!(governance(Some(25)).manifest_for_binding("sha256:v1").is_ok());
+    }
+
+    /// I-D §7.8's second fixed limit: "Maximum embedded receipts per file: 64."
+    ///
+    /// Tested directly on the counter rather than through a receipt, because no receipt can
+    /// reach it: §7.2 gives a claim type at most two embedded-receipt members
+    /// (`introduction` and `replacement_introduction`), so a tree inside the fixed nesting
+    /// depth of 4 carries at most 2 + 4 + 8 + 16 = 30 embedded receipts. A file with 65 of them
+    /// is not expressible in the container, and a test that pretended otherwise would be
+    /// testing a shape the format does not have.
+    #[test]
+    fn the_embedded_receipt_count_is_capped_at_the_fixed_limit() {
+        let mut run = Run::new(Limits::default());
+        for _ in 0..MAX_EMBEDDED_RECEIPTS {
+            run.enter(1).expect("inside the fixed limit");
+        }
+        let error = run.enter(1).expect_err("one past the fixed limit");
+        assert!(matches!(error, ReceiptError::LimitExceeded("embedded receipts per file")));
+        assert_eq!(error.class(), Outcome::Invalid);
+        assert_eq!(error.assertion(), Assertion::Structure);
+        // The outermost receipt is not an embedded one, so entering at depth 0 never counts.
+        let mut run = Run::new(Limits::default());
+        for _ in 0..(MAX_EMBEDDED_RECEIPTS * 2) {
+            run.enter(0).expect("depth 0 is the receipt itself");
+        }
+    }
+
+    #[test]
+    fn key_set_comparison_is_order_independent() {
+        let aa = format!("sha256:{}", "aa".repeat(32));
+        let bb = format!("sha256:{}", "bb".repeat(32));
+        let cc = format!("sha256:{}", "cc".repeat(32));
+        let dd = format!("sha256:{}", "dd".repeat(32));
+        let forward = json!({
+            "log": { "keys": [
+                { "key_id": aa, "pubkey": "base64:AAAA", "valid_from_index": 0 },
+                { "key_id": bb, "pubkey": "base64:AAAB", "valid_from_index": 0 },
+            ] },
+            "witnesses": [
+                { "witness_id": "witness-1", "keys": [
+                    { "key_id": cc, "pubkey": "base64:AAAC", "valid_from_index": 0 },
+                ] },
+                { "witness_id": "witness-2", "keys": [
+                    { "key_id": dd, "pubkey": "base64:AAAD", "valid_from_index": 0 },
+                ] },
+            ],
+        });
+        let reordered = json!({
+            "log": { "keys": [
+                { "key_id": bb, "pubkey": "base64:AAAB", "valid_from_index": 0 },
+                { "key_id": aa, "pubkey": "base64:AAAA", "valid_from_index": 0 },
+            ] },
+            "witnesses": [
+                { "witness_id": "witness-2", "keys": [
+                    { "key_id": dd, "pubkey": "base64:AAAD", "valid_from_index": 0 },
+                ] },
+                { "witness_id": "witness-1", "keys": [
+                    { "key_id": cc, "pubkey": "base64:AAAC", "valid_from_index": 0 },
+                ] },
+            ],
+        });
+
+        assert_eq!(
+            log_key_set(&forward),
+            log_key_set(&reordered),
+            "reordering `log.keys` must not look like a rotation"
+        );
+        assert_eq!(
+            witness_key_set(&forward).expect("well-formed witnesses"),
+            witness_key_set(&reordered).expect("well-formed witnesses"),
+            "reordering `witnesses[]`, or the `keys` within one witness, must not look like a \
+             rotation"
+        );
+
+        let genuinely_different = json!({
+            "log": { "keys": [
+                { "key_id": aa, "pubkey": "base64:AAAA", "valid_from_index": 0 },
+            ] },
+            "witnesses": [],
+        });
+        assert_ne!(log_key_set(&forward), log_key_set(&genuinely_different));
+        assert_ne!(
+            witness_key_set(&forward).expect("well-formed witnesses"),
+            witness_key_set(&genuinely_different).expect("well-formed witnesses")
+        );
+    }
+
+    /// I-D §7.1 / §6.2: a witness object missing `witness_id` is a schema failure, never
+    /// silently dropped from the set — a governance-key-rotation comparison must not treat a
+    /// malformed witness as simply absent.
+    #[test]
+    fn witness_key_set_rejects_a_witness_missing_witness_id() {
+        let cc = format!("sha256:{}", "cc".repeat(32));
+        let payload = json!({
+            "witnesses": [
+                { "keys": [
+                    { "key_id": cc, "pubkey": "base64:AAAC", "valid_from_index": 0 },
+                ] },
+            ],
+        });
+        let result = witness_key_set(&payload);
+        assert!(
+            matches!(result, Err(ReceiptError::ManifestSchemaInvalid { ref object, .. }) if object.contains("witness_id")),
+            "a witness object missing `witness_id` must be rejected, not silently dropped: \
+             {result:?}"
+        );
+    }
+
+    /// I-D §7.1: `governance.rotation_proofs[].witnesses[]` is "an array in the shape of
+    /// `anchoring.witnesses[]`" whenever PRESENT — every element held to that shape, whatever
+    /// the rotating manifest's level, even though a verifying cosignature is only REQUIRED at
+    /// L3. The full corpus's only rotation is a genuine L3 one (its manifest's `level` is
+    /// baked into signed, anchored bytes that cannot be changed to a lower level without
+    /// breaking either that hop's own signature or its own committed inclusion path before
+    /// this rule is ever reached — the same structural constraint documented on
+    /// `key_set_comparison_is_order_independent` above), so a below-L3 case can only be
+    /// exercised here, against `verify_rotation_proof` directly, with a hand-built one-off
+    /// checkpoint and a tiny two-leaf tree rather than the shared corpus.
+    #[test]
+    fn rotation_proof_witnesses_are_shape_checked_below_l3() {
+        let log_key = TestKey::from_seed_hex("log-1", &"11".repeat(32)).expect("test key");
+        let witness_key = TestKey::from_seed_hex("witness-1", &"22".repeat(32)).expect("test key");
+
+        let document = b"a synthetic adaptor profile document".to_vec();
+        let profile_hash = sha256_hex(&document);
+        let outgoing_manifest = json!({
+            "log": {
+                "log_id": format!("sha256:{}", "dd".repeat(32)),
+                "operator": "log-operator-1",
+                "adaptor": { "id": TEST_ADAPTOR_PROFILE_ID, "hash": profile_hash },
+                "checkpoint_cadence": "PT1H",
+                "cadence_epoch": "2026-08-16T11:30:00Z",
+                "witness_grace_period": "PT15M",
+                "keys": [
+                    { "key_id": log_key.key_id(), "pubkey": log_key.pubkey(), "valid_from_index": 0 },
+                ],
+            },
+            "witnesses": [
+                { "witness_id": "witness-1", "keys": [
+                    {
+                        "key_id": witness_key.key_id(),
+                        "pubkey": witness_key.pubkey(),
+                        "valid_from_index": 0,
+                    },
+                ] },
+            ],
+        });
+        // Below L3: this level never REQUIRES a rotation-proof cosignature, but a `witnesses[]`
+        // member that IS present must still be shape-checked regardless.
+        let rotating_manifest = json!({ "level": "L1" });
+        let rotating_envelope = json!({ "payload": { "type": "manifest" }, "signatures": [] });
+
+        let leaves = vec![jcs(&rotating_envelope), jcs(&json!({ "padding": true }))];
+        let root = tree_root(&leaves);
+        let proof = inclusion_proof(&leaves, 0).expect("index within tree");
+        let inclusion_path: Vec<String> = proof.path.iter().map(hash_hex).collect();
+
+        let log_id = format!("sha256:{}", "aa".repeat(32));
+        let cp = checkpoint(&log_id, 2, &hash_hex(&root), "2026-08-16T12:00:00Z", &log_key);
+        // A SECOND `witnesses[]` entry, missing `cosigned_at` — malformed shape, present below
+        // L3 where no cosignature is required at all.
+        let element = json!({
+            "manifest_entry_index": 0,
+            "checkpoint": cp,
+            "inclusion_path": inclusion_path,
+            "witnesses": [
+                {
+                    "witness_id": "witness-1",
+                    "key_id": witness_key.key_id(),
+                    "cosignature": witness_key.sign(&cosignature_bytes(&cp, "witness-1")),
+                },
+            ],
+        });
+
+        let profile = AdaptorProfile { document, capabilities: AdaptorCapabilities::default() };
+        let mut run = Run::new(Limits::default());
+        // The element's checkpoint-signing key is resolved through the receipt's own `keys`
+        // block (I-D §7.1), bound to the outgoing manifest version, so the surrounding receipt
+        // carries that one entry; the witness shape check under test comes after it.
+        let receipt = json!({
+            "keys": {
+                "log": [ {
+                    "key_id": log_key.key_id(),
+                    "pubkey": log_key.pubkey(),
+                    "source": "manifest-chain",
+                    "binding": { "entry_index": 0 },
+                } ],
+                "witness": [],
+                "producer": [],
+            },
+        });
+        let policy = TrustPolicy::default();
+        let manifests = [(0u64, &outgoing_manifest)];
+        let result = verify_rotation_proof(
+            &element,
+            &rotating_envelope,
+            0,
+            &rotating_manifest,
+            &RotationContext {
+                receipt: &receipt,
+                policy: &policy,
+                manifests: &manifests,
+                outgoing: (0, &outgoing_manifest),
+                profile: &profile,
+                profile_id: TEST_ADAPTOR_PROFILE_ID,
+            },
+            &mut run,
+        );
+        assert!(
+            matches!(&result, Err(ReceiptError::Malformed(detail)) if detail.contains("cosigned_at")),
+            "a malformed `witnesses[]` entry must be rejected below L3 too, not merely at L3: \
+             {result:?}"
+        );
+    }
 }

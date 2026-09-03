@@ -1,49 +1,48 @@
 {
   "adaptor": {
-    "hash": "sha256:13edfdb0e2179aae0e9b94174fe37502686e404db42740aad1fb9f79e4832bfa",
+    "hash": "sha256:ea4e9a7d9f4c2286fe2a0a292e939ef6c2261c8567b3d91cd7375c5490525961",
     "id": "ahl-test-log-v1"
   },
   "affected_count": 4,
-  "affected_root": "sha256:a19b569a95b55531bf4df657e6e03bc15258ce9b3f693e8692d5a4602dcf53f1",
+  "affected_root": "sha256:645aaed9fb3f1f4abce3558acaa8b233002d0801714affe6f88bda98e98058d5",
   "description": "Disposition tree committed by the propagation statement at entry 8 (core spec §2.3.4, §2.5). Leaves are record-sorted disposition objects; leaf bytes are JCS(leaf).",
   "inclusion": {
     "leaf": {
-      "assessment": "sha256:81af6cfe105fb10380549c7290b09c7910c90cd3e860777ab7bbccc5b91be396",
       "dataset": "scores",
-      "disposition": "assessed_unaffected",
-      "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
+      "disposition": "invalidated",
+      "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
     },
     "leaf_index": 0,
     "path": [
-      "sha256:e9da4e2c9ab30836defdf1a3b83fbc2b9b529ecdd867169eb0a5e2202b71d50d",
-      "sha256:6a9579084fa951009fb19bfb9ac6727f6d0d0be99b1b710d491878fae04e6fc5"
+      "sha256:9e29e41693fa57233d662550511ca64abcab7449fad87a2836902d4baba659fc",
+      "sha256:c793b9f94f54ab0a02e9eb7c1cc1937ce37648ec88b2ec95f9871f2b8c9958ec"
     ],
-    "root": "sha256:a19b569a95b55531bf4df657e6e03bc15258ce9b3f693e8692d5a4602dcf53f1",
+    "root": "sha256:645aaed9fb3f1f4abce3558acaa8b233002d0801714affe6f88bda98e98058d5",
     "tree_size": 4
   },
   "leaf_rule": "sha256(0x00 || JCS(leaf))",
   "leaves": [
     {
-      "assessment": "sha256:81af6cfe105fb10380549c7290b09c7910c90cd3e860777ab7bbccc5b91be396",
-      "dataset": "scores",
-      "disposition": "assessed_unaffected",
-      "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
-    },
-    {
       "dataset": "scores",
       "disposition": "invalidated",
-      "record": "sha256:54805948541052fc8111ac220cbdd5bcb3892e9899ffb96697b76aa7b7d42798"
+      "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
     },
     {
       "dataset": "scores",
       "disposition": "recomputed",
-      "record": "sha256:7f706bff69ab07703a27a6770f401c2b302e9bca264129e57d517a10a54f25d1",
-      "successor_statement": "sha256:c046d7ab3d6c8dc58ae3792edc2104d2782996f4ba0fecffd156198f1a9d674f"
+      "record": "sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3",
+      "successor_statement": "sha256:3eb41212109891b464877d8041103362ac36e8ad87a459cdae19f7ec552816e6"
+    },
+    {
+      "assessment": "sha256:81af6cfe105fb10380549c7290b09c7910c90cd3e860777ab7bbccc5b91be396",
+      "dataset": "scores",
+      "disposition": "assessed_unaffected",
+      "record": "sha256:a4d63cf8838a3ca209af1ae4bab6ba7f286b5c684c94b3890a7178996607ace6"
     },
     {
       "dataset": "scores",
       "disposition": "invalidated",
-      "record": "sha256:df31b93a28e3de74b910bd72977edd310e9d4dfd2c8e66d38eab5c7303d6abfe"
+      "record": "sha256:d88442604d94989f8498f673e44a64198d1f19b64892539337cfc0b33be6717f"
     }
   ],
   "node_rule": "sha256(0x01 || left || right)",

@@ -31,6 +31,27 @@ pub const T_PAST_TO: &str = "2026-07-01T00:00:00Z";
 /// `effective_from` of the non-retroactive retraction at entry 17.
 pub const T_RETRACTION: &str = "2026-08-01T00:00:00Z";
 
+/// `key.valid_from` of the producer-key re-add at entry 31.
+///
+/// Spec §2.1 forbids two envelopes sharing a statement id, and a statement id digests the
+/// payload alone, so the re-add cannot repeat the payload of the `add` at entry 28 verbatim.
+/// `valid_from` is the member that carries no verification weight — I-D §7.5.1 4b(K) requires
+/// it to be present and well formed but says it "never orders anything and never gates a key's
+/// activity, both of which are decided by entry index alone" — so it is the honest place to
+/// make the two statements distinct.
+pub const T_REKEY: &str = "2026-08-16T13:00:00Z";
+
+/// `log.cadence_epoch` — the single start of the checkpoint-series obligation (spec §7.3).
+///
+/// Spec §7.3 pins the epoch to the corpus's opening interval: the earliest checkpoint
+/// committing the genesis manifest MUST carry a `checkpoint_time` at or after `cadence_epoch`
+/// and no later than `cadence_epoch` plus that version's `checkpoint_cadence`. Every corpus
+/// checkpoint is stamped [`T0`] and the cadence is `PT1H`, so the epoch sits half an hour
+/// before [`T0`] — strictly inside that window rather than on either boundary. It is declared
+/// by the genesis manifest and repeated unchanged by every later version; the epoch never
+/// moves, while a later version MAY change the cadence from its own entry index forward.
+pub const T_CADENCE_EPOCH: &str = "2026-08-16T11:30:00Z";
+
 pub const PRODUCER_1: &str = "producer-1";
 pub const PRODUCER_2: &str = "producer-2";
 pub const WITNESS_1: &str = "witness-1";
@@ -41,7 +62,7 @@ pub const PIPELINE: &str = "scoring-v1";
 pub const DS_CUSTOMERS: &str = "customers";
 pub const DS_SCORES: &str = "scores";
 pub const LEAF_FORMAT: &str = "ahl-leaf-v2";
-pub const CANONICALIZATION: &str = "jcs-v1";
+pub const CANONICALIZATION: &str = "jcs";
 
 /// Log id: `SHA-256("ahl-test-log-1")`.
 pub const LOG_SEED: &[u8] = b"ahl-test-log-1";
@@ -81,6 +102,11 @@ impl Keys {
 
     pub fn all(&self) -> Vec<&TestKey> {
         vec![&self.producer_1, &self.producer_2, &self.log_1, &self.witness_1, &self.witness_2]
+    }
+
+    /// The corpus key with this `key_id`, whatever its role.
+    pub fn by_key_id(&self, key_id: &str) -> &TestKey {
+        self.all().into_iter().find(|key| key.key_id() == key_id).expect("a corpus key")
     }
 
     /// The witness key active under a given manifest version entry index.
@@ -125,12 +151,15 @@ pub fn load_dataset_key(root: &Path) -> Vec<u8> {
     hex::decode(hex.trim()).expect("committed 32-byte hex dataset key")
 }
 
-pub fn write_and_hash_adaptor(root: &Path) -> String {
+/// Write the adaptor document, and return `(hash, bytes)` of what actually landed on disk —
+/// never the in-memory constant: the pinned hash, and the artifact a `TrustPolicy` holds, must
+/// both be the PUBLISHED document (spec §3 item 6; I-D §3.2, §7.5 step 2: a verifier
+/// "recompute[s] the digest over the artifact rather than trusting any value carried with it").
+pub fn write_and_hash_adaptor(root: &Path) -> (String, Vec<u8>) {
     let path = root.join("adaptor").join(format!("{ADAPTOR_ID}.md"));
     write_text(&path, ADAPTOR_DOC);
-    // Hash the bytes on disk, never the in-memory constant: the pinned hash must be the
-    // hash of the published document (spec §3 item 6).
-    sha256_hex(&fs::read(&path).expect("adaptor document just written"))
+    let bytes = fs::read(&path).expect("adaptor document just written");
+    (sha256_hex(&bytes), bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +204,9 @@ pub fn manifest(
     // `key` statements modify it until the next manifest version. Version 2 therefore drops
     // the key the `key` statement at entry 9 added: from entry 23 onward, `producer-2` signs
     // nothing, even though an earlier manifest version once knew it.
-    let producer_keys = vec![keys.producer_1.key_object(entry_index)];
+    // I-D §6.2: a manifest producer key object is `{key_id, pubkey}` ONLY — the array IS the
+    // producer key state at the manifest's entry index, with no per-key `valid_from_index`.
+    let producer_keys = vec![keys.producer_1.producer_key_object()];
 
     let mut payload = json!({
         "ahl_version": AHL_VERSION,
@@ -185,11 +216,15 @@ pub fn manifest(
         "issued_at": T0,
         "level": "L3",
         "keys": producer_keys,
+        // Spec §7.3 fixes this object's schema and makes every member REQUIRED. The id member
+        // is `log_id` — the same spelling the checkpoint carries — and `cadence_epoch` is the
+        // fixed start of the checkpoint series, repeated unchanged by every manifest version.
         "log": {
-            "id": log_id,
+            "log_id": log_id,
             "operator": LOG_OPERATOR,
             "adaptor": { "id": ADAPTOR_ID, "hash": adaptor_hash },
             "checkpoint_cadence": "PT1H",
+            "cadence_epoch": T_CADENCE_EPOCH,
             "witness_grace_period": "PT15M",
             "keys": [ keys.log_1.key_object(0) ],
         },

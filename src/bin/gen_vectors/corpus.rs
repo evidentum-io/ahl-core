@@ -1,27 +1,40 @@
 //! The 28-entry toy corpus and every non-receipt vector file it produces.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use base64::Engine as _;
 
 use ahl_core::closure::{affected_set, RecordRef, TreeMaterial};
+use ahl_core::descriptor::CanonicalizationDescriptor;
 use ahl_core::{
-    checkpoint, checkpoint_signing_bytes, commit_keyed, commit_plain, cosignature_bytes, entry_id,
-    envelope, field_str, hash_hex, inclusion_proof, jcs, leaf_hash, proof_path_hex, range_proof,
-    record_sorted, sha256_hex, statement_id, tree_root, verify_envelope, verify_inclusion_proof,
+    checkpoint, checkpoint_signing_bytes, commit_keyed, commit_plain, consistency_path_hex,
+    consistency_proof, cosignature_bytes, entry_id, envelope, field_str, hash_hex, inclusion_proof,
+    jcs, leaf_hash, parse_hash_hex, proof_path_hex, range_proof, record_sorted, sha256_hex,
+    statement_id, tree_root, verify_consistency_proof, verify_envelope, verify_inclusion_proof,
     verify_signature,
 };
 use serde_json::{json, Value};
 
 use crate::scenario::{
-    leaf_bytes, manifest, payload, signed, transform, write_json, Keys, ADAPTOR_ID, DS_CUSTOMERS,
-    DS_SCORES, LEAF_FORMAT, LOG_OPERATOR, LOG_SEED, PIPELINE, T0, T_EARLY, T_OPEN_FROM,
-    T_PAST_FROM, T_PAST_TO, T_RETRACTION, WITNESS_1, WITNESS_2,
+    leaf_bytes, manifest, payload, signed, transform, write_json, Keys, ADAPTOR_ID,
+    CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, LEAF_FORMAT, LOG_OPERATOR, LOG_SEED, PIPELINE, T0,
+    T_EARLY, T_OPEN_FROM, T_PAST_FROM, T_PAST_TO, T_REKEY, T_RETRACTION, WITNESS_1, WITNESS_2,
 };
 
+/// The corpus prefix over which closure recomputation is defined.
+///
+/// Entry 37 anchors a batch whose three input-set trees deliberately break one I-D §2.7 tree
+/// rule each. Closure traversal opens every committed tree it reaches and validates it against
+/// those rules before reading an edge from it, so a walk reaching entry 37 fails by §2.7 —
+/// which is precisely what the `record-derived-input-set-*-must-fail.ahl` vectors prove, and
+/// the same shape of consequence the non-verifying envelopes at entries 32 and 33 have for
+/// enumerated claims. Every closure scenario this corpus publishes stops at tree size 28 or
+/// below; this constant names the boundary for the walks that would otherwise run to the end.
+pub const CONFORMING_TREE_PREFIX: usize = 37;
+
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 32] = [
+pub const NAMES: [&str; 47] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -50,10 +63,25 @@ pub const NAMES: [&str; 32] = [
     "25-manifest-v2-rotate-witness-drop-key",
     "26-ingestion-customers-d-under-v2",
     "27-derivation-z-from-affected-descendant",
-    "28-invalid-signature-trigger-f",
-    "29-unverified-authority-signature-trigger-f",
-    "30-key-readd-producer-2",
-    "31-retraction-f-co-signed-authority-and-producer-2",
+    "28-key-readd-producer-2",
+    "29-retraction-f-co-signed-authority-and-producer-2",
+    "30-key-retire-producer-2-self-signed",
+    "31-key-readd-producer-2-after-self-retire",
+    "32-invalid-signature-trigger-f",
+    "33-unverified-authority-signature-trigger-f",
+    "34-ingestion-customers-e-stale-manifest",
+    "35-correction-a-to-cross-dataset-replacement",
+    "36-retraction-cross-dataset-record",
+    "37-derivation-batch-defective-input-sets",
+    "38-invalid-signature-key-add",
+    "39-invalid-signature-manifest",
+    "40-key-retire-producer-2-again",
+    "41-key-add-producer-2-verifying-copy",
+    "42-ingestion-customers-g-under-producer-2",
+    "43-ingestion-foreign-revision",
+    "44-manifest-foreign-revision",
+    "45-key-add-foreign-revision",
+    "46-manifest-foreign-revision-unsigned",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -84,6 +112,21 @@ impl Anchor {
             "cosignature": self.cosignature,
             "cosigned_at": T0,
         })
+    }
+
+    /// This anchor's cosignature, as the one-element `anchoring.later_witnesses` array a
+    /// receipt carries alongside — never inside — `anchoring.later_checkpoint` (I-D §7.1:
+    /// "Present if and only if `later_checkpoint` is carried. An array in the shape of
+    /// `anchoring.witnesses[]`, each element a cosignature over `later_checkpoint`"). Nesting
+    /// it INSIDE the checkpoint object would change the very bytes the log's own signature
+    /// (`checkpoint_signing_bytes`, "`JCS(cp)` with `signature` removed") and each
+    /// cosignature's own preimage (`cosignature_bytes`, "the signed checkpoint object") are
+    /// computed over.
+    ///
+    /// `propagation-complete`'s declared checkpoint D has no counterpart at all: format §7.2
+    /// authenticates D by consistency-proof-or-prefix-recomputation, no cosignature.
+    pub fn witnesses_array(&self, keys: &Keys) -> Value {
+        json!([self.witness_entry(keys)])
     }
 }
 
@@ -116,28 +159,50 @@ pub struct Records {
     pub e2: String,
     pub e3: String,
     pub c_f: String,
+    /// Introduced solely by the stale-manifest-binding negative vector's entry 32.
+    pub c_e: String,
     pub h: String,
     pub z: String,
-    /// Canonical bytes of record A, carried by the `record-ingested` receipt.
-    pub c_a_bytes: Vec<u8>,
+    /// Outputs of the entry-37 batch. Each leaf commits an input-set tree that breaks exactly
+    /// one of the I-D §2.7 tree rules, so a receipt carrying that tree's complete leaf set is
+    /// rejected by the rule it breaks rather than by a membership path.
+    pub x_unsorted: String,
+    pub x_duplicate: String,
+    pub x_noncanonical: String,
     /// Canonical bytes of record B — the wrong bytes for the negative receipt.
     pub c_b_bytes: Vec<u8>,
+    /// Record A's content, encoded AS RECEIVED — non-canonical key order and insignificant
+    /// whitespace JCS strips — carried by `record-ingested-valid.ahl` (I-D §2.6/§7.2: the
+    /// verifier canonicalizes the record as received before recomputing the commitment; this is
+    /// what proves it actually does, rather than merely accepting already-canonical bytes and
+    /// looking like it canonicalizes).
+    pub c_a_bytes_as_received: Vec<u8>,
 }
 
 pub struct Corpus {
-    /// The twenty-eight anchored envelopes, in entry-index order.
+    /// The anchored envelopes, in entry-index order.
     pub envelopes: Vec<Value>,
     /// Committed tree material keyed by root (spec §3.5).
     pub trees: TreeMaterial,
     pub batch_root: String,
     pub wide_outputs_root: String,
     pub input_set_root: String,
+    /// Outputs tree of the entry-37 batch (see [`Records::x_unsorted`] and its siblings).
+    pub defective_outputs_root: String,
+    /// Input-set roots of that batch, one per I-D §2.7 tree rule they break.
+    pub unsorted_input_root: String,
+    pub duplicate_input_root: String,
+    pub noncanonical_input_root: String,
     pub affected_root: String,
     pub challenge_affected_root: String,
     pub records: Records,
     pub log_id: String,
     pub anchors: Vec<Anchor>,
     pub adaptor_hash: String,
+    /// The exact bytes of the published adaptor document — what a `TrustPolicy` actually
+    /// HOLDS (I-D §3.2, §7.5 step 2: the digest is recomputed from this, never trusted as a
+    /// value carried alongside it).
+    pub adaptor_document: Vec<u8>,
     pub closures: Vec<ClosureCase>,
     /// Witness refusal evidence (spec §3.3 step 3, adaptor profile §6.1).
     pub refusal: Value,
@@ -148,7 +213,12 @@ impl Corpus {
     // index, which is the corpus's only ordering primitive, and renaming them would hide it.
     #[allow(clippy::similar_names)]
     #[allow(clippy::too_many_lines)] // One linear scenario; splitting it would obscure the order.
-    pub fn build(keys: &Keys, dataset_key: &[u8], adaptor_hash: &str) -> Self {
+    pub fn build(
+        keys: &Keys,
+        dataset_key: &[u8],
+        adaptor_hash: &str,
+        adaptor_document: Vec<u8>,
+    ) -> Self {
         let log_id = sha256_hex(LOG_SEED);
         let records = Records::build(dataset_key);
         let r = &records;
@@ -559,75 +629,12 @@ impl Corpus {
             &keys.producer_1,
         );
 
-        // --- entry 28: a NON-VERIFYING trigger on F, claiming the real authority's key_id ---
-        // Structurally this is a well-formed retraction of F, naming `producer-1`'s real
-        // `key_id` — the genuine `customers` dataset authority — so `key_id`-only matching would
-        // accept it. Its `sig` is garbage, not a signature `producer-1` ever produced. The log
-        // anchors opaque bytes (spec §3 contract item 1) and does not itself validate AHL
-        // signatures, so a statement like this really can get anchored; only cryptographic
-        // verification of the candidate's own signature — not a claimed-`key_id` lookup — can
-        // catch it. Anchored after entry 22's genuine, authorized retraction, this is what the
-        // competing-trigger selection at cp29 must NOT let govern.
-        let mut env_28 = signed(
-            "retraction",
-            &m2,
-            json!({
-                "dataset": DS_CUSTOMERS,
-                "record": r.c_f,
-                "scope": { "effective_from": T0, "retroactive": true },
-                "reason_code": "other",
-            }),
-            &keys.producer_1,
-        );
-        env_28["signatures"][0]["sig"] = json!(format!(
-            "base64:{}",
-            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
-        ));
-
-        // --- entry 29: a trigger on F whose OWN envelope carries two signature entries ---
-        // One entry is a genuinely valid signature from `producer-2` — a real, in-force
-        // producer key that is NOT the `customers` dataset authority. The other names
-        // `producer-1`'s real `key_id` — the genuine authority — but its `sig` is garbage, not
-        // a signature `producer-1` ever produced. Anchored as its own subject (not merely as a
-        // competing candidate), this entry exists to exercise `verify_trigger_authority`
-        // directly: a signer set that merely *contains* the authority's `key_id` is not
-        // sufficient grounds for effectiveness — that specific signature entry must itself
-        // cryptographically verify (receipt format §3).
-        let f_retraction_2 = payload(
-            "retraction",
-            &m2,
-            json!(T0),
-            json!({
-                "dataset": DS_CUSTOMERS,
-                "record": r.c_f,
-                "scope": { "effective_from": T0, "retroactive": true },
-                "reason_code": "other",
-            }),
-        );
-        let producer_2_sig = keys.producer_2.sign(&jcs(&f_retraction_2));
-        let mut env_29_map = serde_json::Map::new();
-        env_29_map.insert("payload".to_owned(), f_retraction_2);
-        env_29_map.insert(
-            "signatures".to_owned(),
-            json!([
-                { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig },
-                {
-                    "key_id": keys.producer_1.key_id(),
-                    "sig": format!(
-                        "base64:{}",
-                        base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
-                    ),
-                },
-            ]),
-        );
-        let env_29 = Value::Object(env_29_map);
-
-        // --- entry 30: re-add producer-2 to the producer snapshot after manifest v2 dropped
+        // --- entry 28: re-add producer-2 to the producer snapshot after manifest v2 dropped
         // it (spec §7.2, §2.3.6). This is what makes a genuinely CO-SIGNED trigger reachable:
         // a signer must be an active producer key at the co-signed statement's entry index,
         // and manifest v2 (entry 25) discarded producer-2. A fresh `key` "add" event brings it
         // back into force from this entry onward, exactly as entry 9 originally added it.
-        let env_30 = signed(
+        let env_28 = signed(
             "key",
             &m2,
             json!({
@@ -641,14 +648,32 @@ impl Corpus {
             &keys.producer_1,
         );
 
-        // --- entry 31: a trigger on F CO-SIGNED by both the `customers` authority and
+        // --- entry 29: a trigger on F CO-SIGNED by both the `customers` authority and
         // producer-2 --- Both signature entries are genuinely valid: `producer-1` (the
         // authority) and `producer-2` (another producer key active as of this entry, following
-        // entry 30's re-add). Receipt format §5 step 3a: authorization requires AT LEAST ONE
+        // entry 28's re-add). Receipt format §5 step 3a: authorization requires AT LEAST ONE
         // verified signer to be the authority, never signing EXCLUSIVELY by authority keys — a
         // legitimately co-signed trigger like this one must still classify as authorized and
         // must still govern.
-        let f_retraction_3 = payload(
+        //
+        // It is anchored BEFORE the two non-verifying fixtures below, and that ordering is
+        // load-bearing rather than incidental. I-D §7.5.1 4d requires every carried envelope —
+        // enumerated material included — to verify under K at its own entry index, and
+        // enumerated governance currency covers exactly `[0, tree_size(C))` (§7.4). A
+        // non-verifying envelope anchored at index i therefore makes every enumerated claim at
+        // a tree size greater than i invalid, so a corpus that placed the deliberately
+        // non-verifying fixtures before this one could carry no enumerated receipt about it at
+        // all. The fixtures sit at the tail for that reason.
+        //
+        // The three retractions of F at entries 29, 32 and 33 carry DIFFERENT `reason_code`
+        // values for one reason: spec §2.1 forbids anchoring two envelopes with the same
+        // statement id, and the statement id is the digest of the payload alone. Identical
+        // payloads under different signature sets would be one statement anchored three times,
+        // of which only the smallest entry index governs and the later two are void — so the
+        // two non-verifying fixtures below could not be reasoned about, and this positive one
+        // could never govern. The reason code is the payload member that carries no
+        // verification weight, so it is the honest place to make them distinct.
+        let f_retraction_29 = payload(
             "retraction",
             &m2,
             json!(T0),
@@ -656,32 +681,423 @@ impl Corpus {
                 "dataset": DS_CUSTOMERS,
                 "record": r.c_f,
                 "scope": { "effective_from": T0, "retroactive": true },
-                "reason_code": "other",
+                "reason_code": "superseded",
             }),
         );
-        let producer_1_sig_31 = keys.producer_1.sign(&jcs(&f_retraction_3));
-        let producer_2_sig_31 = keys.producer_2.sign(&jcs(&f_retraction_3));
-        let mut env_31_map = serde_json::Map::new();
-        env_31_map.insert("payload".to_owned(), f_retraction_3);
-        env_31_map.insert(
+        let producer_1_sig_29 = keys.producer_1.sign(&jcs(&f_retraction_29));
+        let producer_2_sig_29 = keys.producer_2.sign(&jcs(&f_retraction_29));
+        let mut env_29_map = serde_json::Map::new();
+        env_29_map.insert("payload".to_owned(), f_retraction_29);
+        env_29_map.insert(
             "signatures".to_owned(),
             json!([
-                { "key_id": keys.producer_1.key_id(), "sig": producer_1_sig_31 },
-                { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig_31 },
+                { "key_id": keys.producer_1.key_id(), "sig": producer_1_sig_29 },
+                { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig_29 },
             ]),
         );
-        let env_31 = Value::Object(env_31_map);
+        let env_29 = Value::Object(env_29_map);
+
+        // --- entry 30: a `key` statement that RETIRES ITS OWN SIGNING KEY -----------
+        // `producer-2` retires `producer-2`, signed by `producer-2`. This is conforming, and
+        // it is the shape that separates the two key states I-D §7.5.1 4b keeps apart. Phase 1
+        // verifies the envelope "against K AS ESTABLISHED SO FAR — the governance state in
+        // force immediately before this statement's own entry index", where `producer-2` is
+        // still active (entry 28 re-added it); phase 3 applies the effect only afterwards, and
+        // from this index onward the key is gone. A verifier that re-verified this envelope
+        // under the COMPLETED key state at its own index would resolve `producer-2` after its
+        // own retirement had taken effect and reject a statement 4b accepted — which is why 4d
+        // is written as "every carried envelope that is NOT part of the induction".
+        let env_30 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "retire",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": T0,
+                },
+            }),
+            &keys.producer_2,
+        );
+
+        // --- entry 31: re-add producer-2, so the fixtures below keep their properties -------
+        // Entry 30's retirement is what the self-retirement vector needs; entry 33 below needs
+        // `producer-2` ACTIVE, so that its genuine `producer-2` signature entry resolves to a
+        // key in force and its only defect is the non-verifying entry naming the authority.
+        // Without this re-add that fixture would fail on an unresolvable key instead, and
+        // would stop isolating the rule it exists for.
+        let env_31 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "add",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": T_REKEY,
+                },
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entry 32: a NON-VERIFYING trigger on F, claiming the real authority's key_id ---
+        // Structurally this is a well-formed retraction of F, naming `producer-1`'s real
+        // `key_id` — the genuine `customers` dataset authority — so `key_id`-only matching would
+        // accept it. Its `sig` is garbage, not a signature `producer-1` ever produced. The log
+        // anchors opaque bytes (spec §3 contract item 1) and does not itself validate AHL
+        // signatures, so a statement like this really can get anchored; only cryptographic
+        // verification of the candidate's own signature — not a claimed-`key_id` lookup — can
+        // catch it. Anchored after entry 22's genuine, authorized retraction and after the
+        // genuinely co-signed one at entry 29, it is what an enumeration reaching it must
+        // refuse outright (I-D §7.5.1 4d).
+        let mut env_32 = signed(
+            "retraction",
+            &m2,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_f,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "fraud",
+            }),
+            &keys.producer_1,
+        );
+        env_32["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
+
+        // --- entry 33: a trigger on F whose OWN envelope carries two signature entries ---
+        // One entry is a genuinely valid signature from `producer-2` — a real, in-force
+        // producer key (entry 31 re-added it after the self-retirement at entry 30) that is
+        // NOT the `customers` dataset authority.
+        // The other names `producer-1`'s real `key_id` — the genuine authority — but its `sig`
+        // is garbage, not a signature `producer-1` ever produced. Anchored as its own subject
+        // (not merely as a competing candidate), this entry exists to exercise the subject
+        // envelope rule directly: a signer set that merely *contains* the authority's `key_id`
+        // is not enough — that specific signature entry must itself cryptographically verify,
+        // and one non-verifying entry invalidates the envelope however many others verify
+        // (I-D §7.5.1 4d, §8.4).
+        let f_retraction_33 = payload(
+            "retraction",
+            &m2,
+            json!(T0),
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_f,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "error",
+            }),
+        );
+        let producer_2_sig_33 = keys.producer_2.sign(&jcs(&f_retraction_33));
+        let mut env_33_map = serde_json::Map::new();
+        env_33_map.insert("payload".to_owned(), f_retraction_33);
+        env_33_map.insert(
+            "signatures".to_owned(),
+            json!([
+                { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig_33 },
+                {
+                    "key_id": keys.producer_1.key_id(),
+                    "sig": format!(
+                        "base64:{}",
+                        base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+                    ),
+                },
+            ]),
+        );
+        let env_33 = Value::Object(env_33_map);
+
+        // --- entry 34: an otherwise-ordinary ingestion, genuinely signed and genuinely
+        // anchored — B2's own requirement is that this be real, not a standalone "malformed"
+        // fixture, so the "structural wall" earlier rounds hit (mutating an anchored envelope
+        // invalidates its own inclusion path) does not apply here: this envelope's payload
+        // carries the wrong `manifest` reference FROM THE START, before it is ever signed or
+        // included. Anchored after manifest v2 (entry 25), it wrongly names `m1` (genesis)
+        // instead of `m2` (I-D §2.2: the manifest ACTIVE at an entry index is the one with the
+        // greatest entry index smaller than it — here, v2). Every other member is genuine: a
+        // real signature by the `customers` authority, over a real new record, real inclusion
+        // in the rebuilt log tree.
+        let env_34 = signed(
+            "ingestion",
+            &m1,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_e,
+                "origin": "batch:2026-08-16/customers-06",
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entries 35, 36: cross-dataset record-identity fixtures -----------------
+        // I-D §2.4.2 and §7.6 make record identity the PAIR `(dataset, record)`: "Closure
+        // traversal uses the `(dataset, record)` pair only", and every embedded receipt's
+        // `record_subject` must match the referencing material. A commitment string alone is
+        // not an identity, and these two entries are what makes the difference observable.
+        //
+        // Both deliberately reuse `c_a` — a commitment computed for the `customers` dataset —
+        // as a `scores`-side reference. That reuse cannot arise from content: §2.6 puts `dsid`
+        // in the preimage verbatim, so the same bytes in two datasets commit to different
+        // strings. It arises from a PRODUCER naming the wrong pair, which nothing stops, since
+        // a verifier recomputes a commitment only where content evidence is carried. A
+        // verifier comparing the commitment alone accepts both of these; one comparing the
+        // pair rejects both.
+        //
+        // Entry 35 is a correction whose REPLACEMENT is the collision: `dataset` is
+        // `customers` for both members (§2.4.3 carries one dataset per correction), so it
+        // claims the replacement is `customers`/S1 while S1 exists only as a `scores` record
+        // produced by the derivation at entry 3.
+        let env_35 = signed(
+            "correction",
+            &m2,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_a,
+                "replacement": r.s1,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "other",
+            }),
+            &keys.producer_1,
+        );
+
+        // Entry 36 is a retraction whose own subject is the collision: it names the `scores`
+        // dataset with record A's `customers` commitment, so a receipt for it can only be
+        // supported by an introduction of `scores`/A — which the corpus does not contain, and
+        // which the `customers` ingestion at entry 1 is not.
+        let env_36 = signed(
+            "retraction",
+            &m2,
+            json!({
+                "dataset": DS_SCORES,
+                "record": r.c_a,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "other",
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entry 37: a batch whose leaves commit input-set trees that break §2.7 --------
+        // I-D §2.7 states one set of tree rules, "identical for every AHL tree — outputs, input
+        // sets, and dispositions": leaves sorted by `record` in ascending UTF-8 byte order of
+        // the canonical commitment string, commitment strings that are family strings under
+        // §2.1 ("one failing the rules there is rejected"), and no duplicate leaves. Membership
+        // paths cannot reach any of that, because the producer who chooses the leaf order
+        // chooses the tree: a set assembled in some other order opens its own root perfectly
+        // well and is still not an AHL tree. So the trees below have to be genuinely built and
+        // genuinely anchored — one leaf each of the batch's outputs tree commits one of them —
+        // rather than mutated into a receipt, where the altered `input_set_root` would break
+        // the outputs path before the rule under test was reached.
+        //
+        // The outputs tree itself is well formed. Only the three input-set trees are not, and
+        // each breaks exactly one rule, so the negative built on it fails by that rule alone.
+        let defective_input = |record: &str, role: &str| json!({ "dataset": DS_CUSTOMERS, "record": record, "role": role, "statement": id_2 });
+        // Rule broken: ascending order. Both records are canonical and distinct; the leaves are
+        // committed in descending order.
+        let mut unsorted_input_leaves = record_sorted(vec![
+            defective_input(&r.c_a2, "feature"),
+            defective_input(&r.c_b, "reference"),
+        ])
+        .expect("distinct input records");
+        unsorted_input_leaves.reverse();
+        let unsorted_input_root = hash_hex(&tree_root(&leaf_bytes(&unsorted_input_leaves)));
+        // Rule broken: no duplicate. One record appears twice under two roles, so the leaves
+        // differ as bytes while the sort key repeats.
+        let duplicate_input_leaves =
+            vec![defective_input(&r.c_b, "feature"), defective_input(&r.c_b, "reference")];
+        let duplicate_input_root = hash_hex(&tree_root(&leaf_bytes(&duplicate_input_leaves)));
+        // Rule broken: the commitment string is not a family string under §2.1.
+        let noncanonical_input_leaves = vec![defective_input("not-a-commitment", "feature")];
+        let noncanonical_input_root = hash_hex(&tree_root(&leaf_bytes(&noncanonical_input_leaves)));
+        let defective_leaves = record_sorted(vec![
+            json!({
+                "dataset": DS_SCORES, "record": r.x_unsorted,
+                "inputs": { "input_set_root": unsorted_input_root, "input_set_count": 2 },
+            }),
+            json!({
+                "dataset": DS_SCORES, "record": r.x_duplicate,
+                "inputs": { "input_set_root": duplicate_input_root, "input_set_count": 2 },
+            }),
+            json!({
+                "dataset": DS_SCORES, "record": r.x_noncanonical,
+                "inputs": { "input_set_root": noncanonical_input_root, "input_set_count": 1 },
+            }),
+        ])
+        .expect("distinct batch outputs");
+        let defective_outputs_root = hash_hex(&tree_root(&leaf_bytes(&defective_leaves)));
+        let env_37 = signed(
+            "derivation",
+            &m2,
+            json!({
+                "pipeline": PIPELINE,
+                "outputs_root": defective_outputs_root,
+                "outputs_count": defective_leaves.len(),
+                "leaf_format": LEAF_FORMAT,
+                "transform": transform(),
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entries 38-40: the reliance-rule material (I-D §2.1, §7.5.1 4b and 4d) -------
+        // A log anchors opaque bytes and validates none, so a purported governance statement
+        // whose envelope does not verify really can be anchored. 4b selects an entry the
+        // enumeration alone reveals by its purported `type`, but it "ENTERS the induction only
+        // if its envelope verifies in phase 1"; one that does not is VOID — not inducted, no
+        // effect on K, the walk continues past it — and §7.4 adds that its absence from
+        // `governance.chain[]` is not an omission, because enumerated currency proves the
+        // presented statements are "the only VERIFYING manifest and key entries in that range".
+        //
+        // Both sit past every checkpoint the rest of this corpus anchors at, so no existing
+        // vector's range reaches them and nothing before entry 38 changes.
+
+        // --- entry 38: a purported `key` statement whose signature does not verify --------
+        let mut env_38 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "add",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    // A distinct `valid_from`, so this statement is its own rather than a
+                    // duplicate of the re-add at entry 28 (spec §2.1: one statement id, one
+                    // governing envelope).
+                    "valid_from": "2026-08-17T00:00:00Z",
+                },
+            }),
+            &keys.producer_1,
+        );
+        env_38["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
+
+        // --- entry 39: a purported `manifest` whose signature does not verify -------------
+        // Well formed as a manifest version — it names entry 25 as its predecessor and would
+        // install a producer-key snapshot of its own — and carried by no receipt's chain. A
+        // verifier that took it for a governance statement would derive its key state from
+        // material no key vouches for; one that treated its absence from the chain as an
+        // omission would refuse every enumerated receipt over any range reaching it.
+        let mut env_39 = envelope(
+            manifest(keys, &log_id, adaptor_hash, 39, Some(&entry_id(&env_25))),
+            &keys.producer_1,
+        );
+        env_39["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
+
+        // --- entries 40-42: a void statement id is free for a later verifying copy ---------
+        // I-D §7.5.1 4b admits an enumeration-only entry to the induction "only if its envelope
+        // verifies in phase 1", and §2.1's first-wins rule is about GOVERNING statements — which
+        // a void entry never becomes. So the statement at entry 38, void for want of a
+        // signature, occupies nothing: the same statement, genuinely signed at entry 41, is
+        // inducted and its effect applied. Entry 40 retires `producer-2` first, so that the
+        // re-add at 41 is what puts the key back in force, and entry 42 is a subject whose own
+        // envelope needs it.
+        let env_40 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "retire",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": "2026-08-18T00:00:00Z",
+                },
+            }),
+            &keys.producer_1,
+        );
+        // Byte-for-byte the payload of entry 38 — the same statement id — genuinely signed.
+        let env_41 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "add",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": "2026-08-17T00:00:00Z",
+                },
+            }),
+            &keys.producer_1,
+        );
+        let env_42 =
+            signed("ingestion", &m2, ingest(&r.h, "2026-08-18/customers-07"), &keys.producer_2);
+
+        // --- entry 43: a VERIFYING NON-GOVERNANCE statement of a revision this document does
+        // not define. §7.1: a carried statement's unsupported `ahl_version` "is `unverifiable` as
+        // for any carried statement" — a finding, never the end of the run, and never a defect,
+        // since a verifier of that revision could read it. Anchored BELOW the two governance
+        // statements that follow, so a range can reach it without reaching them.
+        let mut foreign_ingestion_payload =
+            payload("ingestion", &m2, json!(T0), ingest(&r.z, "2026-08-19/customers-08"));
+        foreign_ingestion_payload["ahl_version"] = json!("0.5");
+        let env_43 = envelope(foreign_ingestion_payload, &keys.producer_1);
+
+        // --- entry 44: a VERIFYING `manifest` of a revision this document does not define ---
+        // The manifest analogue of entry 45 below, and it takes a different path through the
+        // verifier: a manifest is not selected for the induction by `enumerated_key_statements`,
+        // so what meets it is I-D §7.5.1 4c's completeness check — which must read its revision
+        // before calling its absence from `governance.chain[]` an omission.
+        let mut foreign_manifest_payload =
+            manifest(keys, &log_id, adaptor_hash, 44, Some(&entry_id(&env_25)));
+        foreign_manifest_payload["ahl_version"] = json!("0.5");
+        let env_44 = envelope(foreign_manifest_payload, &keys.producer_1);
+
+        // --- entry 45: a VERIFYING `key` statement of a revision this document does not define
+        // The other half of 4b's rule: "A VERIFYING purported governance entry that declares an
+        // `ahl_version` this revision does not define is neither: it is not inducted, K is
+        // unestablished at and after its index, the governance finding is `unverifiable`."
+        // Genuinely signed by `producer-1`, so the signature is not what stops it.
+        let mut foreign_key_payload = payload(
+            "key",
+            &m2,
+            json!(T0),
+            json!({
+                "action": "add",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": T0,
+                },
+            }),
+        );
+        foreign_key_payload["ahl_version"] = json!("0.5");
+        let env_45 = envelope(foreign_key_payload, &keys.producer_1);
+
+        // --- entry 46: a foreign-revision `manifest` whose signature does NOT verify --------
+        // The two halves of 4b's governance-entry rule meet here. A `governance.chain[]` element
+        // "is different: the receipt presents it as its own lineage, so its phase-1 failure is
+        // `invalid`", and the foreign-revision rule that follows opens with "A VERIFYING
+        // purported governance entry". This entry is well formed as a manifest version and
+        // declares `ahl_version: "0.5"`, but nothing signs it — so a receipt carrying it as a
+        // chain hop is `invalid` on the signature, and the revision it declares never gets to
+        // soften that to a capability gap. Anchored, like the rest, past every other vector's
+        // range.
+        let mut foreign_unsigned_payload =
+            manifest(keys, &log_id, adaptor_hash, 46, Some(&entry_id(&env_25)));
+        foreign_unsigned_payload["ahl_version"] = json!("0.5");
+        let mut env_46 = envelope(foreign_unsigned_payload, &keys.producer_1);
+        env_46["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
 
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
-            env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31,
+            env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32, env_33,
+            env_34, env_35, env_36, env_37, env_38, env_39, env_40, env_41, env_42, env_43, env_44,
+            env_45, env_46,
         ];
 
         let mut trees = TreeMaterial::new();
         trees.insert(batch_root.clone(), batch_leaves);
         trees.insert(wide_outputs_root.clone(), wide_leaves);
         trees.insert(input_set_root.clone(), input_leaves);
+        trees.insert(defective_outputs_root.clone(), defective_leaves);
+        trees.insert(unsorted_input_root.clone(), unsorted_input_leaves);
+        trees.insert(duplicate_input_root.clone(), duplicate_input_leaves);
+        trees.insert(noncanonical_input_root.clone(), noncanonical_input_leaves);
         trees.insert(affected_root.clone(), dispositions);
         trees.insert(challenge_affected_root.clone(), challenge_dispositions);
 
@@ -692,10 +1108,45 @@ impl Corpus {
             (20, 0),
             (24, 0),
             (25, 0),
+            // cp26: manifest_index 0 is deliberate, not the checkpoint's true active manifest
+            // (v2, entry 25) — this is the I-D §7.1 rotation-anchoring EXCEPTION's own
+            // checkpoint, which binds to the manifest version active IMMEDIATELY BEFORE the
+            // rotating manifest's entry index (the OUTGOING state), never to the version the
+            // rotation installs. Operationally it is "an ordinary artifact of the rotation": the
+            // log operator anchored manifest v2 at entry 25 and kept signing checkpoints
+            // cosigned by the OUTGOING witness (witness-1) for a few more entries before cutting
+            // over to witness-2, which is exactly what I-D §7.1 says makes such a checkpoint
+            // realizable against a real log rather than something an operator must manufacture.
+            (26, 0),
             (28, 25),
             (29, 25),
             (30, 25),
+            // cp32 covers [0, 32) — every entry through the `key` re-add at entry 31, and
+            // nothing beyond it. It is the only checkpoint whose enumerated prefix reaches the
+            // self-retiring `key` statement at entry 30 while stopping short of the two
+            // deliberately non-verifying fixtures at entries 32 and 33.
             (32, 25),
+            (34, 25),
+            (35, 25),
+            (37, 25),
+            (38, 25),
+            // cp40 covers [0, 40): it reaches the two purported governance statements at
+            // entries 38 and 39, whose envelopes do not verify, and stops short of the
+            // foreign-revision `key` statement at entry 40.
+            (40, 25),
+            // cp43 reaches the re-add at entry 41 and the subject at 42, and stops short of the
+            // two foreign-revision statements.
+            (43, 25),
+            // cp44 reaches the foreign-revision INGESTION at entry 43 — a carried statement of
+            // a revision this document does not define, and not a governance statement — and
+            // stops short of the two governance statements that follow it.
+            (44, 25),
+            // cp45 reaches the foreign-revision MANIFEST at entry 44.
+            (45, 25),
+            // cp46 reaches the foreign-revision `key` statement at entry 45 as well.
+            (46, 25),
+            // cp47 reaches the unsigned foreign-revision manifest at entry 46.
+            (47, 25),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
@@ -710,10 +1161,21 @@ impl Corpus {
                     20 => "cp20",
                     24 => "cp24",
                     25 => "cp25",
+                    26 => "cp26",
                     28 => "cp28",
                     29 => "cp29",
                     30 => "cp30",
-                    _ => "cp32",
+                    32 => "cp32",
+                    34 => "cp34",
+                    35 => "cp35",
+                    37 => "cp37",
+                    38 => "cp38",
+                    40 => "cp40",
+                    43 => "cp43",
+                    44 => "cp44",
+                    45 => "cp45",
+                    46 => "cp46",
+                    _ => "cp47",
                 },
                 checkpoint: cp,
                 witness_id,
@@ -732,12 +1194,17 @@ impl Corpus {
             batch_root,
             wide_outputs_root,
             input_set_root,
+            defective_outputs_root,
+            unsorted_input_root,
+            duplicate_input_root,
+            noncanonical_input_root,
             affected_root,
             challenge_affected_root,
             records,
             log_id,
             anchors,
             adaptor_hash: adaptor_hash.to_owned(),
+            adaptor_document,
             closures,
             refusal,
         }
@@ -775,6 +1242,105 @@ impl Corpus {
         proof_path_hex(&proof)
     }
 
+    /// Re-anchor a receipt whose carried governance material was deliberately substituted.
+    ///
+    /// I-D §7.5 step 3 recomputes EVERY `governance.chain[]` element's inclusion path — and the
+    /// subject's — before step 4's induction reads a single member of any of them, because
+    /// "the path proof IS the index proof": a governance statement whose asserted entry index
+    /// is unproven could be presented in an order the log never had. A negative vector that
+    /// substitutes a governance statement therefore has to put it genuinely IN the log, or it
+    /// fails as an unanchored hop rather than by the rule it names.
+    ///
+    /// So the log tree is rebuilt over the substituted envelopes, the checkpoint re-signed by
+    /// the same log key over the new root, and its cosignature reissued by the same witness.
+    /// Everything the receipt asserts about anchoring is then true; the one thing wrong with it
+    /// is the rule the vector exists to trip.
+    ///
+    /// `substitutions` names entries the receipt does not carry in `governance.chain[]` — since
+    /// I-D §7.4 moved producer-key transitions out of the chain, a defective `key` statement
+    /// reaches the verifier through the enumeration material instead, so its substitution is
+    /// given here and the material is regenerated over the same rebuilt tree. A log anchors
+    /// opaque bytes and validates no AHL statement, so a malformed `key` statement genuinely
+    /// anchored at its index is exactly the material I-D §7.5.1 4b(K) exists to reject.
+    pub fn reanchor(&self, receipt: &mut Value, substitutions: &[(usize, Value)], keys: &Keys) {
+        let mut envelopes = self.envelopes.clone();
+        let chain = receipt["governance"]["chain"].as_array().expect("chain").clone();
+        for hop in &chain {
+            let index = usize::try_from(hop["entry_index"].as_u64().expect("entry_index"))
+                .expect("entry index fits");
+            envelopes[index] = hop["envelope"].clone();
+        }
+        for (index, envelope) in substitutions {
+            envelopes[*index] = envelope.clone();
+        }
+        let leaves = leaf_bytes(&envelopes);
+        let checkpoint_object = receipt["anchoring"]["checkpoint"].clone();
+        let tree_size = checkpoint_object["tree_size"].as_u64().expect("tree_size");
+        let prefix = &leaves[..at(tree_size)];
+        let root = hash_hex(&tree_root(prefix));
+
+        let path = |index: u64| {
+            let index = usize::try_from(index).expect("entry index fits");
+            json!(proof_path_hex(
+                &inclusion_proof(prefix, index).expect("the entry is within the checkpoint")
+            ))
+        };
+        receipt["anchoring"]["inclusion_path"] =
+            path(receipt["subject"]["entry_index"].as_u64().expect("entry_index"));
+        for hop in receipt["governance"]["chain"].as_array_mut().expect("chain") {
+            hop["inclusion_path"] = path(hop["entry_index"].as_u64().expect("entry_index"));
+        }
+        // The currency material is authenticated against the same root, so it is reissued over
+        // the rebuilt tree: the substituted envelope at its own index, and a range proof that
+        // opens to the new root.
+        let material = &mut receipt["governance"]["currency"]["material"];
+        if let Some(range) = material.get("range").cloned() {
+            let from = range["from_index"].as_u64().expect("from_index");
+            let to = range["to_index"].as_u64().expect("to_index");
+            let hashes: Vec<_> = prefix.iter().map(|leaf| leaf_hash(leaf)).collect();
+            let proof =
+                range_proof::generate(&hashes, from, to).expect("range within the checkpoint");
+            material["entries"] = json!((from..to)
+                .map(|index| json!({
+                    "entry_index": index,
+                    "envelope": envelopes[at(index)],
+                }))
+                .collect::<Vec<_>>());
+            material["range_proof"] = json!({ "adaptor_form": range_proof::encode(&proof) });
+        }
+
+        let log_key = keys.by_key_id(field_str(&checkpoint_object, "key_id").expect("key_id"));
+        let reissued = checkpoint(
+            field_str(&checkpoint_object, "log_id").expect("log_id"),
+            tree_size,
+            &root,
+            field_str(&checkpoint_object, "checkpoint_time").expect("checkpoint_time"),
+            log_key,
+        );
+        for cosignature in receipt["anchoring"]["witnesses"].as_array_mut().expect("witnesses") {
+            let witness_id = field_str(cosignature, "witness_id").expect("witness_id").to_owned();
+            let witness = keys.by_key_id(field_str(cosignature, "key_id").expect("key_id"));
+            cosignature["cosignature"] =
+                json!(witness.sign(&cosignature_bytes(&reissued, &witness_id)));
+        }
+        receipt["anchoring"]["checkpoint"] = reissued;
+    }
+
+    /// The `governance.rotation_proofs[]` element for manifest v2's rotation at entry 25 (I-D
+    /// §7.1): `cp26` — signed by the log key (unchanged across the rotation in this corpus) and
+    /// cosigned by the OUTGOING witness, witness-1 — proves the rotating manifest's own
+    /// anchoring under the state it retires. This corpus has exactly one governance-key
+    /// rotation, so one element suffices for every vector whose chain carries manifest v2.
+    pub fn rotation_proof_element(&self, keys: &Keys) -> Value {
+        let cp26 = self.anchor("cp26");
+        json!({
+            "manifest_entry_index": 25,
+            "checkpoint": cp26.checkpoint,
+            "inclusion_path": self.log_path(25, cp26.tree_size()),
+            "witnesses": [ cp26.witness_entry(keys) ],
+        })
+    }
+
     /// Inclusion path of leaf `index` in a committed record-sorted tree.
     pub fn tree_path(&self, root: &str, index: usize) -> Vec<String> {
         let leaves = self.trees.get(root).expect("committed tree material");
@@ -784,6 +1350,16 @@ impl Corpus {
 
     pub fn tree_leaves(&self, root: &str) -> &[Value] {
         self.trees.get(root).expect("committed tree material")
+    }
+
+    /// The RFC 9162 consistency path between two published tree sizes (adaptor profile §9).
+    ///
+    /// The sizes are not part of the serialization: they come from the two checkpoints the
+    /// proof runs between, which is what binds a proof to one specific pair.
+    pub fn consistency_path(&self, from_size: u64, to_size: u64) -> Vec<String> {
+        let proof = consistency_proof(&self.log_leaves(), from_size, to_size)
+            .expect("both sizes are within the corpus");
+        consistency_path_hex(&proof)
     }
 
     /// The §4.2 inline enumeration form for `[from, to)` under a named checkpoint.
@@ -810,23 +1386,77 @@ impl Corpus {
 
     pub fn self_check(&self, keys: &Keys) {
         println!("self-check");
+        self.check_statement_ids_are_unique();
         self.check_signatures(keys);
         self.check_anchors(keys);
         self.check_trees();
         self.check_range_proofs();
+        self.check_consistency_proofs();
         self.check_refusal(keys);
         self.check_closures();
     }
 
+    /// Spec §2.1: a producer MUST NOT anchor two envelopes with the same statement id, and
+    /// where duplicates occur the smallest entry index governs while later ones are void.
+    ///
+    /// A corpus that broke this rule could not demonstrate the rules it exists for: a vector
+    /// asserting that some later entry governs would be asserting the opposite of §2.1, and no
+    /// reader could tell the intended lesson from the accident. Entry ids are checked too — two
+    /// envelopes sharing one would be one anchored entry counted twice.
+    ///
+    /// ONE pair is deliberate, and it is the one §2.1's rule does not reach: entry 38 is a
+    /// purported `key` statement whose envelope does not verify, and entry 41 is the same
+    /// statement genuinely signed. §2.1 voids "the envelope with the smallest entry index
+    /// governs and later ones are void" among GOVERNING statements, and I-D §7.5.1 4b admits an
+    /// enumeration-only entry to the induction "only if its envelope verifies in phase 1" — a
+    /// void entry never governs, so it occupies no statement id and the later verifying copy is
+    /// the one that governs. Their ENTRY ids still differ, since the signatures do.
+    fn check_statement_ids_are_unique(&self) {
+        const VOID_THEN_VERIFYING: [usize; 2] = [38, 41];
+        let mut statements: BTreeMap<String, usize> = BTreeMap::new();
+        let mut entries: BTreeMap<String, usize> = BTreeMap::new();
+        for (index, env) in self.envelopes.iter().enumerate() {
+            let sid = statement_id(env).expect("well-formed envelope");
+            if VOID_THEN_VERIFYING.contains(&index) {
+                statements.entry(sid).or_insert(index);
+                let eid = entry_id(env);
+                if let Some(first) = entries.insert(eid.clone(), index) {
+                    panic!("entries {first} and {index} share entry id {eid}");
+                }
+                continue;
+            }
+            if let Some(first) = statements.insert(sid.clone(), index) {
+                panic!(
+                    "entries {first} and {index} share statement id {sid}: spec §2.1 voids the \
+                     later one, so the corpus cannot demonstrate anything about it"
+                );
+            }
+            let eid = entry_id(env);
+            if let Some(first) = entries.insert(eid.clone(), index) {
+                panic!("entries {first} and {index} share entry id {eid}");
+            }
+        }
+        println!(
+            "  [ok] {} anchored envelopes carry {} distinct statement ids and {} distinct entry \
+             ids (spec §2.1 payload uniqueness)",
+            self.envelopes.len(),
+            statements.len(),
+            entries.len()
+        );
+    }
+
     fn check_signatures(&self, keys: &Keys) {
-        // Entries 28 and 29 are intentionally non-verifying vector fixtures: well-formed
-        // retractions naming the real authority's `key_id` with garbage `sig` bytes (entry 29
+        // Entries 32 and 33 are intentionally non-verifying vector fixtures: well-formed
+        // retractions naming the real authority's `key_id` with garbage `sig` bytes (entry 33
         // also carries a second, genuinely valid entry from a non-authority key). Every OTHER
         // entry must genuinely verify; these two must genuinely NOT — both are asserted below,
         // so a generator bug that accidentally produced a valid signature (defeating the
         // vector's purpose) or an invalid one elsewhere (a real regression) would each be
         // caught.
-        const NON_VERIFYING_ENTRIES: [usize; 2] = [28, 29];
+        // Entries 38 and 39 join them: a purported `key` statement and a purported `manifest`
+        // whose signatures do not verify, anchored past every checkpoint the rest of the corpus
+        // uses, for the reliance rule of I-D §7.5.1 4d.
+        const NON_VERIFYING_ENTRIES: [usize; 5] = [32, 33, 38, 39, 46];
         for (index, env) in self.envelopes.iter().enumerate() {
             if NON_VERIFYING_ENTRIES.contains(&index) {
                 continue;
@@ -1034,6 +1664,52 @@ impl Corpus {
         );
     }
 
+    /// Every published checkpoint pair must be provably append-only, and a proof generated for
+    /// one pair must not validate another (adaptor profile §9).
+    fn check_consistency_proofs(&self) {
+        let leaves = self.log_leaves();
+        let root_at = |size: u64| tree_root(&leaves[..at(size)]);
+        let mut pairs = 0;
+        for older in &self.anchors {
+            for newer in &self.anchors {
+                if newer.tree_size() < older.tree_size() {
+                    continue;
+                }
+                let path = self.consistency_path(older.tree_size(), newer.tree_size());
+                let proof =
+                    ahl_core::consistency_from_hex(older.tree_size(), newer.tree_size(), &path)
+                        .expect("generated path is well formed");
+                assert!(
+                    verify_consistency_proof(
+                        &proof,
+                        &parse_hash_hex(older.root()).expect("root hash"),
+                        &parse_hash_hex(newer.root()).expect("root hash"),
+                    )
+                    .expect("well-formed proof"),
+                    "{} -> {}: consistency proof did not verify",
+                    older.name,
+                    newer.name
+                );
+                pairs += 1;
+            }
+        }
+
+        // A proof for a DIFFERENT pair must not validate this one. Without this, a verifier
+        // that checked only "does a path open something?" would accept a proof about sizes the
+        // claim never mentioned — the same defect adaptor profile §6.1 pins down for refusal
+        // evidence, in a different place.
+        let wrong = ahl_core::consistency_from_hex(20, 24, &self.consistency_path(8, 24))
+            .expect("well-formed path");
+        assert!(
+            !verify_consistency_proof(&wrong, &root_at(20), &root_at(24)).unwrap_or(false),
+            "a consistency proof generated for [8, 24) must not verify as one for [20, 24)"
+        );
+        println!(
+            "  [ok] {pairs} consistency proofs verified between published checkpoints, and a \
+             proof for the wrong pair of sizes was rejected (adaptor profile §9)"
+        );
+    }
+
     fn check_refusal(&self, keys: &Keys) {
         let mut unsigned = self.refusal.as_object().cloned().expect("refusal object");
         unsigned.remove("signature");
@@ -1113,7 +1789,7 @@ impl Corpus {
         // descendant (spec §2.3.4).
         let at_declared = affected_set(&self.envelopes, &self.trees, 6, 8).expect("corpus");
         let later =
-            affected_set(&self.envelopes, &self.trees, 6, self.envelopes.len()).expect("corpus");
+            affected_set(&self.envelopes, &self.trees, 6, CONFORMING_TREE_PREFIX).expect("corpus");
         assert!(
             at_declared.affected.is_subset(&later.affected)
                 && at_declared.affected.len() < later.affected.len(),
@@ -1125,7 +1801,7 @@ impl Corpus {
              only (spec §2.3.4)",
             at_declared.affected.len(),
             later.affected.len(),
-            self.envelopes.len()
+            CONFORMING_TREE_PREFIX
         );
     }
 
@@ -1147,6 +1823,11 @@ impl Corpus {
                                 self-authenticating and is NOT an anchored AHL statement.",
                 "adaptor": { "id": ADAPTOR_ID, "hash": self.adaptor_hash },
                 "signed_over": "JCS(refusal object with the \"signature\" member removed)",
+                "reason_taxonomy": [ "equivocation", "size-regression", "extension-failed" ],
+                "recheck": "for `equivocation`: retained.tree_size == offered.tree_size AND \
+                            retained.root_hash != offered.root_hash, over two carried, \
+                            log-signed checkpoints. `proof` MUST be absent — it is required \
+                            only for `extension-failed`.",
                 "expect": "accept as evidence of log equivocation: both checkpoints carry valid \
                            log-1 signatures, `tree_size` is equal and `root_hash` differs, which \
                            no append-only log can produce",
@@ -1155,6 +1836,9 @@ impl Corpus {
         );
     }
 
+    // A flat list of statement-vector writes, one per corpus entry plus the malformed fixtures;
+    // splitting adds no clarity, matching `write_merkle` below.
+    #[allow(clippy::too_many_lines)]
     fn write_statements(&self, root: &Path, keys: &Keys) {
         let statements = root.join("vectors").join("statements");
         for (index, env) in self.envelopes.iter().enumerate() {
@@ -1164,22 +1848,52 @@ impl Corpus {
                 "entry_id": entry_id(env),
                 "envelope": env,
             });
-            if index == 28 {
+            if index == 32 {
                 // Structurally a well-formed AHL statement (statement_id/entry_id are ordinary
                 // digests of it), anchored like any other entry — but its `sig` is garbage, not
                 // a signature `producer-1` ever produced, even though `signatures[0].key_id`
                 // names `producer-1`'s real key. The log anchors opaque bytes and does not
                 // itself validate AHL signatures (core spec §3 contract item 1), so this is what
                 // a real non-verifying statement anchored in the log looks like. It exists to
-                // prove that competing-trigger selection verifies each candidate's signature
-                // cryptographically rather than trusting a claimed `key_id` (receipt format §3).
+                // prove that enumerated material is verified envelope by envelope rather than
+                // trusted on a claimed `key_id` (I-D §7.5.1 4d).
                 vector["note"] = json!(
                     "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against \
                      `signatures[0].key_id`'s real public key. See \
-                     trigger-effective-non-verifying-signature-ignored.ahl."
+                     trigger-effective-void-candidate.ahl."
                 );
             }
-            if index == 29 {
+            if index == 38 || index == 39 {
+                // The same fact for a purported GOVERNANCE statement: a `key` statement at 38
+                // and a manifest version at 39, each well formed and each carrying a `sig` no
+                // key ever produced. I-D §7.5.1 4b enters an enumeration-only entry into the
+                // induction "only if its envelope verifies in phase 1"; neither does, so both
+                // are void — not inducted, no effect on K — and §7.4 adds that a void entry's
+                // absence from `governance.chain[]` is not an omission.
+                vector["note"] = json!(
+                    "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against \
+                     `signatures[0].key_id`'s real public key. A purported governance statement \
+                     that does not verify is VOID (I-D §2.1, §7.5.1 4b and 4d): not inducted, no \
+                     effect on the key state, reported as an informative item. See \
+                     governance-state-void-governance-entries.ahl."
+                );
+            }
+            if index == 46 {
+                // A chain hop that is both: a foreign revision AND a signature no key produced.
+                // I-D §7.5.1 4b orders the two rules — "A `governance.chain[]` element is
+                // different: the receipt presents it as its own lineage, so its phase-1 failure
+                // is `invalid`", and the foreign-revision rule that follows applies to "A
+                // VERIFYING purported governance entry" — so the signature settles this one and
+                // the revision it declares never softens it to a capability gap.
+                vector["note"] = json!(
+                    "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against \
+                     `signatures[0].key_id`'s real public key, and the payload declares \
+                     `ahl_version: \"0.5\"` besides. As a `governance.chain[]` element this is \
+                     `invalid` on the signature (I-D §7.5.1 4b), not `unverifiable` on the \
+                     revision. See statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl."
+                );
+            }
+            if index == 33 {
                 // Structurally well-formed, carrying two signature entries: a genuinely valid
                 // one from `producer-2` (not the `customers` authority) and one naming
                 // `producer-1`'s real key_id (the genuine authority) whose `sig` is garbage. It
@@ -1270,6 +1984,38 @@ impl Corpus {
                 "envelope": unsigned,
             }),
         );
+
+        // I-D revision 0.4 §2.6 / §6.3: "A dataset id MUST NOT contain a control octet: any
+        // octet in 0x00 through 0x1F inclusive, or 0x7F" — stated as its own normative
+        // requirement because it is load-bearing (an implementation validating only length and
+        // printability could still admit it). §6.3's conformance table then makes a
+        // syntactically invalid dataset declaration reject the WHOLE manifest, not merely the
+        // affected dataset's claims: "A dataset's canonicalization descriptor is a required
+        // manifest member (§6.2), and statements derive their governance from that manifest
+        // (§2.2)". Each vector below is an otherwise-genuine genesis manifest with the `scores`
+        // dataset renamed to an id carrying the offending octet.
+        for (label, octet_char, octet_name) in [
+            ("dataset-id-control-octet-0x1f", '\u{1f}', "0x1F"),
+            ("dataset-id-control-octet-0x7f", '\u{7f}', "0x7F"),
+        ] {
+            let mut bad_manifest = manifest(keys, &self.log_id, &self.adaptor_hash, 0, None);
+            let datasets = bad_manifest["datasets"].as_object_mut().expect("datasets object");
+            let scores = datasets.remove(DS_SCORES).expect("scores dataset declared");
+            datasets.insert(format!("scores{octet_char}bad"), scores);
+            write_json(
+                &malformed.join(format!("{label}.json")),
+                &json!({
+                    "name": label,
+                    "expect": format!(
+                        "reject: I-D revision 0.4 §2.6 — \"A dataset id MUST NOT contain a \
+                         control octet\" ({octet_name} here); §6.3's conformance table makes a \
+                         syntactically invalid dataset declaration reject the WHOLE manifest, \
+                         not merely the affected dataset's claims",
+                    ),
+                    "envelope": envelope(bad_manifest, &keys.producer_1),
+                }),
+            );
+        }
     }
 
     // A flat list of tree-vector writes, one per committed tree; splitting adds no clarity.
@@ -1279,7 +2025,7 @@ impl Corpus {
         let cp28 = self.anchor("cp28");
         // The `inclusion` block below is claimed against cp28's own root, so its proof must be
         // computed over exactly cp28's 28 leaves — the corpus has since grown further entries
-        // (the non-verifying-signature fixtures) that cp28 never committed.
+        // that cp28 never committed.
         let leaves = &self.log_leaves()[..at(cp28.tree_size())];
         let proof_3 = inclusion_proof(leaves, 3).expect("entry 3 is in the log");
         write_json(
@@ -1421,9 +2167,9 @@ impl Corpus {
 
     fn range_proof_vector(&self) -> Value {
         let cp28 = self.anchor("cp28");
-        // Scoped to cp28's own tree size (28): the corpus grows further entries past it (the
-        // non-verifying-signature fixtures), and this vector's proofs must stay over exactly the
-        // leaf set cp28 actually commits, not whatever the log has grown to since.
+        // Scoped to cp28's own tree size (28): the corpus grows further entries past it, and
+        // this vector's proofs must stay over exactly the leaf set cp28 actually commits, not
+        // whatever the log has grown to since.
         let leaves = &self.log_leaves()[..at(cp28.tree_size())];
         let hashes: Vec<_> = leaves.iter().map(|l| leaf_hash(l)).collect();
         let cases = [
@@ -1567,6 +2313,14 @@ fn record_list(records: &[RecordRef]) -> Vec<Value> {
 
 /// Witness refusal evidence: the log signed a second, different root at a tree size the
 /// witness had already cosigned (spec §3.3 step 3, adaptor profile §6.1).
+///
+/// The reason is `equivocation`. That is the only reason this evidence supports: the taxonomy
+/// is `equivocation | size-regression | extension-failed`, each independently recheckable from
+/// what the refusal itself carries, and here the recheck is exactly `retained.tree_size ==
+/// offered.tree_size` with `retained.root_hash != offered.root_hash` over two log-signed
+/// checkpoints. `proof` is deliberately absent: it is required only for `extension-failed`, and
+/// a carried proof no reason directs a verifier to check is unverified material inviting
+/// misreading.
 fn refusal_evidence(keys: &Keys, log_id: &str, retained: &Anchor) -> Value {
     let conflicting_root = sha256_hex(b"ahl-test-log-1 equivocating root at tree size 13");
     let offered = checkpoint(log_id, retained.tree_size(), &conflicting_root, T0, &keys.log_1);
@@ -1574,12 +2328,12 @@ fn refusal_evidence(keys: &Keys, log_id: &str, retained: &Anchor) -> Value {
         "type": "witness-refusal",
         "witness_id": WITNESS_1,
         "log_id": log_id,
-        "reason": "inconsistent",
+        "reason": "equivocation",
         "retained": retained.checkpoint,
         "offered": offered,
         "detail": "the log offered a second checkpoint at tree_size 13 whose root differs from \
                    the one witness-1 had already cosigned; no append-only log can produce two \
-                   roots at one tree size, so no consistency proof between them can exist",
+                   roots at one tree size",
         "refused_at": T0,
         "key_id": keys.witness_1.key_id(),
     });
@@ -1742,10 +2496,21 @@ fn closure_cases(r: &Records) -> Vec<ClosureCase> {
 
 impl Records {
     fn build(dataset_key: &[u8]) -> Self {
+        // I-D §2.6: the descriptor digest `ddig` is part of every commitment preimage. Both
+        // corpus datasets declare the identical descriptor (`{"canonicalization": "jcs"}`, no
+        // `media_type` — `jcs` does not require one, see the manifest's `datasets` block in
+        // `scenario::manifest`), so `ddig` is the same value for both; the two datasets still
+        // commit to disjoint preimages, because domain separation by `dsid` holds
+        // unconditionally, independent of whether `ddig` also differs (I-D §2.6).
+        let ddig = CanonicalizationDescriptor::new(CANONICALIZATION, None)
+            .expect("committed canonicalization identifier is syntactically valid")
+            .ddig();
         let keyed = |value: &Value| {
-            commit_keyed(dataset_key, DS_CUSTOMERS, &jcs(value)).expect("32-byte dataset key")
+            commit_keyed(dataset_key, DS_CUSTOMERS, &ddig, &jcs(value))
+                .expect("32-byte dataset key and a valid dataset id")
         };
-        let plain = |value: &Value| commit_plain(DS_SCORES, &jcs(value));
+        let plain =
+            |value: &Value| commit_plain(DS_SCORES, &ddig, &jcs(value)).expect("valid dataset id");
 
         let a = json!({ "customer_id": "C-1001", "country": "DE", "segment": "retail" });
         let b = json!({ "customer_id": "C-2002", "country": "FR", "segment": "sme" });
@@ -1771,10 +2536,26 @@ impl Records {
             e2: plain(&json!({ "customer_id": "C-3003", "model": "risk-v4.2", "score": 502 })),
             e3: plain(&json!({ "customer_id": "C-3003", "model": "risk-v4.2", "score": 503 })),
             c_f: keyed(&json!({ "customer_id": "C-5005", "country": "PT", "segment": "retail" })),
+            c_e: keyed(&json!({ "customer_id": "C-6006", "country": "NL", "segment": "retail" })),
             h: plain(&json!({ "customer_id": "C-5005", "model": "risk-v4.2", "score": 421 })),
             z: plain(&json!({ "customer_id": "C-1001", "metric": "rollup", "value_bp": 4200 })),
-            c_a_bytes: jcs(&a),
+            x_unsorted: plain(
+                &json!({ "customer_id": "C-7007", "model": "portfolio-v1", "score": 701 }),
+            ),
+            x_duplicate: plain(
+                &json!({ "customer_id": "C-7007", "model": "portfolio-v1", "score": 702 }),
+            ),
+            x_noncanonical: plain(
+                &json!({ "customer_id": "C-7007", "model": "portfolio-v1", "score": 703 }),
+            ),
             c_b_bytes: jcs(&b),
+            // Same value as `a` above (I-D §2.6 "canonicalization equality is syntactic, not
+            // semantic"), deliberately serialized in non-canonical key order with insignificant
+            // whitespace: JCS (RFC 8785) sorts object members and admits no whitespace between
+            // tokens, so `jcs()` of this text equals `jcs(&a)` exactly, and the record
+            // commitment `c_a` — computed from `jcs(&a)` above — is unchanged.
+            c_a_bytes_as_received:
+                br#"{"customer_id": "C-1001", "country": "DE", "segment": "retail"}"#.to_vec(),
         }
     }
 }

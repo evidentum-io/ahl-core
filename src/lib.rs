@@ -1,13 +1,17 @@
 //! `ahl-core` — reference primitives and the canonical test-vector corpus for the
 //! **AHL Protocol** (Anchored History Log).
 //!
-//! This crate implements exactly the pieces the AHL Core Specification v0.3-draft and the
-//! Evidence Receipt format 1-draft r3 need in order to *produce and re-verify deterministic
-//! test vectors*:
+//! This crate implements exactly the pieces the AHL Internet-Draft draft-zatona-ahl-00
+//! revision 0.4 (statements, commitments, tree rules, conformance, and — since revision 0.4 —
+//! Evidence Receipts in its own §7) need in order to *produce and re-verify deterministic
+//! test vectors*. This document defines revision 0.4 alone: it verifies no material issued
+//! under an earlier revision (I-D §2.2, §7.1).
 //!
 //! * RFC 8785 (JCS) canonicalization and the two AHL identifiers — statement id and entry id
 //!   (spec §2.1);
-//! * domain-separated record commitments in `plain` and `keyed` mode (spec §2.4);
+//! * canonicalization descriptors, descriptor digests and dataset id validation, and
+//!   descriptor-bound, domain-separated record commitments in `plain` and `keyed` mode (AHL I-D
+//!   draft-zatona-ahl-00 revision 0.4 §2.6 — see [`descriptor`]);
 //! * Ed25519 statement envelopes and signed checkpoints;
 //! * AHL Merkle trees — leaf `0x00 || bytes`, node `0x01 || left || right` (spec §2.5);
 //! * validated committed-tree material (spec §2.5, §3.5) and authenticated range proofs
@@ -29,35 +33,46 @@
 //! suitable for production key handling.
 //!
 //! ```
+//! use ahl_core::descriptor::CanonicalizationDescriptor;
 //! use ahl_core::{commit_plain, jcs};
 //! use serde_json::json;
 //!
-//! // A `plain` commitment is domain-separated by the dataset id (spec §2.4).
+//! // A `plain` commitment is domain-separated by the dataset id, and bound to the dataset's
+//! // canonicalization descriptor through its digest `ddig` (I-D revision 0.4 §2.6).
+//! let descriptor = CanonicalizationDescriptor::new("jcs", None).expect("valid identifier");
 //! let bytes = jcs(&json!({ "customer_id": "C-1001" }));
-//! assert!(commit_plain("scores", &bytes).starts_with("sha256:"));
+//! let commitment =
+//!     commit_plain("scores", &descriptor.ddig(), &bytes).expect("valid dataset id");
+//! assert!(commitment.starts_with("sha256:"));
 //! ```
 
 #![forbid(unsafe_code)]
 
 pub mod bitemporal;
 pub mod closure;
+pub mod descriptor;
 mod error;
 pub mod range_proof;
 pub mod receipt;
 pub mod tree;
 
-use atl_core::core::merkle::{compute_root, generate_inclusion_proof, verify_inclusion};
+use atl_core::core::merkle::{
+    compute_root, generate_consistency_proof, generate_inclusion_proof, verify_consistency,
+    verify_inclusion,
+};
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use hmac::{Hmac, Mac as _};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 
-pub use atl_core::core::merkle::{Hash, InclusionProof};
+pub use atl_core::core::merkle::{ConsistencyProof, Hash, InclusionProof};
 pub use error::{AhlError, AhlResult};
 
-/// The AHL core specification version these vectors are generated against.
-pub const AHL_VERSION: &str = "0.3";
+/// The AHL Internet-Draft revision these vectors are generated against (I-D §2.2, §7.1).
+///
+/// This document defines revision 0.4 alone; no verification of earlier-revision material.
+pub const AHL_VERSION: &str = "0.4";
 
 /// Leaf domain-separation prefix for every AHL tree (spec §2.5).
 pub const LEAF_PREFIX: u8 = 0x00;
@@ -68,7 +83,12 @@ pub const LEAF_PREFIX: u8 = 0x00;
 /// adaptor profile document and this crate cannot disagree about it.
 pub const NODE_PREFIX: u8 = 0x01;
 
-/// Separator between the dataset id and the canonical record bytes (spec §2.4).
+/// Commitment preimage separator (AHL I-D revision 0.4 §2.6).
+///
+/// The preimage is `dsid || 0x1F || ddig || 0x1F || canonical bytes`: this literal octet
+/// separates `dsid` from the descriptor digest `ddig`, and separates `ddig` from the canonical
+/// record bytes. A dataset id MUST NOT contain this octet ([`descriptor::validate_dataset_id`]),
+/// which is what keeps the first occurrence in the preimage unambiguous.
 pub const DATASET_SEPARATOR: u8 = 0x1F;
 
 const SHA256_PREFIX: &str = "sha256:";
@@ -119,39 +139,66 @@ pub fn entry_id(envelope: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Record commitments (spec §2.4)
+// Record commitments (AHL I-D revision 0.4 §2.6)
 // ---------------------------------------------------------------------------
 
-/// `dsid || 0x1F || canonical bytes` — the domain-separated commitment input.
-fn commitment_input(dataset: &str, canonical: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(dataset.len() + 1 + canonical.len());
+/// `dsid || 0x1F || ddig || 0x1F || canonical bytes` — the commitment preimage (I-D §2.6).
+///
+/// `dsid` is validated here — both the length/printable-ASCII syntax and, as its own check, the
+/// dataset id control-octet prohibition ([`descriptor::validate_dataset_id`]) — because an
+/// invalid `dsid` would make the preimage's own field boundaries ambiguous.
+///
+/// # Errors
+///
+/// Returns [`AhlError::DatasetIdSyntax`] or [`AhlError::DatasetIdControlOctet`] if `dataset` is
+/// not a valid dataset id.
+fn commitment_input(dataset: &str, ddig: &[u8; 32], canonical: &[u8]) -> AhlResult<Vec<u8>> {
+    descriptor::validate_dataset_id(dataset)?;
+    let mut buf = Vec::with_capacity(dataset.len() + 1 + ddig.len() + 1 + canonical.len());
     buf.extend_from_slice(dataset.as_bytes());
     buf.push(DATASET_SEPARATOR);
+    buf.extend_from_slice(ddig);
+    buf.push(DATASET_SEPARATOR);
     buf.extend_from_slice(canonical);
-    buf
+    Ok(buf)
 }
 
-/// `plain` commitment — `SHA-256(dsid || 0x1F || canonical bytes)` (spec §2.4).
-#[must_use]
-pub fn commit_plain(dataset: &str, canonical: &[u8]) -> String {
-    sha256_hex(&commitment_input(dataset, canonical))
+/// `plain` commitment — `SHA-256(dsid || 0x1F || ddig || 0x1F || canonical bytes)` (I-D §2.6).
+///
+/// `ddig` is the dataset's canonicalization descriptor digest
+/// ([`descriptor::CanonicalizationDescriptor::ddig`]).
+///
+/// # Errors
+///
+/// Returns [`AhlError::DatasetIdSyntax`] or [`AhlError::DatasetIdControlOctet`] if `dataset` is
+/// not a valid dataset id.
+pub fn commit_plain(dataset: &str, ddig: &[u8; 32], canonical: &[u8]) -> AhlResult<String> {
+    Ok(sha256_hex(&commitment_input(dataset, ddig, canonical)?))
 }
 
-/// `keyed` commitment — `HMAC-SHA-256(k_dataset, dsid || 0x1F || canonical bytes)` (spec §2.4).
+/// `keyed` commitment —
+/// `HMAC-SHA-256(k_dataset, dsid || 0x1F || ddig || 0x1F || canonical bytes)` (I-D §2.6).
 ///
 /// Required for personal or sensitive data. The dataset key is never packaged into a
 /// receipt; only an authorized verifier can recompute this value.
 ///
 /// # Errors
 ///
-/// Returns [`AhlError::BadLength`] if `key` cannot be used as an HMAC key.
-pub fn commit_keyed(key: &[u8], dataset: &str, canonical: &[u8]) -> AhlResult<String> {
+/// Returns [`AhlError::BadLength`] if `key` cannot be used as an HMAC key, or
+/// [`AhlError::DatasetIdSyntax`] / [`AhlError::DatasetIdControlOctet`] if `dataset` is not a
+/// valid dataset id.
+pub fn commit_keyed(
+    key: &[u8],
+    dataset: &str,
+    ddig: &[u8; 32],
+    canonical: &[u8],
+) -> AhlResult<String> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| AhlError::BadLength {
         what: "hmac dataset key",
         expected: 32,
         got: key.len(),
     })?;
-    mac.update(&commitment_input(dataset, canonical));
+    mac.update(&commitment_input(dataset, ddig, canonical)?);
     Ok(format!("{HMAC_PREFIX}{}", hex::encode(mac.finalize().into_bytes())))
 }
 
@@ -220,13 +267,26 @@ impl TestKey {
         format!("{BASE64_PREFIX}{}", B64.encode(self.signing.sign(msg).to_bytes()))
     }
 
-    /// A manifest key object `{key_id, pubkey, valid_from_index}` (spec §7.2).
+    /// A manifest LOG or WITNESS key object `{key_id, pubkey, valid_from_index}` (I-D §6.2).
     #[must_use]
     pub fn key_object(&self, valid_from_index: u64) -> Value {
         json!({
             "key_id": self.key_id(),
             "pubkey": self.pubkey(),
             "valid_from_index": valid_from_index,
+        })
+    }
+
+    /// A manifest PRODUCER key object `{key_id, pubkey}` (I-D §6.2: "Each entry is a producer
+    /// key object `{key_id, pubkey}`... A producer key object carrying any member beyond those
+    /// two is a schema failure" — deliberately NOT the log/witness shape `key_object` builds:
+    /// the producer array IS the key state at the manifest's entry index, with no per-key
+    /// `valid_from_index` of its own).
+    #[must_use]
+    pub fn producer_key_object(&self) -> Value {
+        json!({
+            "key_id": self.key_id(),
+            "pubkey": self.pubkey(),
         })
     }
 }
@@ -277,15 +337,66 @@ pub fn envelope(payload: Value, key: &TestKey) -> Value {
     Value::Object(env)
 }
 
-/// Verify every signature on an envelope against a `key_id -> pubkey` resolver.
+/// Why [`check_envelope`] did not accept an envelope — or that it did.
 ///
-/// Returns `false` for an envelope with no signatures: unsigned objects are not AHL
-/// statements (spec §2.1).
+/// The two failure variants are the same outcome under spec §2.1's envelope rule and are kept
+/// apart because the AHL I-D's §7.4 makes the caller's response to them differ: an envelope
+/// naming a key the presented key state does not hold is missing MATERIAL, while an envelope
+/// whose signature does not verify under a key that IS held is a demonstrated defect. Which of
+/// the two a given resolver reports is a property of what the caller put in the resolver, so
+/// only the caller can decide what each one means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EnvelopeCheck {
+    /// Every signature entry resolved to a key and verified over `JCS(payload)`.
+    Verified,
+    /// A signature entry did not verify under the key the resolver returned for it, or the
+    /// envelope carries no signature entries at all — unsigned objects are not AHL statements
+    /// (spec §2.1).
+    SignatureInvalid,
+    /// A signature entry names a `key_id` the resolver holds no key for, AND every entry that
+    /// did resolve verified.
+    ///
+    /// The second half is the whole of the difference between "the verifier is short of
+    /// material" and "the verifier is short of material and has also been handed a forgery".
+    /// One resolvable entry that fails to verify makes the envelope [`Self::SignatureInvalid`]
+    /// whatever else the array holds (spec §2.1: "invalid regardless of how many other entries
+    /// verify").
+    KeyNotResolved {
+        /// The first `key_id`, in array order, that resolved to nothing.
+        key_id: String,
+    },
+}
+
+/// Verify every signature on an envelope against a `key_id -> pubkey` resolver, reporting
+/// WHICH way it failed.
+///
+/// **Unresolved entries are swept past, and the result does not depend on the order the
+/// producer chose: the first resolvable entry that fails to verify ends the sweep with a
+/// conclusive `SignatureInvalid`, and an unresolved key is reported only once every
+/// resolvable entry has verified.**
+/// Spec §2.1 makes envelope validity "the conjunction of all entries", and an envelope
+/// "carrying a non-verifying entry, or an entry naming a key that is not active at that index,
+/// is invalid regardless of how many other entries verify". The two failures are therefore not
+/// alternatives to be raced: an envelope can carry both at once, and the AHL I-D's §7.7
+/// reduction fixes which one is reported — "`invalid` if any required finding is `invalid`;
+/// otherwise `unverifiable` if any required finding is `unverifiable`… `invalid` dominates
+/// `unverifiable` because a demonstrated defect in required material is a fact about the
+/// artifact, while a capability gap is not."
+///
+/// So the precedence is `SignatureInvalid` > `KeyNotResolved` > `Verified`, and it is applied
+/// as a sweep rather than an early return: a resolvable entry that fails to verify wins
+/// immediately, an unresolved `key_id` is only REMEMBERED, and it is returned only once every
+/// resolvable entry has verified. Returning on the first unresolved key instead would let a
+/// producer downgrade a demonstrated forgery to a capability gap by ordering the array — a
+/// signature the presented key state can prove is bad, reported as material the verifier merely
+/// lacks. Where several entries are unresolved, the FIRST is named; they are one finding under
+/// §2.1's conjunction, and naming one of them is a message-detail choice, not a verdict.
 ///
 /// # Errors
 ///
 /// Returns an error if the envelope shape is wrong or a resolved key cannot be decoded.
-pub fn verify_envelope<F>(env: &Value, resolve: F) -> AhlResult<bool>
+pub fn check_envelope<F>(env: &Value, resolve: F) -> AhlResult<EnvelopeCheck>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -298,18 +409,39 @@ where
         .and_then(Value::as_array)
         .ok_or_else(|| AhlError::Field("signatures".to_owned()))?;
     if signatures.is_empty() {
-        return Ok(false);
+        return Ok(EnvelopeCheck::SignatureInvalid);
     }
     let msg = jcs(payload);
+    let mut unresolved: Option<String> = None;
     for entry in signatures {
         let key_id = field_str(entry, "key_id")?;
         let sig = field_str(entry, "sig")?;
-        let Some(pubkey) = resolve(key_id) else { return Ok(false) };
+        let Some(pubkey) = resolve(key_id) else {
+            unresolved.get_or_insert_with(|| key_id.to_owned());
+            continue;
+        };
         if !verify_signature(&decode_pubkey(&pubkey)?, &msg, sig)? {
-            return Ok(false);
+            return Ok(EnvelopeCheck::SignatureInvalid);
         }
     }
-    Ok(true)
+    Ok(unresolved
+        .map_or(EnvelopeCheck::Verified, |key_id| EnvelopeCheck::KeyNotResolved { key_id }))
+}
+
+/// Verify every signature on an envelope against a `key_id -> pubkey` resolver.
+///
+/// Returns `false` for an envelope with no signatures: unsigned objects are not AHL
+/// statements (spec §2.1). Callers that need to tell an unresolvable `key_id` from a signature
+/// that does not verify use [`check_envelope`].
+///
+/// # Errors
+///
+/// Returns an error if the envelope shape is wrong or a resolved key cannot be decoded.
+pub fn verify_envelope<F>(env: &Value, resolve: F) -> AhlResult<bool>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    Ok(check_envelope(env, resolve)? == EnvelopeCheck::Verified)
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +482,267 @@ pub fn checkpoint_signing_bytes(cp: &Value) -> AhlResult<Vec<u8>> {
         cp.as_object().cloned().ok_or_else(|| AhlError::Field("checkpoint".to_owned()))?;
     object.remove("signature");
     Ok(jcs(&Value::Object(object)))
+}
+
+/// Render a Unix nanosecond timestamp in the exact form adaptor profile `ahl-adaptor-atl-v1`
+/// §6.3 requires: UTC, exactly nine fractional-second digits, `Z` suffix.
+///
+/// # Panics
+///
+/// Never for any `nanos` value representable as a valid Unix instant within this crate's
+/// supported date range; `time::OffsetDateTime` covers many millennia either side of 1970,
+/// far beyond what this crate's corpora need.
+#[must_use]
+pub fn atl_checkpoint_time(nanos: u64) -> String {
+    let whole = i64::try_from(nanos / 1_000_000_000).unwrap_or(i64::MAX);
+    let sub = u32::try_from(nanos % 1_000_000_000).unwrap_or(0);
+    let instant = time::OffsetDateTime::from_unix_timestamp(whole)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        + time::Duration::nanoseconds(i64::from(sub));
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
+        instant.year(),
+        u8::from(instant.month()),
+        instant.day(),
+        instant.hour(),
+        instant.minute(),
+        instant.second(),
+        instant.nanosecond()
+    )
+}
+
+/// Assemble adaptor profile `ahl-adaptor-atl-v1` §6.1's fixed 98-byte checkpoint blob.
+///
+/// Built from its plain components — the byte layout a producer signs (§6.1, §6.5) and a
+/// verifier both parses `raw` against and reconstructs to check a signature (§6.2, §6.4, §6.5).
+///
+/// | offset | size | field |
+/// | --- | --- | --- |
+/// | 0 | 18 | magic `ATL-Protocol-v1-CP` |
+/// | 18 | 32 | Origin ID (raw SHA-256 of the log id's hex payload) |
+/// | 50 | 8 | tree size, u64 little-endian |
+/// | 58 | 8 | timestamp, u64 little-endian Unix nanoseconds |
+/// | 66 | 32 | root hash (raw SHA-256) |
+#[must_use]
+pub fn atl_checkpoint_blob(
+    origin: &[u8; 32],
+    tree_size: u64,
+    timestamp_ns: u64,
+    root: &[u8; 32],
+) -> [u8; 98] {
+    let mut blob = [0u8; 98];
+    blob[0..18].copy_from_slice(b"ATL-Protocol-v1-CP");
+    blob[18..50].copy_from_slice(origin);
+    blob[50..58].copy_from_slice(&tree_size.to_le_bytes());
+    blob[58..66].copy_from_slice(&timestamp_ns.to_le_bytes());
+    blob[66..98].copy_from_slice(root);
+    blob
+}
+
+/// Parse an `ahl-adaptor-atl-v1` §6.3 `checkpoint_time` rendering into its exact Unix
+/// nanosecond count — the inverse of [`atl_checkpoint_time`].
+///
+/// §6.3: "`checkpoint_time` MUST be the UTC rendering of the ATL nanosecond timestamp with
+/// EXACTLY NINE fractional digits and the `Z` suffix... verifiers MUST parse the nine
+/// fractional digits back to the exact u64 nanosecond value and MUST reject a `checkpoint_time`
+/// that is not in this form." This is stricter than the generic RFC 3339 grammar
+/// [`bitemporal::parse_rfc3339`] accepts elsewhere in this crate (any digit count, any numeric
+/// offset) — deliberately: only THIS exact rendering round-trips to the 98-byte blob a producer
+/// actually signed (§6.1), so any other rendering is rejected outright here rather than
+/// "generously" converted.
+///
+/// # Errors
+///
+/// Returns [`AhlError::AtlCheckpoint`] if `value` is not exactly this rendering.
+pub fn atl_checkpoint_time_nanos(value: &str) -> AhlResult<u64> {
+    let invalid = || {
+        AhlError::AtlCheckpoint(format!(
+            "checkpoint_time `{value}`: not the ATL adaptor's required rendering — exactly \
+             nine fractional-second digits and a literal `Z` (adaptor profile \
+             `ahl-adaptor-atl-v1` §6.3)"
+        ))
+    };
+    // "YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ" is exactly 30 ASCII bytes: a literal `.` at offset 19
+    // and a literal `Z` at the last byte, with nine ASCII digits between them — checked here
+    // directly rather than trusted to whatever the generic RFC 3339 parser happens to accept.
+    let bytes = value.as_bytes();
+    if bytes.len() != 30
+        || bytes[19] != b'.'
+        || bytes[29] != b'Z'
+        || !value[20..29].bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let parsed = bitemporal::parse_rfc3339("checkpoint_time", value).map_err(|_| invalid())?;
+    let seconds = u64::try_from(parsed.unix_timestamp()).map_err(|_| invalid())?;
+    let nanos = u64::from(parsed.nanosecond());
+    seconds.checked_mul(1_000_000_000).and_then(|s| s.checked_add(nanos)).ok_or_else(invalid)
+}
+
+/// Assemble the `ahl-adaptor-atl-v1` §6.1 98-byte blob FROM a receipt-borne checkpoint's own
+/// JSON members — `log_id`, `tree_size`, `checkpoint_time`, `root_hash` — under the §6.2
+/// mapping table.
+///
+/// This is the exact reverse of parsing `raw`: the same layout ([`atl_checkpoint_blob`]), built
+/// from the JSON side rather than read from the wire side, so [`reconcile_atl_checkpoint_raw`]
+/// (compare a carried `raw` against it) and [`checkpoint_signing_bytes_for`] (the bytes the log
+/// actually signs, §6.5 steps 1-2) share one assembler rather than two hand-written copies of
+/// the same layout.
+///
+/// # Errors
+///
+/// Returns [`AhlError::AtlCheckpoint`] if a required member is absent or malformed.
+pub fn atl_checkpoint_blob_from_json(checkpoint: &Value) -> AhlResult<[u8; 98]> {
+    let invalid = |detail: String| AhlError::AtlCheckpoint(format!("checkpoint: {detail}"));
+
+    let log_id = checkpoint
+        .get("log_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`log_id` is REQUIRED".to_owned()))?;
+    let origin = hex::decode(log_id.strip_prefix(SHA256_PREFIX).unwrap_or(log_id))
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .ok_or_else(|| {
+            invalid(
+                "`log_id` is not a `sha256:` family string in lowercase hex (adaptor profile \
+                 `ahl-adaptor-atl-v1` §6.2)"
+                    .to_owned(),
+            )
+        })?;
+    let tree_size = checkpoint
+        .get("tree_size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("`tree_size` is REQUIRED, an entry count".to_owned()))?;
+    let checkpoint_time = checkpoint
+        .get("checkpoint_time")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`checkpoint_time` is REQUIRED".to_owned()))?;
+    let timestamp_ns = atl_checkpoint_time_nanos(checkpoint_time)?;
+    let root_hash = checkpoint
+        .get("root_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`root_hash` is REQUIRED".to_owned()))?;
+    let root = hex::decode(root_hash.strip_prefix(SHA256_PREFIX).unwrap_or(root_hash))
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .ok_or_else(|| {
+            invalid(
+                "`root_hash` is not a `sha256:` family string in lowercase hex (adaptor \
+                 profile `ahl-adaptor-atl-v1` §6.2)"
+                    .to_owned(),
+            )
+        })?;
+
+    Ok(atl_checkpoint_blob(&origin, tree_size, timestamp_ns, &root))
+}
+
+/// The bytes a checkpoint's own log signature is verified over, dispatched on the resolved
+/// adaptor profile (I-D §3.2: the checkpoint's signing form is profile-defined).
+///
+/// `ahl-test-log-v1` signs `JCS(checkpoint minus "signature")` ([`checkpoint_signing_bytes`],
+/// its own §5); `ahl-adaptor-atl-v1` signs the 98-byte blob of [`atl_checkpoint_blob_from_json`]
+/// (its §6.1, §6.5). Any other profile id has no procedure here.
+///
+/// This is a MECHANICAL, profile-string dispatcher — a reusable primitive, not a policy
+/// decision. `ahl_core::receipt::verify_receipt` does NOT call this for `ahl-adaptor-atl-v1`:
+/// that profile's leaf construction (adaptor §4.2) and origin-derived `log_id` (§7.1) are not
+/// yet profile-dispatched anywhere in this crate, so a checkpoint signing over the RIGHT bytes
+/// would still rest on entries hashed the WRONG way, and until the profile document itself is
+/// released (adaptor §14: "Until this document is released as an immutable, openly published
+/// artifact… no manifest may pin it") no manifest may pin it either. This function exists so
+/// the checkpoint-level mechanism is available to a client integrating ATL directly, tested
+/// here at the unit level, without the receipt verifier presenting a false positive.
+///
+/// # Errors
+///
+/// Returns [`AhlError::Field`] for any profile id other than the two named above.
+pub fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> AhlResult<Vec<u8>> {
+    match profile_id {
+        "ahl-test-log-v1" => checkpoint_signing_bytes(checkpoint),
+        "ahl-adaptor-atl-v1" => Ok(atl_checkpoint_blob_from_json(checkpoint)?.to_vec()),
+        other => Err(AhlError::Field(format!(
+            "no checkpoint signing-bytes procedure for adaptor profile `{other}`"
+        ))),
+    }
+}
+
+/// Reconcile a carried `ahl-adaptor-atl-v1` `raw` framing against the assembled blob.
+///
+/// Compares against the blob assembled from a checkpoint's own JSON members (adaptor §6.4,
+/// §6.5 step 3: "compare it byte for byte with the assembled blob; a mismatch is a rejection")
+/// — not a looser field-by-field comparison that could accept a `raw` differing only in, say,
+/// unused padding no such blob has.
+///
+/// # Errors
+///
+/// Returns [`AhlError::AtlCheckpoint`] if `raw` does not decode to exactly 98 octets prefixed
+/// `base64:`, does not carry the `ATL-Protocol-v1-CP` magic, or does not equal the blob
+/// [`atl_checkpoint_blob_from_json`] assembles from `checkpoint`.
+pub fn reconcile_atl_checkpoint_raw(checkpoint: &Value, raw: &str) -> AhlResult<()> {
+    let invalid = |detail: String| AhlError::AtlCheckpoint(format!("raw: {detail}"));
+
+    let encoded = raw.strip_prefix(BASE64_PREFIX).ok_or_else(|| {
+        invalid(
+            "`raw` MUST be `base64:<...>` (adaptor profile `ahl-adaptor-atl-v1` §6.4)".to_owned(),
+        )
+    })?;
+    let bytes = B64
+        .decode(encoded)
+        .map_err(|source| invalid(format!("`raw` does not decode as base64: {source}")))?;
+    let Ok(carried): core::result::Result<[u8; 98], _> = bytes.try_into() else {
+        return Err(invalid(
+            "`raw` MUST decode to exactly 98 octets (adaptor profile `ahl-adaptor-atl-v1` §6.1)"
+                .to_owned(),
+        ));
+    };
+    if carried[0..18] != *b"ATL-Protocol-v1-CP" {
+        return Err(invalid(
+            "`raw`'s magic is not `ATL-Protocol-v1-CP` (adaptor profile `ahl-adaptor-atl-v1` \
+             §6.1)"
+                .to_owned(),
+        ));
+    }
+    let assembled = atl_checkpoint_blob_from_json(checkpoint)?;
+    if carried != assembled {
+        return Err(invalid(
+            "`raw` does not equal the blob assembled from the JSON checkpoint members — the \
+             JSON members govern (adaptor profile `ahl-adaptor-atl-v1` §6.2, §6.4, §6.5)"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Build a signed checkpoint under adaptor profile `ahl-adaptor-atl-v1`.
+///
+/// The Ed25519 signature is over the 98-byte blob of [`atl_checkpoint_blob`] (§6.1, §6.5), not
+/// `JCS(cp minus "signature")` — the form [`checkpoint`] builds, which is `ahl-test-log-v1`'s
+/// own (its §5).
+///
+/// # Errors
+///
+/// Returns [`AhlError::Hex`]/[`AhlError::BadLength`] if `log_id` or `root_hash` are not
+/// `sha256:<hex>` family strings over exactly 32 octets.
+pub fn atl_checkpoint(
+    log_id: &str,
+    tree_size: u64,
+    root_hash: &str,
+    timestamp_ns: u64,
+    key: &TestKey,
+) -> AhlResult<Value> {
+    let origin = parse_hash_hex(log_id)?;
+    let root = parse_hash_hex(root_hash)?;
+    let blob = atl_checkpoint_blob(&origin, tree_size, timestamp_ns, &root);
+    let checkpoint_time = atl_checkpoint_time(timestamp_ns);
+    let signature = key.sign(&blob);
+    Ok(json!({
+        "log_id": log_id,
+        "tree_size": tree_size,
+        "root_hash": root_hash,
+        "checkpoint_time": checkpoint_time,
+        "key_id": key.key_id(),
+        "signature": signature,
+    }))
 }
 
 /// The bytes a witness cosigns: `JCS({"checkpoint": <signed cp>, "witness_id": <id>})`.
@@ -405,6 +798,67 @@ pub fn inclusion_proof(leaves: &[Vec<u8>], index: usize) -> AhlResult<InclusionP
 /// Returns [`AhlError::Merkle`] if the proof is structurally invalid.
 pub fn verify_inclusion_proof(leaf: &[u8], proof: &InclusionProof, root: &Hash) -> AhlResult<bool> {
     Ok(verify_inclusion(&leaf_hash(leaf), proof, root)?)
+}
+
+/// RFC 9162 §2.1.4 consistency proof between two sizes of one log tree.
+///
+/// Generation, like inclusion-proof generation, is delegated to [`atl_core`]; only the leaf
+/// hashing is local. `leaves` must be the log's leaf byte strings up to at least `to_size`.
+///
+/// # Errors
+///
+/// Returns [`AhlError::Merkle`] if `from_size` exceeds `to_size` or `to_size` exceeds the
+/// leaf material supplied.
+pub fn consistency_proof(
+    leaves: &[Vec<u8>],
+    from_size: u64,
+    to_size: u64,
+) -> AhlResult<ConsistencyProof> {
+    let hashes: Vec<Hash> = leaves.iter().map(|leaf| leaf_hash(leaf)).collect();
+    Ok(generate_consistency_proof(from_size, to_size, |level, index| {
+        if level == 0 {
+            hashes.get(usize::try_from(index).ok()?).copied()
+        } else {
+            None
+        }
+    })?)
+}
+
+/// Verify a consistency proof, so an older root is shown to be a prefix of a newer one.
+///
+/// The verification step is [`atl_core::core::merkle::verify_consistency`], never a local
+/// reimplementation — the same anti-drift coupling inclusion proofs use.
+///
+/// # Errors
+///
+/// Returns [`AhlError::Merkle`] if the proof is structurally impossible for its declared
+/// sizes. A structurally valid proof that simply does not prove consistency yields `Ok(false)`.
+pub fn verify_consistency_proof(
+    proof: &ConsistencyProof,
+    old_root: &Hash,
+    new_root: &Hash,
+) -> AhlResult<bool> {
+    Ok(verify_consistency(proof, old_root, new_root)?)
+}
+
+/// A consistency-proof path rendered as `["sha256:<hex>", ...]`, in RFC 9162 order.
+#[must_use]
+pub fn consistency_path_hex(proof: &ConsistencyProof) -> Vec<String> {
+    proof.path.iter().map(hash_hex).collect()
+}
+
+/// Rebuild a [`ConsistencyProof`] from its serialized path.
+///
+/// # Errors
+///
+/// Returns an error if any path element is not a valid `sha256:<hex>` string.
+pub fn consistency_from_hex(
+    from_size: u64,
+    to_size: u64,
+    path: &[String],
+) -> AhlResult<ConsistencyProof> {
+    let path = path.iter().map(|h| parse_hash_hex(h)).collect::<AhlResult<Vec<Hash>>>()?;
+    Ok(ConsistencyProof { from_size, to_size, path })
 }
 
 /// Render a tree hash as `sha256:<hex>`.
@@ -522,18 +976,37 @@ mod tests {
         assert_eq!(sid, statement_id(&env).expect("well-formed envelope"));
     }
 
+    fn ddig() -> [u8; 32] {
+        descriptor::CanonicalizationDescriptor::new("jcs", None).expect("valid identifier").ddig()
+    }
+
     #[test]
     fn commitments_are_domain_separated_by_dataset() {
         let bytes = jcs(&json!({ "a": 1 }));
-        assert_ne!(commit_plain("customers", &bytes), commit_plain("scores", &bytes));
+        let ddig = ddig();
+        assert_ne!(
+            commit_plain("customers", &ddig, &bytes).expect("valid dataset id"),
+            commit_plain("scores", &ddig, &bytes).expect("valid dataset id")
+        );
     }
 
     #[test]
     fn keyed_commitment_differs_from_plain() {
         let bytes = jcs(&json!({ "a": 1 }));
-        let keyed = commit_keyed(&[7u8; 32], "customers", &bytes).expect("32-byte key");
+        let ddig = ddig();
+        let keyed = commit_keyed(&[7u8; 32], "customers", &ddig, &bytes).expect("32-byte key");
         assert!(keyed.starts_with("hmac-sha256:"));
-        assert_ne!(keyed, commit_plain("customers", &bytes));
+        assert_ne!(keyed, commit_plain("customers", &ddig, &bytes).expect("valid dataset id"));
+    }
+
+    #[test]
+    fn commit_plain_rejects_an_invalid_dataset_id() {
+        let bytes = jcs(&json!({ "a": 1 }));
+        let bad = format!("bad{}id", '\u{1f}');
+        assert!(matches!(
+            commit_plain(&bad, &ddig(), &bytes),
+            Err(AhlError::DatasetIdControlOctet { .. })
+        ));
     }
 
     #[test]
@@ -548,6 +1021,73 @@ mod tests {
     fn unsigned_envelope_is_rejected() {
         let env = json!({ "payload": { "type": "key" }, "signatures": [] });
         assert!(!verify_envelope(&env, |_| None).expect("well-formed envelope"));
+    }
+
+    /// The two ways a signature check fails are separated, because callers act on them
+    /// differently (AHL I-D §7.4). `verify_envelope` collapses both to `false`.
+    #[test]
+    fn check_envelope_separates_an_unresolvable_key_from_a_bad_signature() {
+        let k = key();
+        let env = envelope(json!({ "type": "key" }), &k);
+        let resolve = |id: &str| (id == k.key_id()).then(|| k.pubkey());
+
+        assert_eq!(check_envelope(&env, resolve).expect("well formed"), EnvelopeCheck::Verified);
+        assert_eq!(
+            check_envelope(&env, |_| None).expect("well formed"),
+            EnvelopeCheck::KeyNotResolved { key_id: k.key_id() }
+        );
+
+        // The key resolves; the signature does not verify over this payload.
+        let mut tampered = env;
+        tampered["payload"]["type"] = json!("manifest");
+        assert_eq!(
+            check_envelope(&tampered, resolve).expect("well formed"),
+            EnvelopeCheck::SignatureInvalid
+        );
+
+        let unsigned = json!({ "payload": { "type": "key" }, "signatures": [] });
+        assert_eq!(
+            check_envelope(&unsigned, |_| None).expect("well formed"),
+            EnvelopeCheck::SignatureInvalid
+        );
+    }
+
+    /// Spec §2.1 makes envelope validity "the conjunction of all entries", so an envelope
+    /// carrying BOTH defects is invalid whichever order the producer wrote them in: the AHL
+    /// I-D's §7.7 reduction has `invalid` dominate `unverifiable`. Returning on the first
+    /// unresolved key would let the array order downgrade a demonstrated forgery to a
+    /// capability gap.
+    #[test]
+    fn a_resolvable_bad_signature_outranks_an_unresolvable_key_in_either_order() {
+        let signer = key();
+        let payload = json!({ "type": "key" });
+        let good = signer.sign(&jcs(&payload));
+        let bad = signer.sign(&jcs(&json!({ "type": "manifest" })));
+        // Only `signer` resolves; `sha256:00…` is a key the state does not hold.
+        let resolve = |id: &str| (id == signer.key_id()).then(|| signer.pubkey());
+        let absent = commitment(0);
+
+        let two = |first: Value, second: Value| json!({ "payload": payload, "signatures": [first, second] });
+        let uncarried = json!({ "key_id": absent, "sig": good });
+        let forged = json!({ "key_id": signer.key_id(), "sig": bad });
+        let genuine = json!({ "key_id": signer.key_id(), "sig": good });
+
+        for (env, case) in [
+            (two(uncarried.clone(), forged.clone()), "uncarried first"),
+            (two(forged, uncarried.clone()), "forged first"),
+        ] {
+            assert_eq!(
+                check_envelope(&env, resolve).expect("well formed"),
+                EnvelopeCheck::SignatureInvalid,
+                "{case}: a resolvable non-verifying entry is invalid regardless of position"
+            );
+        }
+
+        // With every resolvable entry verifying, the unresolved key is what is left to report.
+        assert_eq!(
+            check_envelope(&two(uncarried, genuine), resolve).expect("well formed"),
+            EnvelopeCheck::KeyNotResolved { key_id: absent }
+        );
     }
 
     #[test]
@@ -626,8 +1166,9 @@ mod tests {
         // `Hmac::<Sha256>::new_from_slice` never rejects a length, so `commit_keyed`'s
         // `BadLength` arm is defensive only. The corpus pins 32-byte dataset keys by
         // convention, not by this call rejecting anything else.
-        assert!(commit_keyed(&[7u8; 8], "customers", b"bytes").is_ok());
-        assert!(commit_keyed(&[7u8; 64], "customers", b"bytes").is_ok());
+        let ddig = ddig();
+        assert!(commit_keyed(&[7u8; 8], "customers", &ddig, b"bytes").is_ok());
+        assert!(commit_keyed(&[7u8; 64], "customers", &ddig, b"bytes").is_ok());
     }
 
     #[test]
@@ -681,11 +1222,169 @@ mod tests {
     }
 
     #[test]
+    fn consistency_proofs_verify_through_atl_core() {
+        let leaves: Vec<Vec<u8>> = (0u8..9).map(|i| vec![i; 4]).collect();
+        let root_at = |size: usize| tree_root(&leaves[..size]);
+        for from in 1..=9usize {
+            for to in from..=9usize {
+                let proof =
+                    consistency_proof(&leaves, from as u64, to as u64).expect("sizes in range");
+                assert!(
+                    verify_consistency_proof(&proof, &root_at(from), &root_at(to))
+                        .expect("well-formed proof"),
+                    "consistency {from} -> {to} did not verify"
+                );
+                let path = consistency_path_hex(&proof);
+                assert_eq!(
+                    consistency_from_hex(from as u64, to as u64, &path).expect("valid path"),
+                    proof,
+                    "the serialized path must round trip"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_consistency_proof_does_not_verify_for_another_pair_of_sizes() {
+        let leaves: Vec<Vec<u8>> = (0u8..9).map(|i| vec![i; 4]).collect();
+        let root_at = |size: usize| tree_root(&leaves[..size]);
+        // A genuine proof for [3, 9) must not validate the claim [5, 9): the sizes live outside
+        // the serialization, so they are what bind a proof to one pair.
+        let path = consistency_path_hex(&consistency_proof(&leaves, 3, 9).expect("sizes in range"));
+        let mislabelled = consistency_from_hex(5, 9, &path).expect("valid path");
+        assert!(!verify_consistency_proof(&mislabelled, &root_at(5), &root_at(9)).unwrap_or(false));
+
+        // An inverted pair is an error, not a quiet `false`.
+        assert!(consistency_proof(&leaves, 9, 3).is_err());
+        assert!(matches!(
+            consistency_from_hex(1, 2, &["nope".to_owned()]),
+            Err(AhlError::MissingPrefix { .. })
+        ));
+    }
+
+    #[test]
     fn checkpoint_signature_covers_everything_but_the_signature() {
         let k = key();
         let cp = checkpoint("sha256:00", 10, "sha256:11", "2026-08-16T12:00:00Z", &k);
         let msg = checkpoint_signing_bytes(&cp).expect("checkpoint object");
         let sig = field_str(&cp, "signature").expect("signed checkpoint");
         assert!(verify_signature(&k.verifying_key(), &msg, sig).expect("well-formed signature"));
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Adaptor profile `ahl-adaptor-atl-v1` checkpoint-blob mechanism (§6.1-§6.5).
+    //
+    // Unit-level only, over a synthetic checkpoint: this profile's document is not yet
+    // released (adaptor §14: "Until this document is released as an immutable, openly
+    // published artifact… no manifest may pin it"), and its leaf construction (§4.2) and
+    // origin-derived `log_id` (§7.1) are not implemented anywhere in this crate, so no
+    // receipt vector may claim it end to end. These tests preserve the checkpoint-level
+    // mechanism — assemble, sign, verify, reconcile `raw` — for a client integrating ATL
+    // directly, without a false-positive receipt anywhere in the corpus.
+    // -----------------------------------------------------------------------------------
+
+    fn log_key() -> TestKey {
+        TestKey::from_seed_hex("log-1", &"11".repeat(32)).expect("valid 32-byte hex seed")
+    }
+
+    #[test]
+    fn atl_checkpoint_time_round_trips_through_its_own_parser() {
+        // The adaptor document's own §6.4 worked example.
+        let nanos = 1_767_225_600_123_456_789u64;
+        let rendered = atl_checkpoint_time(nanos);
+        assert_eq!(rendered, "2026-01-01T00:00:00.123456789Z");
+        assert_eq!(atl_checkpoint_time_nanos(&rendered).expect("strict rendering"), nanos);
+    }
+
+    #[test]
+    fn atl_checkpoint_time_nanos_rejects_anything_but_the_strict_rendering() {
+        for bad in ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.123Z", "not a timestamp"] {
+            assert!(
+                atl_checkpoint_time_nanos(bad).is_err(),
+                "`{bad}` must not parse as the ATL adaptor's nine-digit rendering"
+            );
+        }
+    }
+
+    /// Assemble a blob, sign it with a test log key, verify the signature over the bytes
+    /// `checkpoint_signing_bytes_for` computes for `ahl-adaptor-atl-v1`, and confirm a `raw`
+    /// built from that same blob reconciles byte-for-byte.
+    #[test]
+    fn atl_checkpoint_blob_assembles_signs_verifies_and_reconciles() {
+        let log_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root_hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let timestamp_ns = 1_767_225_600_123_456_789u64;
+        let key = log_key();
+
+        let cp = atl_checkpoint(log_id, 42, root_hash, timestamp_ns, &key)
+            .expect("valid family strings");
+
+        // The signature verifies over exactly the dispatched signing-bytes procedure for
+        // `ahl-adaptor-atl-v1` (adaptor §6.1, §6.5) — not `ahl-test-log-v1`'s JCS form.
+        let signing_bytes =
+            checkpoint_signing_bytes_for(&cp, "ahl-adaptor-atl-v1").expect("ATL dispatch");
+        let sig = field_str(&cp, "signature").expect("signed checkpoint");
+        assert!(verify_signature(&key.verifying_key(), &signing_bytes, sig).expect("valid sig"));
+
+        // A `raw` built from the SAME components reconciles byte-for-byte (adaptor §6.4/§6.5).
+        let origin = parse_hash_hex(log_id).expect("valid family string");
+        let root = parse_hash_hex(root_hash).expect("valid family string");
+        let blob = atl_checkpoint_blob(&origin, 42, timestamp_ns, &root);
+        assert_eq!(blob.to_vec(), signing_bytes, "the blob IS the signing bytes");
+        let raw = format!("base64:{}", B64.encode(blob));
+        reconcile_atl_checkpoint_raw(&cp, &raw).expect("raw matches the assembled blob");
+
+        // And the JSON-driven assembler agrees with the components-driven one.
+        assert_eq!(atl_checkpoint_blob_from_json(&cp).expect("well-formed checkpoint"), blob);
+    }
+
+    #[test]
+    fn atl_checkpoint_raw_mismatch_cases_are_rejected() {
+        let log_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let root_hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let timestamp_ns = 1_767_225_600_123_456_789u64;
+        let cp = atl_checkpoint(log_id, 42, root_hash, timestamp_ns, &log_key())
+            .expect("valid family strings");
+        let origin = parse_hash_hex(log_id).expect("valid family string");
+        let root = parse_hash_hex(root_hash).expect("valid family string");
+        let blob = atl_checkpoint_blob(&origin, 42, timestamp_ns, &root);
+
+        // Wrong length.
+        assert!(matches!(
+            reconcile_atl_checkpoint_raw(&cp, "base64:AAAA"),
+            Err(AhlError::AtlCheckpoint(_))
+        ));
+
+        // Wrong magic (98 zero bytes: right length, wrong content).
+        let wrong_magic = format!("base64:{}", B64.encode([0u8; 98]));
+        assert!(matches!(
+            reconcile_atl_checkpoint_raw(&cp, &wrong_magic),
+            Err(AhlError::AtlCheckpoint(_))
+        ));
+
+        // Correct magic and origin, wrong tree size: genuine field-by-field disagreement.
+        let mut corrupted = blob;
+        corrupted[50] ^= 0x01;
+        let raw = format!("base64:{}", B64.encode(corrupted));
+        assert!(matches!(reconcile_atl_checkpoint_raw(&cp, &raw), Err(AhlError::AtlCheckpoint(_))));
+
+        // `raw` correctly signed for the ORIGINAL values, but a JSON sibling member is
+        // altered afterward — the JSON members govern (I-D §7.5 step 2).
+        let genuine_raw = format!("base64:{}", B64.encode(blob));
+        let mut altered = cp;
+        altered["tree_size"] = json!(43);
+        assert!(matches!(
+            reconcile_atl_checkpoint_raw(&altered, &genuine_raw),
+            Err(AhlError::AtlCheckpoint(_))
+        ));
+    }
+
+    #[test]
+    fn checkpoint_signing_bytes_for_rejects_unknown_profiles() {
+        let cp = checkpoint("sha256:00", 10, "sha256:11", "2026-08-16T12:00:00Z", &key());
+        assert!(matches!(
+            checkpoint_signing_bytes_for(&cp, "some-other-profile"),
+            Err(AhlError::Field(_))
+        ));
     }
 }

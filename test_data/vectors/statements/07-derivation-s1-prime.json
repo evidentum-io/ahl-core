@@ -1,30 +1,30 @@
 {
-  "entry_id": "sha256:15bc064cd965d8e6063452db355db156dcc76900c9128e53605db7f10a4920b5",
+  "entry_id": "sha256:81e856d0b3aa602dc6185368866fdb8da48b09903c0c26bebeb17acf3cef85c3",
   "entry_index": 7,
   "envelope": {
     "payload": {
-      "ahl_version": "0.3",
+      "ahl_version": "0.4",
       "inputs": [
         {
           "dataset": "customers",
-          "record": "hmac-sha256:a2d4ab5d728fa03cd366fac0f6b4d65c419c353f56521302926604f11d3471c1",
+          "record": "hmac-sha256:b3b4a463cabcc1fa963aa793097fb67ef3de110c1920539df7ba52ca68c597c7",
           "role": "feature",
-          "statement": "sha256:f706aea0d65088ad9d4b8b4c2b86e72dc03af7eca6dc9d309af5e532ce96ed74"
+          "statement": "sha256:efa1a26e88c08d46bf87d422e63a9dd6163ee76a63d1e2695aec615bb4767b64"
         },
         {
           "dataset": "customers",
-          "record": "hmac-sha256:04de2effaa7ad9f21761b7338449a4aba8c9edb59a90fd96236c31fdcd8ab46d",
+          "record": "hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad",
           "role": "reference",
-          "statement": "sha256:939f1c1358227b5c86ca12167927b06f5d867b19eeab99737dad78dc667ac882"
+          "statement": "sha256:50d643a9aa570237956c31a5b8fad1e7aed5cb86f98e8dea69bd57cea776245c"
         }
       ],
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:1b10dc0239d2b159786b9152e9e68558a4097e9d02fc07fe89b2cbbfc4329e72",
+      "manifest": "sha256:437053c55efe84c0b4c774140206689576bea846e08ec1381b3df0dfc12ba588",
       "outputs": [
         {
           "dataset": "scores",
           "locator": "urn:ahl-test:scores/S1-prime",
-          "record": "sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c"
+          "record": "sha256:e4fccbcb05345bc70f1327bb001a1bb09f85df01de4e35b3778089aed70f24c4"
         }
       ],
       "pipeline": "scoring-v1",
@@ -48,9 +48,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:y0KyamOE0LTTrCDeLV4V1z2KeiuSixDsmScOYlGagqtYBwXsSkWoSj/wd+gYbld6yXq5DYh0DHLaHmQoYb5FBA=="
+        "sig": "base64:pY4D8TtyrhcW3Z0ekFFBZrliPL/owBo2/7XvQLRvPff569QDW2eUZRt05hB7mKq9NjDtuswbC4Lp1IAxXzwfDA=="
       }
     ]
   },
-  "statement_id": "sha256:c046d7ab3d6c8dc58ae3792edc2104d2782996f4ba0fecffd156198f1a9d674f"
+  "statement_id": "sha256:3eb41212109891b464877d8041103362ac36e8ad87a459cdae19f7ec552816e6"
 }

@@ -1,71 +1,71 @@
 {
   "affected_count": 4,
-  "affected_root": "sha256:a19b569a95b55531bf4df657e6e03bc15258ce9b3f693e8692d5a4602dcf53f1",
+  "affected_root": "sha256:645aaed9fb3f1f4abce3558acaa8b233002d0801714affe6f88bda98e98058d5",
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:4fa10b1ec76b605eb4dc21c8af0dae3e213aecf51549fb9b34765083ad1d382d",
+    "root_hash": "sha256:9e0b2eccb79e75ee5c2560c280aafaf935e1bf547889f6e058decefed9c81870",
     "tree_size": 8
   },
   "description": "Revocation closure `toy-corpus` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",
-      "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
+      "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
     },
     {
       "dataset": "scores",
-      "record": "sha256:54805948541052fc8111ac220cbdd5bcb3892e9899ffb96697b76aa7b7d42798"
+      "record": "sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3"
     },
     {
       "dataset": "scores",
-      "record": "sha256:7f706bff69ab07703a27a6770f401c2b302e9bca264129e57d517a10a54f25d1"
+      "record": "sha256:a4d63cf8838a3ca209af1ae4bab6ba7f286b5c684c94b3890a7178996607ace6"
     },
     {
       "dataset": "scores",
-      "record": "sha256:df31b93a28e3de74b910bd72977edd310e9d4dfd2c8e66d38eab5c7303d6abfe"
+      "record": "sha256:d88442604d94989f8498f673e44a64198d1f19b64892539337cfc0b33be6717f"
     }
   ],
   "expected_dispositions": [
     {
-      "assessment": "sha256:81af6cfe105fb10380549c7290b09c7910c90cd3e860777ab7bbccc5b91be396",
-      "dataset": "scores",
-      "disposition": "assessed_unaffected",
-      "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
-    },
-    {
       "dataset": "scores",
       "disposition": "invalidated",
-      "record": "sha256:54805948541052fc8111ac220cbdd5bcb3892e9899ffb96697b76aa7b7d42798"
+      "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
     },
     {
       "dataset": "scores",
       "disposition": "recomputed",
-      "record": "sha256:7f706bff69ab07703a27a6770f401c2b302e9bca264129e57d517a10a54f25d1",
-      "successor_statement": "sha256:c046d7ab3d6c8dc58ae3792edc2104d2782996f4ba0fecffd156198f1a9d674f"
+      "record": "sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3",
+      "successor_statement": "sha256:3eb41212109891b464877d8041103362ac36e8ad87a459cdae19f7ec552816e6"
+    },
+    {
+      "assessment": "sha256:81af6cfe105fb10380549c7290b09c7910c90cd3e860777ab7bbccc5b91be396",
+      "dataset": "scores",
+      "disposition": "assessed_unaffected",
+      "record": "sha256:a4d63cf8838a3ca209af1ae4bab6ba7f286b5c684c94b3890a7178996607ace6"
     },
     {
       "dataset": "scores",
       "disposition": "invalidated",
-      "record": "sha256:df31b93a28e3de74b910bd72977edd310e9d4dfd2c8e66d38eab5c7303d6abfe"
+      "record": "sha256:d88442604d94989f8498f673e44a64198d1f19b64892539337cfc0b33be6717f"
     }
   ],
   "expected_seeds": [
     {
       "dataset": "customers",
-      "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510"
+      "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9"
     }
   ],
-  "note": "The derivation at entry 7 produces S1' (sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c) from the replacement A2 and is therefore NOT affected: closure traverses (dataset, record) edges only (core spec §2.3.2), and S1' never consumed the corrected record. It appears in the corpus solely as the `successor_statement` of the `recomputed` disposition of S1. This trigger is the first correction of A, so its seed set is just {A}: a correction never seeds its own replacement (§5.1).",
+  "note": "The derivation at entry 7 produces S1' (sha256:e4fccbcb05345bc70f1327bb001a1bb09f85df01de4e35b3778089aed70f24c4) from the replacement A2 and is therefore NOT affected: closure traverses (dataset, record) edges only (core spec §2.3.2), and S1' never consumed the corrected record. It appears in the corpus solely as the `successor_statement` of the `recomputed` disposition of S1. This trigger is the first correction of A, so its seed set is just {A}: a correction never seeds its own replacement (§5.1).",
   "trigger": {
     "dataset": "customers",
     "entry_index": 6,
-    "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
-    "replacement": "hmac-sha256:a2d4ab5d728fa03cd366fac0f6b4d65c419c353f56521302926604f11d3471c1",
+    "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
+    "replacement": "hmac-sha256:b3b4a463cabcc1fa963aa793097fb67ef3de110c1920539df7ba52ca68c597c7",
     "scope": {
       "effective_from": "2026-08-16T12:00:00Z",
       "retroactive": true
     },
-    "statement_id": "sha256:71eec49bbedb5b3cc4de4c71dd0ef7df970ecfd5372545056470b9bf78499849",
+    "statement_id": "sha256:3362c6938b6a1953791b1266b9d7b36907dc29f375a31fb33c9a6ae69af8ec79",
     "type": "correction"
   }
 }

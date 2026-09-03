@@ -1,61 +1,61 @@
 {
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:7d54f45bcb2cf8c8271ac697dc1931ce6a0851af3e9abf64f68573a497e29c6b",
+    "root_hash": "sha256:0e01ac1b2462968d079311e992b270729be925f9db3d36034589d5c1b3e93240",
     "tree_size": 13
   },
   "description": "Revocation closure `supersession-chain` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",
-      "record": "sha256:250be06f68500436146b6cd0da75987c8eb1902e1ee650d52d4e368c8dabcdf5"
+      "record": "sha256:1350e3dc89dd6823ed3ff1a9c169e7687d1cea3f63076f5b2e055c1097506df2"
     },
     {
       "dataset": "scores",
-      "record": "sha256:2fa4f863cc3d704bd6db36bcb152e8fbbc3773cc36f5594074cecd9c016916b0"
+      "record": "sha256:1c5588f695c2dd979f5227c5b81e5a833165b2f2c0c07a2ca6fb1d4643fdbc25"
     },
     {
       "dataset": "scores",
-      "record": "sha256:54805948541052fc8111ac220cbdd5bcb3892e9899ffb96697b76aa7b7d42798"
+      "record": "sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3"
     },
     {
       "dataset": "scores",
-      "record": "sha256:5929597d694c6d57301d1d81edac6047f0676abc36fc7560d6ce0b74e5bd777c"
+      "record": "sha256:a4d63cf8838a3ca209af1ae4bab6ba7f286b5c684c94b3890a7178996607ace6"
     },
     {
       "dataset": "scores",
-      "record": "sha256:7f706bff69ab07703a27a6770f401c2b302e9bca264129e57d517a10a54f25d1"
+      "record": "sha256:c6270655a635b5132fe72ea5c7903c3f990da09cdc51997e4fb59b804840d9da"
     },
     {
       "dataset": "scores",
-      "record": "sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c"
+      "record": "sha256:d88442604d94989f8498f673e44a64198d1f19b64892539337cfc0b33be6717f"
     },
     {
       "dataset": "scores",
-      "record": "sha256:df31b93a28e3de74b910bd72977edd310e9d4dfd2c8e66d38eab5c7303d6abfe"
+      "record": "sha256:e4fccbcb05345bc70f1327bb001a1bb09f85df01de4e35b3778089aed70f24c4"
     }
   ],
   "expected_seeds": [
     {
       "dataset": "customers",
-      "record": "hmac-sha256:a2d4ab5d728fa03cd366fac0f6b4d65c419c353f56521302926604f11d3471c1"
+      "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9"
     },
     {
       "dataset": "customers",
-      "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510"
+      "record": "hmac-sha256:b3b4a463cabcc1fa963aa793097fb67ef3de110c1920539df7ba52ca68c597c7"
     }
   ],
-  "note": "The correction at entry 12 supersedes the correction at entry 6, which had replaced A with A2. Core spec §5.1: the later correction's seeds are the original A *and every prior superseded replacement*, here A2 — but never its own replacement A3 (hmac-sha256:72f6f4c6c0a09ac7610d6ce218218c3e8623a8b2bb502f41821d99af2ab82670). Seeding A2 is what pulls in S1' (entry 7) and W (entry 10); seeding only A would silently leave both outside the affected set, and seeding A3 would be wrong in the other direction. W1 and W2 are reached only through *two* committed trees — the outputs tree of the batch at entry 10 and the input-set tree its leaves commit — so this closure is computable solely by a verifier holding the published leaf material (§3.5).",
+  "note": "The correction at entry 12 supersedes the correction at entry 6, which had replaced A with A2. Core spec §5.1: the later correction's seeds are the original A *and every prior superseded replacement*, here A2 — but never its own replacement A3 (hmac-sha256:0879bc168b342470d4a069d1f6df5b42214dc494b43d1d7494821dc23438faf6). Seeding A2 is what pulls in S1' (entry 7) and W (entry 10); seeding only A would silently leave both outside the affected set, and seeding A3 would be wrong in the other direction. W1 and W2 are reached only through *two* committed trees — the outputs tree of the batch at entry 10 and the input-set tree its leaves commit — so this closure is computable solely by a verifier holding the published leaf material (§3.5).",
   "trigger": {
     "dataset": "customers",
     "entry_index": 12,
-    "record": "hmac-sha256:d45b7c71b3822609907522286467cc2ddceb40a77176282b31e9c81296840510",
-    "replacement": "hmac-sha256:72f6f4c6c0a09ac7610d6ce218218c3e8623a8b2bb502f41821d99af2ab82670",
+    "record": "hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9",
+    "replacement": "hmac-sha256:0879bc168b342470d4a069d1f6df5b42214dc494b43d1d7494821dc23438faf6",
     "scope": {
       "effective_from": "2026-08-16T12:00:00Z",
       "retroactive": true
     },
-    "statement_id": "sha256:8e7efd40ec9acd565dd7273b7a2c8f9fd940839d566ab33d3ef103c7a76af0ee",
+    "statement_id": "sha256:6bc0f0883aa4bfbfd3f115406d4ea8cde6cc990941d3a8d1a0b4a9f12381c715",
     "type": "correction"
   }
 }

@@ -1,36 +1,36 @@
 {
   "corpus_checkpoint": {
     "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
-    "root_hash": "sha256:f88aef74818f289a092643ca19ff4981b5e43b574c877aa9576fe203e13b2624",
+    "root_hash": "sha256:280737a5760068de22d3ed0b52d3d0933b8e5618721db2e46f1445dace880fde",
     "tree_size": 20
   },
   "description": "Revocation closure `derived-record-authority-after-rotation` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",
-      "record": "sha256:2fa4f863cc3d704bd6db36bcb152e8fbbc3773cc36f5594074cecd9c016916b0"
+      "record": "sha256:1350e3dc89dd6823ed3ff1a9c169e7687d1cea3f63076f5b2e055c1097506df2"
     },
     {
       "dataset": "scores",
-      "record": "sha256:5929597d694c6d57301d1d81edac6047f0676abc36fc7560d6ce0b74e5bd777c"
+      "record": "sha256:c6270655a635b5132fe72ea5c7903c3f990da09cdc51997e4fb59b804840d9da"
     }
   ],
   "expected_seeds": [
     {
       "dataset": "scores",
-      "record": "sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c"
+      "record": "sha256:e4fccbcb05345bc70f1327bb001a1bb09f85df01de4e35b3778089aed70f24c4"
     }
   ],
-  "note": "S1' (sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c) is a DERIVED record, introduced by the derivation at entry 7. The `key` statement at entry 9 then added producer-2 to the producer key set, and the retraction at entry 19 is signed with that post-rotation key. Core spec §2.3.3 resolves a derived record's authority as \"the introducing producer's key set as of the trigger's entry index (not the introduction index: key rotation between introduction and trigger applies)\", so this trigger IS effective. Resolving the key set at the introduction index instead would have rejected it as a challenge. The batch at entry 10 consumed S1' through its input-set tree, so W1 and W2 are the affected set.",
+  "note": "S1' (sha256:e4fccbcb05345bc70f1327bb001a1bb09f85df01de4e35b3778089aed70f24c4) is a DERIVED record, introduced by the derivation at entry 7. The `key` statement at entry 9 then added producer-2 to the producer key set, and the retraction at entry 19 is signed with that post-rotation key. Core spec §2.3.3 resolves a derived record's authority as \"the introducing producer's key set as of the trigger's entry index (not the introduction index: key rotation between introduction and trigger applies)\", so this trigger IS effective. Resolving the key set at the introduction index instead would have rejected it as a challenge. The batch at entry 10 consumed S1' through its input-set tree, so W1 and W2 are the affected set.",
   "trigger": {
     "dataset": "scores",
     "entry_index": 19,
-    "record": "sha256:8465148cf16c5b91c0e6001f3e3a985ae456890500745f5893a60c0692bb1d7c",
+    "record": "sha256:e4fccbcb05345bc70f1327bb001a1bb09f85df01de4e35b3778089aed70f24c4",
     "scope": {
       "effective_from": "2026-08-16T12:00:00Z",
       "retroactive": true
     },
-    "statement_id": "sha256:23da3cf3ac1a1972a15224ec171c85727afd99bc9f7f05e54743001e1243de7a",
+    "statement_id": "sha256:8582c49307b24db6844992029a7aa1d5b74ce0af21c2c4883efb2b44001121ce",
     "type": "retraction"
   }
 }
