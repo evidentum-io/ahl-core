@@ -66,6 +66,16 @@ is decided by the PHASE of the §7.5 algorithm that raised it, not by the error 
 reached for: a malformed member is `structure` in the container, `governance` in a governance
 statement's phase-2 validation, and `claim-material` in claim material.
 
+A finding also says whether it is a CAUSE or a DERIVATION. `rests_on` is `None` where the
+finding is what its own check produced — the rule that fired, the budget that ran out, the
+capability that was missing — and names the prerequisite assertion where the finding merely
+inherited that gap. `Report::dominating()` is the finding to lead with: the first `invalid` in
+report order, otherwise the first `unverifiable` whose `rests_on` is `None`. Without that
+distinction a reader taking the first `unverifiable` finding would be told "`versions` rests on
+`resource-limits`" where what it needs — §7.8's "WHICH budget was exhausted and the value that
+was in force" — is on the `resource-limits` finding. `verify_receipt`'s single-value form
+returns the rejection behind that same finding, so the two APIs name one thing.
+
 The result is the reduction: `invalid` if any required finding is `invalid`, otherwise
 `unverifiable` if any is `unverifiable`, otherwise `verified`. An `invalid` finding ends the run
 — the result is decided, and the assertions after it are not reported at all — while an
