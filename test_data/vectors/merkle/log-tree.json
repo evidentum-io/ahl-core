@@ -202,6 +202,18 @@
       "entry_index": 32,
       "leaf_hash": "sha256:b27f4cd96d4eac33c60b5b4ee76e9280d660ce2a1f50ee52c6faf9d365b190e2",
       "name": "32-ingestion-customers-e-stale-manifest"
+    },
+    {
+      "entry_id": "sha256:9c071648598fc5d3012e0d269d10b061b370daffe56988e2ec8df09e568101e9",
+      "entry_index": 33,
+      "leaf_hash": "sha256:59292495c9e72a472f04f75fd51ab16d4922364708da98d512f46b45fb5598f8",
+      "name": "33-correction-a-to-cross-dataset-replacement"
+    },
+    {
+      "entry_id": "sha256:2ccf1efbdd9fc9147d677a1f199756e88ee7d7f547ccb99e65f912f2557dc301",
+      "entry_index": 34,
+      "leaf_hash": "sha256:621f0882388a8721e4316bc0ec8b18e81d2521f759716da7474ed92e49226745",
+      "name": "34-retraction-cross-dataset-record"
     }
   ],
   "inclusion": {
@@ -274,6 +286,11 @@
       "name": "cp33",
       "root": "sha256:48167d95ab6c3515479866c60853a73c3db226842587db044ca7d07216ee1a0d",
       "tree_size": 33
+    },
+    {
+      "name": "cp35",
+      "root": "sha256:2a4612deace994b41b571d5637c1bcf060aee06d5d8c950960f3257406e3c382",
+      "tree_size": 35
     }
   ]
 }

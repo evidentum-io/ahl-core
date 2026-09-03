@@ -110,6 +110,20 @@
       "rule": "spec §2.3.3 / receipt §2.3 — replacement introduction index <= trigger index"
     },
     {
+      "claim_type": "trigger-declared",
+      "expect": "reject",
+      "file": "trigger-declared-cross-dataset-introduction-must-fail.ahl",
+      "reason": "embedded introduction receipt is about `customers/hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9`, the referencing material names `scores/hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9`",
+      "rule": "I-D §2.4.2 / §7.6 — the embedded introduction must match the trigger on BOTH dataset and record"
+    },
+    {
+      "claim_type": "trigger-declared",
+      "expect": "reject",
+      "file": "trigger-declared-cross-dataset-replacement-must-fail.ahl",
+      "reason": "embedded replacement introduction receipt is about `scores/sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3`, the referencing material names `customers/sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3`",
+      "rule": "I-D §2.4.3 / §7.6 — the replacement introduction must match the correction's dataset as well as its replacement commitment"
+    },
+    {
       "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-effective",
       "embedded_receipts": 2,

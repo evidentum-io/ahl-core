@@ -346,6 +346,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp30 = corpus.anchor("cp30");
     let cp32 = corpus.anchor("cp32");
     let cp33 = corpus.anchor("cp33");
+    let cp35 = corpus.anchor("cp35");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -728,6 +729,112 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                         inner: 11,
                         outer: 6,
                     }
+                )
+            },
+        },
+    });
+
+    // --- record identity is the (dataset, record) pair (I-D §2.4.2, §7.6) --------
+    // The commitment string alone is not an identity. Both vectors below carry an embedded
+    // introduction whose COMMITMENT matches the trigger exactly and whose DATASET does not, so
+    // a verifier comparing the commitment alone accepts them and one comparing the pair does
+    // not. Neither is a mutated fixture: the two subject statements are genuinely signed and
+    // genuinely anchored, at entries 33 and 34, because a producer naming a commitment beside
+    // the wrong dataset is exactly what nothing else in the format prevents.
+    out.push(Vector {
+        file: "trigger-declared-cross-dataset-introduction-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "trigger-declared",
+            subject_index: 34,
+            anchor: cp35,
+            chain: vec![0, 25],
+            record_subject: scores(&r.c_a),
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({
+                "introduction": introduction(1, &r.c_a, cp35),
+            }),
+            producer_keys: None,
+            note: "MUST FAIL. The retraction at entry 34 names the `scores` dataset with record \
+                   A's `customers` commitment, so its `record_subject` is `scores`/A. The \
+                   embedded introduction is the genuine ingestion at entry 1, which introduces \
+                   `customers`/A: same commitment string, different dataset. Every other check \
+                   passes — the introduction receipt verifies in full, it is anchored at a \
+                   smaller entry index than the trigger, and the trigger's own envelope and \
+                   inclusion are real. I-D §2.4.2 makes identity the `(dataset, record)` pair \
+                   and §7.6 requires each embedded receipt's `record_subject` to match the \
+                   referencing material, so this introduction establishes who may retract a \
+                   DIFFERENT record and grounds nothing about this one."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §2.4.2 / §7.6 — the embedded introduction must match the trigger on \
+                   BOTH dataset and record",
+            matches: |e| {
+                matches!(e, ReceiptError::EmbeddedSubjectMismatch { what: "introduction", .. })
+            },
+        },
+    });
+
+    out.push(Vector {
+        file: "trigger-declared-cross-dataset-replacement-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "trigger-declared",
+            subject_index: 33,
+            anchor: cp35,
+            chain: vec![0, 25],
+            record_subject: customers(&r.c_a),
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({
+                "introduction": introduction(1, &r.c_a, cp35),
+                // S1 is introduced by the unbatched derivation at entry 3, in `scores`.
+                "replacement_introduction": Spec {
+                    claim_type: "record-derived",
+                    subject_index: 3,
+                    anchor: cp35,
+                    chain: vec![0, 25],
+                    record_subject: scores(&r.s1),
+                    competing: "not-checked",
+                    content_binding: "none",
+                    currency_mode: "declared",
+                    currency_material: json!({}),
+                    claim_material: json!({
+                        "output": { "dataset": DS_SCORES, "record": r.s1 },
+                    }),
+                    producer_keys: None,
+                    note: "Embedded introduction proof for S1, a `scores` record produced by \
+                           the derivation at entry 3."
+                        .to_owned(),
+                }
+                .build(corpus, keys),
+            }),
+            producer_keys: None,
+            note: "MUST FAIL. The correction at entry 33 corrects `customers`/A to S1. A \
+                   correction carries ONE `dataset` (I-D §2.4.3), covering both members, so it \
+                   is claiming `customers`/S1 as the replacement. The embedded \
+                   `replacement_introduction` proves `scores`/S1 — the same commitment string \
+                   under the dataset that actually produced it. The trigger's own introduction \
+                   proof matches on both members and passes, which is what isolates the \
+                   replacement rule: only the second reference disagrees, and only on the \
+                   dataset. Under I-D §7.6's \"correction to replacement introduction\" this \
+                   is invalid, because the record the correction promotes and the record the \
+                   embedded receipt introduces are not the same record."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §2.4.3 / §7.6 — the replacement introduction must match the \
+                   correction's dataset as well as its replacement commitment",
+            matches: |e| {
+                matches!(
+                    e,
+                    ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. }
                 )
             },
         },

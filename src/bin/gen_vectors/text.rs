@@ -122,9 +122,9 @@ two different bindings, which is the case receipt key binding is tolerant for.
 | Path | Contents |
 | --- | --- |
 | `adaptor/` | The test adaptor profile document, content-addressed and pinned in both manifest versions |
-| `vectors/statements/` | The 32-entry toy corpus, plus malformed statements naming the rule each violates |
+| `vectors/statements/` | The 35-entry toy corpus, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
-| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32 and 33, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
+| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 33 and 35, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
 | `vectors/closure/` | Six closure scenarios (see below) |
 | `vectors/witness/` | Signed witness refusal evidence carrying two conflicting checkpoints (spec §3.3 step 3) |
 | `receipts/` | One positive and at least one negative receipt per claim-type registry entry, plus `index.json` naming the expected outcome, the rule each negative must trip, and the trust policy those outcomes assume |
@@ -132,7 +132,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 ## The scenarios
 
-The corpus is 33 anchored entries carrying these interlocking scenarios:
+The corpus is 35 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -173,7 +173,17 @@ The corpus is 33 anchored entries carrying these interlocking scenarios:
    defective envelopes ARE competing candidates for the subject record, and
    `governance-state-non-verifying-entry-must-fail.ahl`, where no claim-specific rule looks at
    them at all. Both are refused, which is what "every carried envelope" means.
-7. **Continued history.** A consistency proof from cp20 to cp24 backs
+7. **Record identity is a pair.** Entries 33 and 34 name a commitment beside the wrong
+   dataset: entry 33 corrects `customers`/A to S1, a record that exists only in `scores`, and
+   entry 34 retracts `scores`/A using record A's `customers` commitment. Neither is a mutated
+   fixture — both are genuinely signed and genuinely anchored — because §2.6's domain
+   separation makes such a pair impossible to reach through CONTENT while leaving a producer
+   free to NAME one, and a verifier recomputes a commitment only where content evidence is
+   carried. `trigger-declared-cross-dataset-introduction-must-fail.ahl` and
+   `trigger-declared-cross-dataset-replacement-must-fail.ahl` embed introduction proofs whose
+   commitment matches exactly and whose dataset does not; both must be refused (I-D §2.4.2,
+   §2.4.3, §7.6).
+8. **Continued history.** A consistency proof from cp20 to cp24 backs
    `assurance.continued_history` on a receipt, and a proof generated for a different pair of
    sizes — genuine, correctly built, about the wrong fact — is rejected. `anchoring.checkpoint`
    and `anchoring.later_checkpoint` each carry their OWN witness cosignatures — the primary
@@ -195,7 +205,7 @@ own checkpoint, deliberately cosigned by witness-1 even though it postdates entr
 the "operator kept signing under the outgoing key until cutover" case I-D §7.1 describes as an
 ordinary artifact of a real log rather than something a producer must manufacture.
 
-8. **Stale manifest binding.** Entry 32 is a genuine, fully anchored, genuinely signed ingestion
+9. **Stale manifest binding.** Entry 32 is a genuine, fully anchored, genuinely signed ingestion
    whose payload nonetheless names manifest v1 (genesis) as governing it, even though v2 (entry
    25) is the manifest ACTIVE at entry 32 (I-D §2.2). `record-ingested-stale-manifest-must-fail.ahl`
    proves this is `invalid` however genuine the rest of the statement is — real signature, real

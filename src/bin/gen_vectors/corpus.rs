@@ -23,7 +23,7 @@ use crate::scenario::{
 };
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 33] = [
+pub const NAMES: [&str; 35] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -57,6 +57,8 @@ pub const NAMES: [&str; 33] = [
     "30-invalid-signature-trigger-f",
     "31-unverified-authority-signature-trigger-f",
     "32-ingestion-customers-e-stale-manifest",
+    "33-correction-a-to-cross-dataset-replacement",
+    "34-retraction-cross-dataset-record",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -149,7 +151,7 @@ pub struct Records {
 }
 
 pub struct Corpus {
-    /// The twenty-eight anchored envelopes, in entry-index order.
+    /// The anchored envelopes, in entry-index order.
     pub envelopes: Vec<Value>,
     /// Committed tree material keyed by root (spec §3.5).
     pub trees: TreeMaterial,
@@ -746,10 +748,58 @@ impl Corpus {
             &keys.producer_1,
         );
 
+        // --- entries 33, 34: cross-dataset record-identity fixtures -----------------
+        // I-D §2.4.2 and §7.6 make record identity the PAIR `(dataset, record)`: "Closure
+        // traversal uses the `(dataset, record)` pair only", and every embedded receipt's
+        // `record_subject` must match the referencing material. A commitment string alone is
+        // not an identity, and these two entries are what makes the difference observable.
+        //
+        // Both deliberately reuse `c_a` — a commitment computed for the `customers` dataset —
+        // as a `scores`-side reference. That reuse cannot arise from content: §2.6 puts `dsid`
+        // in the preimage verbatim, so the same bytes in two datasets commit to different
+        // strings. It arises from a PRODUCER naming the wrong pair, which nothing stops, since
+        // a verifier recomputes a commitment only where content evidence is carried. A
+        // verifier comparing the commitment alone accepts both of these; one comparing the
+        // pair rejects both.
+        //
+        // Entry 33 is a correction whose REPLACEMENT is the collision: `dataset` is
+        // `customers` for both members (§2.4.3 carries one dataset per correction), so it
+        // claims the replacement is `customers`/S1 while S1 exists only as a `scores` record
+        // produced by the derivation at entry 3.
+        let env_33 = signed(
+            "correction",
+            &m2,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": r.c_a,
+                "replacement": r.s1,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "other",
+            }),
+            &keys.producer_1,
+        );
+
+        // Entry 34 is a retraction whose own subject is the collision: it names the `scores`
+        // dataset with record A's `customers` commitment, so a receipt for it can only be
+        // supported by an introduction of `scores`/A — which the corpus does not contain, and
+        // which the `customers` ingestion at entry 1 is not.
+        let env_34 = signed(
+            "retraction",
+            &m2,
+            json!({
+                "dataset": DS_SCORES,
+                "record": r.c_a,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "other",
+            }),
+            &keys.producer_1,
+        );
+
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
-            env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32,
+            env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32, env_33,
+            env_34,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -781,6 +831,7 @@ impl Corpus {
             (30, 25),
             (32, 25),
             (33, 25),
+            (35, 25),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
@@ -800,7 +851,8 @@ impl Corpus {
                     29 => "cp29",
                     30 => "cp30",
                     32 => "cp32",
-                    _ => "cp33",
+                    33 => "cp33",
+                    _ => "cp35",
                 },
                 checkpoint: cp,
                 witness_id,

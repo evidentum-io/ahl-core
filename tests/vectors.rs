@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 /// entry from a non-authority key alongside a non-verifying authority-named one. The two
 /// non-verifying fixtures sit at the tail so that enumerated material below them stays
 /// verifiable (I-D §7.5.1 4d).
-const STATEMENT_FILES: [&str; 33] = [
+const STATEMENT_FILES: [&str; 35] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -71,6 +71,8 @@ const STATEMENT_FILES: [&str; 33] = [
     "30-invalid-signature-trigger-f.json",
     "31-unverified-authority-signature-trigger-f.json",
     "32-ingestion-customers-e-stale-manifest.json",
+    "33-correction-a-to-cross-dataset-replacement.json",
+    "34-retraction-cross-dataset-record.json",
 ];
 
 /// The four published closure scenarios.
@@ -347,6 +349,43 @@ fn no_two_anchored_envelopes_share_a_statement_id() {
     let ids: BTreeSet<&str> =
         f_triggers.iter().map(|v| field_str(v, "statement_id").expect("statement_id")).collect();
     assert_eq!(ids.len(), 3, "and each is nevertheless its own statement");
+}
+
+/// The cross-dataset fixtures must really collide on the commitment string, or the vectors
+/// built on them prove nothing about record identity.
+///
+/// I-D §2.4.2 makes identity the `(dataset, record)` pair, and §2.6 puts `dsid` in the
+/// commitment preimage — so the same bytes in two datasets commit differently, and a pair like
+/// this is unreachable through content. It is reachable by a producer NAMING one, which is
+/// what entries 33 and 34 do: each references a commitment computed for `customers` beside a
+/// `scores`-side claim. If a future corpus change made these entries name distinct
+/// commitments, both negatives would still fail — on the commitment rather than the dataset —
+/// and would silently stop testing the rule they exist for.
+#[test]
+fn the_cross_dataset_fixtures_reuse_one_commitment_under_two_datasets() {
+    let vectors = statement_vectors();
+    let ingestion = &vectors[1]["envelope"]["payload"];
+    let correction = &vectors[33]["envelope"]["payload"];
+    let retraction = &vectors[34]["envelope"]["payload"];
+    let derivation_output = &vectors[3]["envelope"]["payload"]["outputs"][0];
+
+    // Entry 34 retracts `scores`/A using record A's own `customers` commitment.
+    assert_eq!(field_str(retraction, "dataset").expect("dataset"), "scores");
+    assert_eq!(
+        field_str(retraction, "record").expect("record"),
+        field_str(ingestion, "record").expect("record"),
+        "the retraction must reuse the commitment the customers ingestion introduced"
+    );
+    assert_eq!(field_str(ingestion, "dataset").expect("dataset"), "customers");
+
+    // Entry 33 corrects `customers`/A to S1, which exists only as a `scores` output.
+    assert_eq!(field_str(correction, "dataset").expect("dataset"), "customers");
+    assert_eq!(
+        field_str(correction, "replacement").expect("replacement"),
+        field_str(derivation_output, "record").expect("record"),
+        "the correction's replacement must be the commitment the scores derivation produced"
+    );
+    assert_eq!(field_str(derivation_output, "dataset").expect("dataset"), "scores");
 }
 
 #[test]
@@ -1278,6 +1317,19 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl" => {
             matches!(error, ReceiptError::FormatConflict { .. })
         }
+        // I-D §2.4.2 / §7.6: record identity is the `(dataset, record)` pair. Both vectors
+        // carry an embedded introduction whose COMMITMENT matches the referencing material
+        // exactly and whose DATASET does not, so a verifier comparing the commitment alone
+        // accepts them; the slot named in the error is what says which of the two references
+        // — the trigger's own introduction, or a correction's replacement introduction — the
+        // vector isolates.
+        "trigger-declared-cross-dataset-introduction-must-fail.ahl" => {
+            matches!(error, ReceiptError::EmbeddedSubjectMismatch { what: "introduction", .. })
+        }
+        "trigger-declared-cross-dataset-replacement-must-fail.ahl" => matches!(
+            error,
+            ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. }
+        ),
         // I-D §7.5.1 4d: every enumerated envelope is verified under K at its own entry index.
         // The two vectors reach the same rule from opposite ends — one where the defective
         // envelope IS a competing candidate for the subject record (§7.2: "Every competing

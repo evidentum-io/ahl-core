@@ -4459,6 +4459,14 @@ fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -
     Ok(())
 }
 
+/// Render a `(dataset, record)` pair for an error message.
+///
+/// Record identity is the PAIR (I-D §2.4.2, §7.6), so a message naming the commitment alone
+/// would print two identical strings for exactly the mismatch this reports.
+fn describe_record(pair: Option<&(String, String)>) -> String {
+    pair.map_or_else(String::new, |(dataset, record)| format!("{dataset}/{record}"))
+}
+
 /// An embedded receipt, verified recursively under the shared §3.1 budget.
 struct Embedded {
     verdict: Verdict,
@@ -4518,7 +4526,15 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
             ctx.claim_type
         )));
     }
-    let (_, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
+    // I-D §2.4.2: "Closure traversal uses the `(dataset, record)` pair only." Record identity
+    // is that PAIR, so every reference below is matched on both members. A commitment string
+    // alone is not an identity: §2.6 puts `dsid` in the commitment preimage, which makes the
+    // same bytes in two datasets commit differently, but it does not stop a producer NAMING a
+    // commitment beside the wrong dataset — and a verifier recomputes the commitment only
+    // where content evidence is carried. Comparing the commitment alone would accept an
+    // introduction of a different dataset's record as the introduction of this one.
+    let subject_record = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
+    let (dataset, _) = subject_record;
 
     // The introduction proof establishes who may retract (§3 authority note).
     let introduction =
@@ -4532,16 +4548,22 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
             outer: ctx.subject_index,
         });
     }
-    if introduction.record.as_ref().map(|(_, r)| r.as_str()) != Some(record.as_str()) {
+    // I-D §7.6: "Every embedded receipt's `record_subject`... match the referencing material —
+    // trigger to introduction record".
+    if introduction.record.as_ref() != Some(subject_record) {
         return Err(ReceiptError::EmbeddedSubjectMismatch {
             what: "introduction",
-            got: introduction.record.map_or_else(String::new, |(_, r)| r),
-            want: record.clone(),
+            got: describe_record(introduction.record.as_ref()),
+            want: describe_record(Some(subject_record)),
         });
     }
 
     if subject_type == "correction" {
-        let replacement = text(ctx.payload, "replacement")?.to_owned();
+        // I-D §2.4.3: a correction carries ONE `dataset`, governing both `record` and
+        // `replacement`, so the replacement's identity is that same dataset paired with the
+        // new commitment — never the commitment on its own (I-D §7.6: "correction to
+        // replacement introduction").
+        let replacement = (dataset.clone(), text(ctx.payload, "replacement")?.to_owned());
         let embedded = verify_embedded(
             ctx,
             "replacement_introduction",
@@ -4558,11 +4580,11 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
                 outer: ctx.subject_index,
             });
         }
-        if embedded.record.as_ref().map(|(_, r)| r.as_str()) != Some(replacement.as_str()) {
+        if embedded.record.as_ref() != Some(&replacement) {
             return Err(ReceiptError::EmbeddedSubjectMismatch {
                 what: "replacement introduction",
-                got: embedded.record.map_or_else(String::new, |(_, r)| r),
-                want: replacement,
+                got: describe_record(embedded.record.as_ref()),
+                want: describe_record(Some(&replacement)),
             });
         }
     }
