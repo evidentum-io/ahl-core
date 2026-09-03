@@ -34,7 +34,7 @@ use crate::scenario::{
 pub const CONFORMING_TREE_PREFIX: usize = 37;
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 45] = [
+pub const NAMES: [&str; 46] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -78,8 +78,9 @@ pub const NAMES: [&str; 45] = [
     "40-key-retire-producer-2-again",
     "41-key-add-producer-2-verifying-copy",
     "42-ingestion-customers-g-under-producer-2",
-    "43-manifest-foreign-revision",
-    "44-key-add-foreign-revision",
+    "43-ingestion-foreign-revision",
+    "44-manifest-foreign-revision",
+    "45-key-add-foreign-revision",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -1021,17 +1022,27 @@ impl Corpus {
         let env_42 =
             signed("ingestion", &m2, ingest(&r.h, "2026-08-18/customers-07"), &keys.producer_2);
 
-        // --- entry 43: a VERIFYING `manifest` of a revision this document does not define ---
-        // The manifest analogue of entry 44 below, and it takes a different path through the
+        // --- entry 43: a VERIFYING NON-GOVERNANCE statement of a revision this document does
+        // not define. §7.1: a carried statement's unsupported `ahl_version` "is `unverifiable` as
+        // for any carried statement" — a finding, never the end of the run, and never a defect,
+        // since a verifier of that revision could read it. Anchored BELOW the two governance
+        // statements that follow, so a range can reach it without reaching them.
+        let mut foreign_ingestion_payload =
+            payload("ingestion", &m2, json!(T0), ingest(&r.z, "2026-08-19/customers-08"));
+        foreign_ingestion_payload["ahl_version"] = json!("0.5");
+        let env_43 = envelope(foreign_ingestion_payload, &keys.producer_1);
+
+        // --- entry 44: a VERIFYING `manifest` of a revision this document does not define ---
+        // The manifest analogue of entry 45 below, and it takes a different path through the
         // verifier: a manifest is not selected for the induction by `enumerated_key_statements`,
         // so what meets it is I-D §7.5.1 4c's completeness check — which must read its revision
         // before calling its absence from `governance.chain[]` an omission.
         let mut foreign_manifest_payload =
-            manifest(keys, &log_id, adaptor_hash, 43, Some(&entry_id(&env_25)));
+            manifest(keys, &log_id, adaptor_hash, 44, Some(&entry_id(&env_25)));
         foreign_manifest_payload["ahl_version"] = json!("0.5");
-        let env_43 = envelope(foreign_manifest_payload, &keys.producer_1);
+        let env_44 = envelope(foreign_manifest_payload, &keys.producer_1);
 
-        // --- entry 44: a VERIFYING `key` statement of a revision this document does not define
+        // --- entry 45: a VERIFYING `key` statement of a revision this document does not define
         // The other half of 4b's rule: "A VERIFYING purported governance entry that declares an
         // `ahl_version` this revision does not define is neither: it is not inducted, K is
         // unestablished at and after its index, the governance finding is `unverifiable`."
@@ -1050,13 +1061,14 @@ impl Corpus {
             }),
         );
         foreign_key_payload["ahl_version"] = json!("0.5");
-        let env_44 = envelope(foreign_key_payload, &keys.producer_1);
+        let env_45 = envelope(foreign_key_payload, &keys.producer_1);
 
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
             env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32, env_33,
             env_34, env_35, env_36, env_37, env_38, env_39, env_40, env_41, env_42, env_43, env_44,
+            env_45,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -1106,10 +1118,14 @@ impl Corpus {
             // cp43 reaches the re-add at entry 41 and the subject at 42, and stops short of the
             // two foreign-revision statements.
             (43, 25),
-            // cp44 reaches the foreign-revision MANIFEST at entry 43.
+            // cp44 reaches the foreign-revision INGESTION at entry 43 — a carried statement of
+            // a revision this document does not define, and not a governance statement — and
+            // stops short of the two governance statements that follow it.
             (44, 25),
-            // cp45 reaches the foreign-revision `key` statement at entry 44 as well.
+            // cp45 reaches the foreign-revision MANIFEST at entry 44.
             (45, 25),
+            // cp46 reaches the foreign-revision `key` statement at entry 45 as well.
+            (46, 25),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
@@ -1136,7 +1152,8 @@ impl Corpus {
                     40 => "cp40",
                     43 => "cp43",
                     44 => "cp44",
-                    _ => "cp45",
+                    45 => "cp45",
+                    _ => "cp46",
                 },
                 checkpoint: cp,
                 witness_id,

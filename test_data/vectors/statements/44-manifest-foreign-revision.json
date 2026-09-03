@@ -1,6 +1,6 @@
 {
-  "entry_id": "sha256:905cb0a137ec1dc279230872dd18d55d366f4a74f83c250e5c0cc57117e29853",
-  "entry_index": 43,
+  "entry_id": "sha256:ccbc994a935ba9dbc3c7c4a26691369637b7bcf52a3b273c4820f4227d5c4601",
+  "entry_index": 44,
   "envelope": {
     "payload": {
       "ahl_version": "0.5",
@@ -74,7 +74,7 @@
             {
               "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
               "pubkey": "base64:iodf/x6zhFFXes1a/uQFRWVo3XyJ4JCGOgVXvHr0nxc=",
-              "valid_from_index": 43
+              "valid_from_index": 44
             }
           ],
           "witness_id": "witness-2"
@@ -84,9 +84,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:Gc2hrHK2Mmzm4si1aSLgHzDTO6ksFVtxS8y/vzyhKQxPxAeJCB29EPDvjLo12lf56PYyI95fIyWGR974yIS9Cw=="
+        "sig": "base64:kc5uRdXYofKhHX44zrk0PkLa8CeqvAN1UO7dQyusc3FNuIAEFBBvPtK//+BXgW4lhQ4y9Ydt6m6gKejJdZAIDw=="
       }
     ]
   },
-  "statement_id": "sha256:156a45850600dfa2e8148ddd885609084b84344686b9715e433a424e56721df7"
+  "statement_id": "sha256:251e04a1582c2ada50ec392b17c71e1cd84434af4e778d9ba38cdfcf042952f8"
 }

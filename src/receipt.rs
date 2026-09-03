@@ -1764,6 +1764,13 @@ struct Run {
     /// The void entries inspected so far (I-D §7.5.1 4d), reported alongside the findings and
     /// entering neither the reduction nor any assertion.
     informative: Vec<InformativeItem>,
+    /// The entry indexes of carried entries SET ASIDE for want of a revision this document
+    /// defines (§7.1, §7.5.1 4b).
+    ///
+    /// Reported as a finding rather than an informative item — a void entry is a fact about the
+    /// artifact, while this one is a fact about the verifier — and treated like a void entry
+    /// everywhere else: not a competing candidate, never traversed by the closure.
+    set_aside: BTreeSet<u64>,
     /// The entry indexes those items are about.
     ///
     /// A void entry is "excluded before any authority comparison... never effective and never
@@ -1854,6 +1861,7 @@ impl Run {
             scope: None,
             blocked: Vec::new(),
             informative: Vec::new(),
+            set_aside: BTreeSet::new(),
             void_indexes: BTreeSet::new(),
             deferred: Vec::new(),
         }
@@ -1972,9 +1980,16 @@ impl Run {
         }
     }
 
-    /// Whether an entry at this index was found void earlier in the run.
+    /// Record that an entry is set aside for want of a revision this document defines.
+    fn set_aside(&mut self, entry_index: u64) {
+        self.set_aside.insert(entry_index);
+    }
+
+    /// Whether an entry at this index is one no later step may read: found void (I-D §2.1,
+    /// §7.5.1 4d) or set aside for its revision (§7.1). Neither is a candidate, and neither is
+    /// traversed.
     fn is_void(&self, entry_index: u64) -> bool {
-        self.void_indexes.contains(&entry_index)
+        self.void_indexes.contains(&entry_index) || self.set_aside.contains(&entry_index)
     }
 
     /// Record a rejection the run is REQUIRED to carry on past, and carry on.
@@ -4016,7 +4031,18 @@ fn read_chain<'a>(
         walked_indexes.insert(index);
 
         let payload = payload_of(envelope)?;
-        check_ahl_version(payload)?;
+        // §7.5 step 1 puts the version read before this statement is validated, and §7.1 says
+        // what an unsupported one means: it "is `unverifiable` as for any carried statement".
+        // For a governance statement 4b says what follows — "not inducted, K is unestablished at
+        // and after its index, the governance finding is `unverifiable`... and the scalar result
+        // is reduced under Section 7.7 — a later required `invalid` still dominates" — so the
+        // walk stops with the prefix state it has established and the run carries on. Ending it
+        // would make that last clause unreachable.
+        if let Err(error @ ReceiptError::UnsupportedVersion { .. }) = check_ahl_version(payload) {
+            run.record_gap(error);
+            unestablished_from = Some(index);
+            break;
+        }
 
         verify_governance_phase_1(envelope, &manifests, &events, index, mode, run)?;
 
@@ -4479,9 +4505,13 @@ fn check_key_independent_paths(
         }
         previous = Some(index);
         let hop_envelope = obj(hop, "envelope")?;
-        // I-D §7.5 step 1: each carried statement's `ahl_version` is checked BEFORE that
-        // statement is validated — recomputing a hash over its bytes included.
-        check_ahl_version(payload_of(hop_envelope)?)?;
+        // The version read of a chain hop is NOT here. §7.5 step 1 puts it before that
+        // statement is validated, and the walk of §7.5.1 4b is where a hop is validated — which
+        // is also the only place that can act on the answer: an unsupported revision leaves K
+        // unestablished from that hop's index (4b), and there is no key state to leave
+        // unestablished in a key-independent pass. Step 3 recomputes this hop's path either
+        // way, since a hash needs no revision.
+        payload_of(hop_envelope)?;
         // A hop the checkpoint does not commit cannot be proven against its root, and an
         // unprovable governance statement is a refusal rather than a pass. This is the wall a
         // receipt hits when a manifest version was anchored after its own anchoring checkpoint
@@ -5490,7 +5520,22 @@ fn verify_enumerated_envelopes(
             // `unverifiable` merely by declaring a version".
             continue;
         }
-        check_ahl_version(payload_of(envelope)?)?;
+        // §7.1: a carried statement declaring an unsupported `ahl_version` "is `unverifiable` as
+        // for any carried statement" — a finding, and not the end of the run, which §7.5 step 1
+        // reserves for the receipt's own `ahl_receipt_version`. This entry is one the enumeration
+        // alone carries and the receipt does not rest on: nothing of it is validated under rules
+        // this document does not have, and it is SET ASIDE — neither a competing candidate nor a
+        // statement the closure traverses, on the same footing as a void entry. It is reported as
+        // a FINDING rather than an informative item, because unlike a void entry it is not a
+        // fact about the artifact: this verifier cannot read it, and a verifier of that revision
+        // could.
+        if let Err(error @ ReceiptError::UnsupportedVersion { .. }) =
+            check_ahl_version(payload_of(envelope)?)
+        {
+            run.record_gap(error);
+            run.set_aside(index);
+            continue;
+        }
         // Phase 2 for a non-induction enumerated envelope, and strictly after 4d's signature:
         // I-D §7.5.1 4b states the three-phase order "for both types" of governance statement,
         // and the reason it gives is general — "Type-specific validation MUST NOT run on

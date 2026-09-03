@@ -421,6 +421,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp43 = corpus.anchor("cp43");
     let cp44 = corpus.anchor("cp44");
     let cp45 = corpus.anchor("cp45");
+    let cp46 = corpus.anchor("cp46");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -2279,10 +2280,10 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Accept,
     });
 
-    // The manifest analogue of the foreign-revision `key` statement: a different path through
-    // the verifier — completeness (4c) rather than the induction (4b) — and the same outcome.
+    // A carried statement of a revision this document does not define that is NOT a governance
+    // statement: it takes no rule of this document at all, and it stops nothing.
     out.push(Vector {
-        file: "governance-state-foreign-revision-manifest-must-fail.ahl",
+        file: "governance-state-foreign-revision-entry-must-fail.ahl",
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
@@ -2295,7 +2296,86 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             currency_material: corpus.enumeration(0, 44, cp44),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
-            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 43: a manifest \
+            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 43: an \
+                   INGESTION, genuinely signed by `producer-1`, declaring `ahl_version: \
+                   \"0.5\"`. I-D §7.1 settles what that is worth: a carried statement's \
+                   unsupported `ahl_version` \"is `unverifiable` as for any carried statement\", \
+                   and §7.5 step 1 reserves \"no further processing\" for the RECEIPT's own \
+                   `ahl_receipt_version`. So the entry is set aside rather than validated under \
+                   rules this document does not have — not a competing candidate, never \
+                   traversed by a closure, on the same footing as a void entry — and it is \
+                   reported as a FINDING rather than an informative item, because unlike a void \
+                   entry it is not a fact about the artifact: a verifier of that revision could \
+                   read it. It is not a governance statement, so it leaves K alone: the walk \
+                   completes and the range's own governance claim is untouched. What makes the \
+                   result `unverifiable` is the finding itself, and a later `invalid` would \
+                   still dominate it (§7.7)."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — a carried statement of an unsupported revision is unverifiable, \
+                   not the end of the run",
+            matches: |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
+        },
+    });
+
+    // A `governance.chain[]` hop of a revision this document does not define: the walk stops
+    // there with the prefix state it has established, and the receipt's own subject — anchored
+    // below the stop — is still verified against it.
+    out.push(Vector {
+        file: "statement-anchored-foreign-revision-chain-hop-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 26,
+            anchor: cp46,
+            chain: vec![0, 25, 44],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: None,
+            note: "MUST NOT VERIFY, and not for a defect. The chain carries three hops: the \
+                   genesis manifest, version 2 at entry 25, and the manifest at entry 44 — \
+                   genuinely signed by `producer-1`, and declaring `ahl_version: \"0.5\"`. I-D \
+                   §7.5.1 4b: such a hop \"is not inducted, K is unestablished at and after its \
+                   index, the governance finding is `unverifiable`\". The walk therefore stops \
+                   at entry 44 having ESTABLISHED the prefix state — genesis and version 2 — \
+                   which is what the subject at entry 26 is verified against, and every check \
+                   that would need a key at or after 44 rests on `governance` instead. The \
+                   version read is where §7.5 step 1 puts it for a chain hop, before that \
+                   statement is validated, and what an unsupported one costs is this finding \
+                   rather than the end of the run: \"the scalar result is reduced under Section \
+                   7.7 — a later required `invalid` still dominates\"."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4b / §7.1 — a chain hop of an unsupported revision leaves K \
+                   unestablished from its index",
+            matches: |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
+        },
+    });
+
+    // The manifest analogue of the foreign-revision `key` statement: a different path through
+    // the verifier — completeness (4c) rather than the induction (4b) — and the same outcome.
+    out.push(Vector {
+        file: "governance-state-foreign-revision-manifest-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "governance-state",
+            subject_index: 25,
+            anchor: cp45,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 45, cp45),
+            claim_material: json!({ "target_index": 26 }),
+            producer_keys: None,
+            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 44: a manifest \
                    version genuinely signed by `producer-1`, absent from `governance.chain[]`, \
                    and declaring `ahl_version: \"0.5\"`. A verifier that checked completeness \
                    before revision would call that absence an omission and report `invalid` — a \
@@ -2320,17 +2400,17 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
-            anchor: cp45,
+            anchor: cp46,
             chain: vec![0, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 45, cp45),
+            currency_material: corpus.enumeration(0, 46, cp46),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
             note: "MUST NOT VERIFY, and not for a defect. The range reaches the `key` statement \
-                   at entry 44: genuinely signed by `producer-1`, and declaring \
+                   at entry 45: genuinely signed by `producer-1`, and declaring \
                    `ahl_version: \"0.5\"`. I-D §7.5.1 4b: \"A VERIFYING purported \
                    governance entry that declares an `ahl_version` this revision does not define \
                    is neither: it is not inducted, K is unestablished at and after its index, \

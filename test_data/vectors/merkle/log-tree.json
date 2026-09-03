@@ -264,16 +264,22 @@
       "name": "42-ingestion-customers-g-under-producer-2"
     },
     {
-      "entry_id": "sha256:905cb0a137ec1dc279230872dd18d55d366f4a74f83c250e5c0cc57117e29853",
+      "entry_id": "sha256:f946abfcf12687f26b316fe66f940c47bae5476b132f2541f9ac0118deaddc83",
       "entry_index": 43,
-      "leaf_hash": "sha256:4bdcaa037c1ada9d6878a8665f6a148802845d06f994cb7bcb1939b4f2325515",
-      "name": "43-manifest-foreign-revision"
+      "leaf_hash": "sha256:22bf98090f013ae8b94ec6f418bdca001017f33f5f98a6d002caa04452897c74",
+      "name": "43-ingestion-foreign-revision"
+    },
+    {
+      "entry_id": "sha256:ccbc994a935ba9dbc3c7c4a26691369637b7bcf52a3b273c4820f4227d5c4601",
+      "entry_index": 44,
+      "leaf_hash": "sha256:af336c13f47d14e3431b62d3e1ecee93fb9317496d8b673efaca25ed0c9b0fcd",
+      "name": "44-manifest-foreign-revision"
     },
     {
       "entry_id": "sha256:9007fbc2e7d75a183e7a1673671c673b91984212e494a3dd9b7f0a68b3b98f3f",
-      "entry_index": 44,
+      "entry_index": 45,
       "leaf_hash": "sha256:c767d77373b8285f90f2cf71f6db2b0f5ce52d5b3e0cf5b01bc0cea1ee738c4f",
-      "name": "44-key-add-foreign-revision"
+      "name": "45-key-add-foreign-revision"
     }
   ],
   "inclusion": {
@@ -374,13 +380,18 @@
     },
     {
       "name": "cp44",
-      "root": "sha256:0a74fc40318ede02dfe06e747aa9de243c3395a5746215824ea28b9ca6ce35c7",
+      "root": "sha256:a29fb12c7f2ff1f40f430e0eb636aab293f602153c19d0c2073effca49d0152e",
       "tree_size": 44
     },
     {
       "name": "cp45",
-      "root": "sha256:278e7bdbb9050d7107343f8b3e88422ef348b01199110cf2f57056c4269c0bfd",
+      "root": "sha256:183b8478855660b12dd51319da0635bfb21db97995bf8c9e6963919f7c8fe7cf",
       "tree_size": 45
+    },
+    {
+      "name": "cp46",
+      "root": "sha256:f7229d54f3a44a6eec2497adca4b70f207d0fe6deb5ab000d8a9770ad30c1d83",
+      "tree_size": 46
     }
   ]
 }

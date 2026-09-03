@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 /// entry from a non-authority key alongside a non-verifying authority-named one. The two
 /// non-verifying fixtures sit at the tail so that enumerated material below them stays
 /// verifiable (I-D §7.5.1 4d).
-const STATEMENT_FILES: [&str; 45] = [
+const STATEMENT_FILES: [&str; 46] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -86,8 +86,9 @@ const STATEMENT_FILES: [&str; 45] = [
     "40-key-retire-producer-2-again.json",
     "41-key-add-producer-2-verifying-copy.json",
     "42-ingestion-customers-g-under-producer-2.json",
-    "43-manifest-foreign-revision.json",
-    "44-key-add-foreign-revision.json",
+    "43-ingestion-foreign-revision.json",
+    "44-manifest-foreign-revision.json",
+    "45-key-add-foreign-revision.json",
 ];
 
 /// The corpus prefix over which closure recomputation is defined.
@@ -243,7 +244,7 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
         // `manifest` member (spec §2.3.5) — carried by no chain: 39 void for want of a verifying
         // signature, 43 verifying but declaring a revision this document does not define (I-D
         // §7.5.1 4b, 4d).
-        if index == 39 || index == 43 {
+        if index == 39 || index == 44 {
             continue;
         }
         // The manifest version id is the manifest statement's *statement id* (spec §2.3.5).
@@ -1436,7 +1437,9 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
         }
         "governance-state-foreign-revision-key-must-fail.ahl"
-        | "governance-state-foreign-revision-manifest-must-fail.ahl" => {
+        | "governance-state-foreign-revision-manifest-must-fail.ahl"
+        | "governance-state-foreign-revision-entry-must-fail.ahl"
+        | "statement-anchored-foreign-revision-chain-hop-must-fail.ahl" => {
             matches!(error, ReceiptError::UnsupportedVersion { field: "ahl_version", .. })
         }
         "governance-key-rotation-proof-witness-key-unlisted-must-fail.ahl" => {
@@ -2392,8 +2395,8 @@ fn a_void_entry_leaves_its_statement_id_free_for_a_verifying_copy() {
 fn a_verifying_foreign_revision_governance_entry_is_unverifiable_either_way() {
     let policy = trust_policy();
     for (name, index) in [
-        ("governance-state-foreign-revision-key-must-fail.ahl", 44usize),
-        ("governance-state-foreign-revision-manifest-must-fail.ahl", 43),
+        ("governance-state-foreign-revision-key-must-fail.ahl", 45usize),
+        ("governance-state-foreign-revision-manifest-must-fail.ahl", 44),
     ] {
         let (_, receipt) = read_receipt(name);
         let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
@@ -2465,6 +2468,97 @@ fn a_verifying_foreign_revision_governance_entry_is_unverifiable_either_way() {
             verify_envelope(&statements[index]["envelope"], |key_id| keys.get(key_id).cloned())
                 .expect("well-formed envelope"),
             "{name}: the entry at {index} must VERIFY, or it is the void case instead"
+        );
+    }
+}
+
+/// A carried statement of an unsupported revision is a gap, not the end of the run.
+///
+/// I-D §7.1: only the receipt's own `ahl_receipt_version` read says "no further processing"; a
+/// carried statement's unsupported `ahl_version` "is `unverifiable` as for any carried
+/// statement". §7.5.1 4b closes the foreign-revision governance entry rule with "a later
+/// required `invalid` still dominates". These are the two remaining carriers: a
+/// `governance.chain[]` hop the walk cannot interpret, and an enumeration-only entry a sweep
+/// meets. Each is paired here with a later disagreement the receipt's own bytes settle.
+#[test]
+fn a_carried_statement_of_an_unsupported_revision_does_not_end_the_run() {
+    let policy = trust_policy();
+    // Each disagreement is a §7.6 rule the receipt's own bytes settle, and each is reached
+    // AFTER the gap. The two differ because the two gaps sit at opposite ends of the run. The
+    // chain hop is met by the step-3 walk, so the first cross-field rule is already later than
+    // it: `claim.assurance.governance` must equal `governance.currency.mode`. The enumerated
+    // sweep, by contrast, runs inside the cross-field phase, so the defect has to be one of the
+    // subject-level rules that follow it — here the presence rule, which forbids a manifest
+    // subject from also carrying `subject.manifest`. (Flipping the assurance member on the
+    // enumerated receipt would not do: that member also SELECTS the work, and setting it to
+    // `declared` would switch off the very sweep that meets the entry.)
+    let mutations: [fn(&mut Value); 2] = [
+        |receipt| receipt["claim"]["assurance"]["governance"] = json!("enumerated"),
+        |receipt| {
+            receipt["subject"]["manifest"] =
+                json!("sha256:00000000000000000000000000000000000000000000000000000000000000ff");
+        },
+    ];
+    for ((name, assertion, index), mutate) in [
+        ("statement-anchored-foreign-revision-chain-hop-must-fail.ahl", Assertion::Governance, 44),
+        ("governance-state-foreign-revision-entry-must-fail.ahl", Assertion::EnvelopeValidity, 43),
+    ]
+    .into_iter()
+    .zip(mutations)
+    {
+        let (_, receipt) = read_receipt(name);
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+
+        // The gap alone: `unverifiable`, on the assertion of the phase that met the entry.
+        assert_eq!(report.result, Outcome::Unverifiable, "{name}: {:#?}", report.findings);
+        let gap = report.finding(assertion).unwrap_or_else(|| panic!("{name}: {assertion}"));
+        assert_eq!(gap.outcome, Outcome::Unverifiable, "{name}");
+        assert_eq!(gap.rests_on, None, "{name}: the cause, not a derivation");
+        assert!(
+            gap.detail.as_ref().is_some_and(|detail| detail.contains("0.5")),
+            "{name}: the finding names the revision it cannot interpret: {gap:?}"
+        );
+        assert_eq!(report.dominating().map(|finding| finding.assertion), Some(assertion), "{name}");
+        // Nothing is reported as a defect of the artifact: the verifier's reach ran out.
+        assert!(
+            report.findings.iter().all(|finding| finding.outcome != Outcome::Invalid),
+            "{name}: {:#?}",
+            report.findings
+        );
+        // A set-aside entry is neither effective nor void: it is reported as a finding, so it
+        // must not also appear among the void entries the run names.
+        assert!(
+            report.informative.iter().all(|item| item.entry_index != index),
+            "{name}: a foreign-revision entry is a gap, not a void entry: {:#?}",
+            report.informative
+        );
+        // The statement really is at that index, and really does verify — this is the carried
+        // case, not the non-verifying one the reliance rule voids.
+        let statements = statement_vectors();
+        let keys = key_set(&statements);
+        let entry = &statements[usize::try_from(index).expect("index fits")];
+        assert!(
+            verify_envelope(&entry["envelope"], |key_id| keys.get(key_id).cloned())
+                .expect("well-formed envelope"),
+            "{name}: the entry at {index} must VERIFY, or it is the void case instead"
+        );
+        assert_eq!(entry["envelope"]["payload"]["ahl_version"], json!("0.5"), "{name}");
+
+        // And the run carries on: a §7.6 disagreement past the gap is reached and dominates,
+        // where a run that ended at the version read could never have found it.
+        let mut defective = receipt.clone();
+        mutate(&mut defective);
+        let later = verify_receipt_report(&defective, &policy).expect("the run completes");
+        assert_eq!(later.result, Outcome::Invalid, "{name}: a later invalid dominates the gap");
+        assert_eq!(
+            later.dominating().map(|finding| finding.assertion),
+            Some(Assertion::CrossField),
+            "{name}"
+        );
+        assert_eq!(
+            later.finding(assertion).map(|finding| finding.outcome),
+            Some(Outcome::Unverifiable),
+            "{name}: the gap is still reported beside the defect that dominates it"
         );
     }
 }

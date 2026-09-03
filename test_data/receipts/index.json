@@ -411,6 +411,23 @@
     {
       "claim_type": "governance-state",
       "expect": "unverifiable",
+      "file": "governance-state-foreign-revision-entry-must-fail.ahl",
+      "finding": "envelope-validity",
+      "informative": 4,
+      "reason": "unsupported ahl_version: expected `0.4`, got `0.5` (unverifiable, not invalid)",
+      "rule": "I-D §7.1 — a carried statement of an unsupported revision is unverifiable, not the end of the run"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "unverifiable",
+      "file": "statement-anchored-foreign-revision-chain-hop-must-fail.ahl",
+      "finding": "governance",
+      "reason": "unsupported ahl_version: expected `0.4`, got `0.5` (unverifiable, not invalid)",
+      "rule": "I-D §7.5.1 4b / §7.1 — a chain hop of an unsupported revision leaves K unestablished from its index"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "unverifiable",
       "file": "governance-state-foreign-revision-manifest-must-fail.ahl",
       "finding": "governance",
       "informative": 2,

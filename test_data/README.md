@@ -110,9 +110,12 @@ verified, both the primary and the later checkpoint's log signatures are verifie
 and `consistency_path`. A later checkpoint that does not verify is `invalid` and is never hidden
 behind an unrelated gap. Where a §7.6 rule COULD not be evaluated — `witnessed` or
 `continued_history` — the `cross-field` finding is `unverifiable` naming what blocked it, since
-a rule that was skipped is not a rule that held. Two conditions end the run even so, both ordering rules rather than reductions: an
-unsupported version, which §7.5 step 1 follows with "no further processing", and an exhausted
-verifier-local budget, which §7.8 requires to fail closed. A boundary is rendered only for
+a rule that was skipped is not a rule that held. Two conditions end the run even so, both ordering rules rather
+than reductions: the RECEIPT's own unsupported version, which §7.5 step 1 follows with "no
+further processing", and an exhausted verifier-local budget, which §7.8 requires to fail closed.
+A CARRIED statement of an unsupported revision is neither: §7.1 makes it "`unverifiable` as for
+any carried statement", so it is recorded as a gap on the assertion of the phase that met it and
+the run goes on — 4b closes that rule with "a later required `invalid` still dominates". A boundary is rendered only for
 `verified`, and no result is ever expressed by rewriting the receipt's own assurance fields.
 
 **Void entries and informative items.** Not every non-verifying envelope is a defect of the
@@ -257,7 +260,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 ## The scenarios
 
-The corpus is 45 anchored entries carrying these interlocking scenarios:
+The corpus is 46 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -366,15 +369,29 @@ ordinary artifact of a real log rather than something a producer must manufactur
    inducted; a verifier that claimed the id when it voided the first copy would leave the key
    retired and refuse the subject.
 
-   Entries 43 and 44 are the other half of 4b's rule: a manifest version and a `key` statement
-   that DO verify while declaring `ahl_version: "0.5"`. Each is "not inducted, K is unestablished
-   at and after its index, the governance finding is `unverifiable`", and each reaches the
-   verifier by a different path — the `key` statement through the induction (4b), the manifest
+   Entries 43, 44 and 45 are the other half of 4b's rule: an ingestion, a manifest version and
+   a `key` statement that all DO verify while declaring `ahl_version: "0.5"`. A carried
+   statement of a revision this document does not define is "`unverifiable` as for any carried
+   statement" (§7.1); only the RECEIPT's own `ahl_receipt_version` ends the run (§7.5 step 1).
+   So each is set aside rather than validated under rules this revision does not have — not
+   inducted, not a competing candidate, never traversed — and each is reported as a FINDING,
+   which is what separates it from a void entry: nothing here says the artifact is defective,
+   only that this verifier cannot read it.
+
+   The four paths a foreign revision reaches a verifier by each have a vector, and all four are
+   `unverifiable`: the governing `key` statement through the induction (4b) and the manifest
    through the completeness check (4c), which must read the revision before calling its absence
-   from the chain an omission. `governance-state-foreign-revision-manifest-must-fail.ahl` (over
-   cp44) and `governance-state-foreign-revision-key-must-fail.ahl` (over cp45) are both
-   `unverifiable` on `governance`. All seven entries sit past every checkpoint the rest of the
-   corpus anchors at, so no other vector's range reaches them.
+   from the chain an omission — `governance-state-foreign-revision-key-must-fail.ahl` (over
+   cp46) and `governance-state-foreign-revision-manifest-must-fail.ahl` (over cp45), both on
+   `governance`; a `governance.chain[]` hop the step-3 walk cannot interpret —
+   `statement-anchored-foreign-revision-chain-hop-must-fail.ahl`, on `governance`, where the
+   stop lands at the hop's own index; and a non-governance entry an enumerated sweep meets —
+   `governance-state-foreign-revision-entry-must-fail.ahl` (over cp44), on `envelope-validity`,
+   the assertion of the sweep that met it. In each case the run continues: 4b ends "a later
+   required `invalid` still dominates", and the tests pair every path with a §7.6 disagreement
+   that does exactly that while the gap stays reported beside it. All eight entries sit past
+   every checkpoint the rest of the corpus anchors at, so no other vector's range reaches
+   them.
 
 12. **Input-set trees take the §2.7 tree rules.** I-D §2.7 states one set of rules, "identical
    for every AHL tree — outputs, input sets, and dispositions". Entry 37 is a batch whose three
