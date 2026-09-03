@@ -34,7 +34,7 @@ use crate::scenario::{
 pub const CONFORMING_TREE_PREFIX: usize = 37;
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 38] = [
+pub const NAMES: [&str; 41] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -73,6 +73,9 @@ pub const NAMES: [&str; 38] = [
     "35-correction-a-to-cross-dataset-replacement",
     "36-retraction-cross-dataset-record",
     "37-derivation-batch-defective-input-sets",
+    "38-invalid-signature-key-add",
+    "39-invalid-signature-manifest",
+    "40-key-add-foreign-revision",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -927,11 +930,81 @@ impl Corpus {
             &keys.producer_1,
         );
 
+        // --- entries 38-40: the reliance-rule material (I-D §2.1, §7.5.1 4b and 4d) -------
+        // A log anchors opaque bytes and validates none, so a purported governance statement
+        // whose envelope does not verify really can be anchored. 4b selects an entry the
+        // enumeration alone reveals by its purported `type`, but it "ENTERS the induction only
+        // if its envelope verifies in phase 1"; one that does not is VOID — not inducted, no
+        // effect on K, the walk continues past it — and §7.4 adds that its absence from
+        // `governance.chain[]` is not an omission, because enumerated currency proves the
+        // presented statements are "the only VERIFYING manifest and key entries in that range".
+        //
+        // Both sit past every checkpoint the rest of this corpus anchors at, so no existing
+        // vector's range reaches them and nothing before entry 38 changes.
+
+        // --- entry 38: a purported `key` statement whose signature does not verify --------
+        let mut env_38 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "add",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    // A distinct `valid_from`, so this statement is its own rather than a
+                    // duplicate of the re-add at entry 28 (spec §2.1: one statement id, one
+                    // governing envelope).
+                    "valid_from": "2026-08-17T00:00:00Z",
+                },
+            }),
+            &keys.producer_1,
+        );
+        env_38["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
+
+        // --- entry 39: a purported `manifest` whose signature does not verify -------------
+        // Well formed as a manifest version — it names entry 25 as its predecessor and would
+        // install a producer-key snapshot of its own — and carried by no receipt's chain. A
+        // verifier that took it for a governance statement would derive its key state from
+        // material no key vouches for; one that treated its absence from the chain as an
+        // omission would refuse every enumerated receipt over any range reaching it.
+        let mut env_39 = envelope(
+            manifest(keys, &log_id, adaptor_hash, 39, Some(&entry_id(&env_25))),
+            &keys.producer_1,
+        );
+        env_39["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
+
+        // --- entry 40: a VERIFYING `key` statement of a revision this document does not define
+        // The other half of 4b's rule: "A VERIFYING purported governance entry that declares an
+        // `ahl_version` this revision does not define is neither: it is not inducted, K is
+        // unestablished at and after its index, the governance finding is `unverifiable`."
+        // Genuinely signed by `producer-1`, so the signature is not what stops it.
+        let mut foreign_key_payload = payload(
+            "key",
+            &m2,
+            json!(T0),
+            json!({
+                "action": "add",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": T0,
+                },
+            }),
+        );
+        foreign_key_payload["ahl_version"] = json!("0.5");
+        let env_40 = envelope(foreign_key_payload, &keys.producer_1);
+
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
             env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32, env_33,
-            env_34, env_35, env_36, env_37,
+            env_34, env_35, env_36, env_37, env_38, env_39, env_40,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -974,6 +1047,12 @@ impl Corpus {
             (35, 25),
             (37, 25),
             (38, 25),
+            // cp40 covers [0, 40): it reaches the two purported governance statements at
+            // entries 38 and 39, whose envelopes do not verify, and stops short of the
+            // foreign-revision `key` statement at entry 40.
+            (40, 25),
+            // cp41 reaches that one too.
+            (41, 25),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
@@ -996,7 +1075,9 @@ impl Corpus {
                     34 => "cp34",
                     35 => "cp35",
                     37 => "cp37",
-                    _ => "cp38",
+                    38 => "cp38",
+                    40 => "cp40",
+                    _ => "cp41",
                 },
                 checkpoint: cp,
                 witness_id,
@@ -1257,7 +1338,10 @@ impl Corpus {
         // so a generator bug that accidentally produced a valid signature (defeating the
         // vector's purpose) or an invalid one elsewhere (a real regression) would each be
         // caught.
-        const NON_VERIFYING_ENTRIES: [usize; 2] = [32, 33];
+        // Entries 38 and 39 join them: a purported `key` statement and a purported `manifest`
+        // whose signatures do not verify, anchored past every checkpoint the rest of the corpus
+        // uses, for the reliance rule of I-D §7.5.1 4d.
+        const NON_VERIFYING_ENTRIES: [usize; 4] = [32, 33, 38, 39];
         for (index, env) in self.envelopes.iter().enumerate() {
             if NON_VERIFYING_ENTRIES.contains(&index) {
                 continue;
@@ -1661,7 +1745,22 @@ impl Corpus {
                 vector["note"] = json!(
                     "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against \
                      `signatures[0].key_id`'s real public key. See \
-                     trigger-effective-non-verifying-candidate-must-fail.ahl."
+                     trigger-effective-void-candidate.ahl."
+                );
+            }
+            if index == 38 || index == 39 {
+                // The same fact for a purported GOVERNANCE statement: a `key` statement at 38
+                // and a manifest version at 39, each well formed and each carrying a `sig` no
+                // key ever produced. I-D §7.5.1 4b enters an enumeration-only entry into the
+                // induction "only if its envelope verifies in phase 1"; neither does, so both
+                // are void — not inducted, no effect on K — and §7.4 adds that a void entry's
+                // absence from `governance.chain[]` is not an omission.
+                vector["note"] = json!(
+                    "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against \
+                     `signatures[0].key_id`'s real public key. A purported governance statement \
+                     that does not verify is VOID (I-D §2.1, §7.5.1 4b and 4d): not inducted, no \
+                     effect on the key state, reported as an informative item. See \
+                     governance-state-void-governance-entries.ahl."
                 );
             }
             if index == 33 {

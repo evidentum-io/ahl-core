@@ -171,6 +171,30 @@
         "tree_size": 38
       },
       "name": "cp38"
+    },
+    {
+      "active_manifest_entry_index": 25,
+      "checkpoint": {
+        "checkpoint_time": "2026-08-16T12:00:00Z",
+        "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
+        "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
+        "root_hash": "sha256:14d422f20a71f0d72b3ffedbb7f337cc9ece5ea00b37811ffd3700b07c9e142c",
+        "signature": "base64:RO7QR3ppZwRaCjpXUzMmsg/x5AR0bNknm2CGe+TKuRKzIKRwLnglNFTYtAZ19QbgfRmfPPovsmSAVxTNFjIcCw==",
+        "tree_size": 40
+      },
+      "name": "cp40"
+    },
+    {
+      "active_manifest_entry_index": 25,
+      "checkpoint": {
+        "checkpoint_time": "2026-08-16T12:00:00Z",
+        "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
+        "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
+        "root_hash": "sha256:f030a346e6a266dcc8d551934af317b46964e8aca871272b0efb5d24ced63bf1",
+        "signature": "base64:DObo5+Yagf/sBgsQpP0nTQQ/HUxnLbOJJ1lgnEOzzMNefFtMzCGIGHRJ+65q/3FSSmgk3SvpD3Axgg4Qz7iFAQ==",
+        "tree_size": 41
+      },
+      "name": "cp41"
     }
   ],
   "cosignatures": [
@@ -284,6 +308,22 @@
       "cosigned_at": "2026-08-16T12:00:00Z",
       "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
       "signed_over": "JCS({\"checkpoint\": <signed cp38>, \"witness_id\": \"witness-2\"})",
+      "witness_id": "witness-2"
+    },
+    {
+      "checkpoint": "cp40",
+      "cosignature": "base64:GlZG/mDx64kl8QzROie4tcDeQoCFRBP+nJtJI5MMgn5PBbU+BbV1vhdqp65A4HEIB+f/63o43YNgWpP8mYftBA==",
+      "cosigned_at": "2026-08-16T12:00:00Z",
+      "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
+      "signed_over": "JCS({\"checkpoint\": <signed cp40>, \"witness_id\": \"witness-2\"})",
+      "witness_id": "witness-2"
+    },
+    {
+      "checkpoint": "cp41",
+      "cosignature": "base64:Ltzfu5IT8//OHYHEnsPTC9M7XmcigtVYLA8Lxf9rsAsT7YQkQbOwwjOV/2rjH/imqbVFA1xZjBlpWdzyCl+JDw==",
+      "cosigned_at": "2026-08-16T12:00:00Z",
+      "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
+      "signed_over": "JCS({\"checkpoint\": <signed cp41>, \"witness_id\": \"witness-2\"})",
       "witness_id": "witness-2"
     }
   ],

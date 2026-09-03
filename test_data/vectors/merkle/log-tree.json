@@ -232,6 +232,24 @@
       "entry_index": 37,
       "leaf_hash": "sha256:6104fdce7de406525b550ed31f04b5b26c1f4b9f8e7b1e67d2dc77988a01e45a",
       "name": "37-derivation-batch-defective-input-sets"
+    },
+    {
+      "entry_id": "sha256:b98f69ab5b440822ddcb4bd86979acdb4fbb01e3e3f0d1d80895f297bbe7f53f",
+      "entry_index": 38,
+      "leaf_hash": "sha256:583c3e1a83cdb681ff91aded8fa5dc2a672d19a21681c7e0707746da85f5e812",
+      "name": "38-invalid-signature-key-add"
+    },
+    {
+      "entry_id": "sha256:5fa61fbc6108b32d9eb499860635d23922c3260f1be1a79f7cd639b117afa130",
+      "entry_index": 39,
+      "leaf_hash": "sha256:764a64f2d4b87932f755d0a04b280ef147396416fa24d3cb06d56cba224c4abd",
+      "name": "39-invalid-signature-manifest"
+    },
+    {
+      "entry_id": "sha256:9007fbc2e7d75a183e7a1673671c673b91984212e494a3dd9b7f0a68b3b98f3f",
+      "entry_index": 40,
+      "leaf_hash": "sha256:c767d77373b8285f90f2cf71f6db2b0f5ce52d5b3e0cf5b01bc0cea1ee738c4f",
+      "name": "40-key-add-foreign-revision"
     }
   ],
   "inclusion": {
@@ -319,6 +337,16 @@
       "name": "cp38",
       "root": "sha256:e9804ec0807a015231fb76b3b58741463df716d2f403e901bf5825ec38ce04cf",
       "tree_size": 38
+    },
+    {
+      "name": "cp40",
+      "root": "sha256:14d422f20a71f0d72b3ffedbb7f337cc9ece5ea00b37811ffd3700b07c9e142c",
+      "tree_size": 40
+    },
+    {
+      "name": "cp41",
+      "root": "sha256:f030a346e6a266dcc8d551934af317b46964e8aca871272b0efb5d24ced63bf1",
+      "tree_size": 41
     }
   ]
 }

@@ -417,6 +417,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp35 = corpus.anchor("cp35");
     let cp37 = corpus.anchor("cp37");
     let cp38 = corpus.anchor("cp38");
+    let cp40 = corpus.anchor("cp40");
+    let cp41 = corpus.anchor("cp41");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -2199,6 +2201,81 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         }
         .build(corpus, keys),
         expect: Expect::Accept,
+    });
+
+    // The same rule where the void entries are PURPORTED GOVERNANCE STATEMENTS — the case 4b
+    // states in its own words rather than leaving to 4d.
+    out.push(Vector {
+        file: "governance-state-void-governance-entries.ahl",
+        receipt: Spec {
+            claim_type: "governance-state",
+            subject_index: 25,
+            anchor: cp40,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 40, cp40),
+            claim_material: json!({ "target_index": 26 }),
+            producer_keys: None,
+            note: "The claim of `governance-state-valid.ahl` over a range that reaches TWO \
+                   purported governance statements neither the chain carries nor any key \
+                   vouches for: a `key` statement at entry 38 and a manifest version at entry \
+                   39, each well formed and each carrying a `sig` no key ever produced. I-D \
+                   §7.5.1 4b selects an enumeration-only entry for the walk \"by its purported \
+                   `type`, but it ENTERS the induction only if its envelope verifies in phase \
+                   1\": neither does, so both are VOID — \"not inducted, no effect on K, the \
+                   walk continues past it\" — and §7.5 step 1 exempts a non-verifying \
+                   enumeration-only entry from the version read and from every type-specific \
+                   check, so nothing about their payloads is ever validated. §7.4 closes the \
+                   other half: enumerated currency proves the presented statements are \"the \
+                   only VERIFYING manifest and key entries in that range\", so the void \
+                   manifest at 39 is not an omission from `governance.chain[]` however much it \
+                   looks like one. Four void entries are reported as informative items (§7.7) — \
+                   32, 33, 38, 39 — and the governance claim stands."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    // And the entry that VERIFIES while declaring a revision this document does not define.
+    out.push(Vector {
+        file: "governance-state-foreign-revision-key-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "governance-state",
+            subject_index: 25,
+            anchor: cp41,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 41, cp41),
+            claim_material: json!({ "target_index": 26 }),
+            producer_keys: None,
+            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 41's \
+                   predecessor at index 40: a `key` statement genuinely signed by `producer-1` \
+                   that declares `ahl_version: \"0.5\"`. I-D §7.5.1 4b: \"A VERIFYING purported \
+                   governance entry that declares an `ahl_version` this revision does not define \
+                   is neither: it is not inducted, K is unestablished at and after its index, \
+                   the governance finding is `unverifiable` (Section 2.2), every K-dependent \
+                   check at or after that index rests on it, and the scalar result is reduced \
+                   under Section 7.7 — a later required `invalid` still dominates.\" The \
+                   signature is what separates this from entries 38 and 39: a statement no key \
+                   vouches for is void and costs the run nothing, while one a key DOES vouch \
+                   for, in a revision this verifier cannot interpret, is material it cannot \
+                   read past. The two void entries at 32 and 33 are still reported as \
+                   informative items."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4b / §2.2 — a verifying governance entry of an unsupported \
+                   revision leaves K unestablished from its index",
+            matches: |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
+        },
     });
 
     // The other side of the same rule: an enumerated range that reaches a `key` statement

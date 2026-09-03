@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 /// entry from a non-authority key alongside a non-verifying authority-named one. The two
 /// non-verifying fixtures sit at the tail so that enumerated material below them stays
 /// verifiable (I-D §7.5.1 4d).
-const STATEMENT_FILES: [&str; 38] = [
+const STATEMENT_FILES: [&str; 41] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -81,6 +81,9 @@ const STATEMENT_FILES: [&str; 38] = [
     "35-correction-a-to-cross-dataset-replacement.json",
     "36-retraction-cross-dataset-record.json",
     "37-derivation-batch-defective-input-sets.json",
+    "38-invalid-signature-key-add.json",
+    "39-invalid-signature-manifest.json",
+    "40-key-add-foreign-revision.json",
 ];
 
 /// The corpus prefix over which closure recomputation is defined.
@@ -230,6 +233,12 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
         // genuinely signed and genuinely anchored, yet wrongly bound — see `corpus.rs`'s own
         // entry 34 and the assertion right after this loop.
         if index == 34 {
+            continue;
+        }
+        // Entry 39 is a purported MANIFEST — a manifest statement declares no `manifest` member
+        // (spec §2.3.5) — carried by no chain and void for want of a verifying signature (I-D
+        // §7.5.1 4b, 4d).
+        if index == 39 {
             continue;
         }
         // The manifest version id is the manifest statement's *statement id* (spec §2.3.5).
@@ -447,7 +456,10 @@ fn every_statement_signature_verifies() {
     // real authority `key_id`, garbage `sig` (entry 33 also carries a second, genuinely valid
     // entry from a non-authority key). Every other entry must genuinely verify; these two must
     // not.
-    const NON_VERIFYING: [usize; 2] = [32, 33];
+    // Entries 38 and 39 join the two at 32 and 33: a purported `key` statement and a purported
+    // `manifest` whose envelopes do not verify, anchored past every checkpoint the rest of the
+    // corpus uses, for the reliance rule of I-D §7.5.1 4d.
+    const NON_VERIFYING: [usize; 4] = [32, 33, 38, 39];
     let vectors = statement_vectors();
     let keys = key_set(&vectors);
     for (index, vector) in vectors.iter().enumerate() {
@@ -1399,6 +1411,9 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "governance-key-statement-unsigned-common-field-must-fail.ahl" => {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
         }
+        "governance-state-foreign-revision-key-must-fail.ahl" => {
+            matches!(error, ReceiptError::UnsupportedVersion { field: "ahl_version", .. })
+        }
         "governance-key-rotation-proof-witness-key-unlisted-must-fail.ahl" => {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 0, .. })
         }
@@ -1558,7 +1573,11 @@ fn every_negative_receipt_reaches_its_result_on_the_finding_it_names() {
                  {:#?}",
                 report.findings
             );
-            for assertion in [Assertion::Anchoring, Assertion::Governance] {
+            // The assertions that hold whatever the gap is: step 3's paths need no key, and
+            // the version read of the receipt's own carried statements precedes everything.
+            // `governance` is not among them — it is the assertion an unestablished key state
+            // is reported on (I-D §7.5.1 4b).
+            for assertion in [Assertion::Anchoring, Assertion::Versions] {
                 assert_eq!(
                     report.finding(assertion).map(|finding| finding.outcome),
                     Some(Outcome::Verified),
