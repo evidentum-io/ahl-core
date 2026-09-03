@@ -64,7 +64,17 @@ HOLDS rather than to what it establishes: a manifest version the walk reached an
 or one the chain does not carry at all, is material the receipt owed and is `invalid`, while a
 version the chain DOES carry at or after the stop is a capability gap — the content-binding
 finding that needed its descriptor is `unverifiable` resting on `governance`, never a defect of
-the artifact. §7.6's own rules about `subject.manifest` are on the other side of that line
+the artifact. One rule sits underneath all of this: I-D §2.1's "If duplicates nevertheless occur, the envelope
+with the smallest entry index governs and later ones are void." Every statement-id-keyed lookup
+over chain material is FIRST-WINS — the map §7.6's rules read, the map the descriptor and
+key-statement checks resolve versions through — and the induction skips a later duplicate whole:
+it applies no effect, consumes no rotation proof, and never becomes the version a
+`subject.manifest` reference resolves to, while the `predecessor` linkage of later manifests
+still runs against the governing copy. What the chain CARRIES is counted separately, void copies
+included, because §7.5.1 4c asks whether the chain shows every manifest the enumerated range
+reveals.
+
+§7.6's own rules about `subject.manifest` are on the other side of that line
 entirely and are never downgraded: that the named version is present in `governance.chain` and
 anchored strictly before the subject is read off the raw chain, at the entry index step 3 proved
 for each element, and is `invalid` on `cross-field` whether or not the induction stopped. Only
