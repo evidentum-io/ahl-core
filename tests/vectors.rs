@@ -18,8 +18,8 @@ use ahl_core::bitemporal::{Scope, ValidTime};
 use ahl_core::closure::{affected_set, edges, RecordRef, TreeMaterial};
 use ahl_core::descriptor;
 use ahl_core::receipt::{
-    verify_receipt, AdaptorCapabilities, AdaptorProfile, Limits, ReceiptError, TrustPolicy,
-    TrustedWitnessKey,
+    verify_receipt, AdaptorCapabilities, AdaptorProfile, Assertion, Limits, Outcome, ReceiptError,
+    TrustPolicy, TrustedWitnessKey,
 };
 use ahl_core::tree::ValidatedLeafSet;
 use ahl_core::{
@@ -1676,18 +1676,27 @@ fn adaptor_profile_hash_is_recomputed_from_the_held_document_not_trusted() {
     assert_eq!(profile.hash(), sha256_hex(&profile.document));
 }
 
+/// I-D §7.3: a `keyed-authorized` binding "whose evidence is present and well formed but for
+/// which the verifier holds no dataset key... MUST NOT be rendered as though it had been
+/// established... that content binding is `unverifiable` (Section 7.7), and the receipt is not
+/// thereby invalid."
 #[test]
 fn an_unauthorized_verifier_cannot_satisfy_a_keyed_content_binding() {
     let mut policy = trust_policy();
     policy.dataset_keys.clear();
     let (_, receipt) = read_receipt("record-ingested-valid.ahl");
+    let error = verify_receipt(&receipt, &policy).expect_err("no dataset key is held");
     assert!(
-        matches!(
-            verify_receipt(&receipt, &policy),
-            Err(ReceiptError::ContentBindingMismatch { .. })
-        ),
-        "keyed content binding is authorized-verifier-only; dataset keys are never packaged"
+        matches!(error, ReceiptError::DatasetKeyNotHeld { ref dataset } if dataset == "customers"),
+        "keyed content binding is authorized-verifier-only; dataset keys are never packaged, \
+         got: {error}"
     );
+    assert_eq!(
+        error.class(),
+        Outcome::Unverifiable,
+        "a dataset key the verifier is not authorized to hold is a capability gap (I-D §7.7)"
+    );
+    assert_eq!(error.assertion(), Assertion::ContentBinding);
 }
 
 /// I-D §7.8's two classes of limit, and the two different outcomes they produce.

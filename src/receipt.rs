@@ -223,6 +223,215 @@ pub struct Verdict {
 }
 
 // ---------------------------------------------------------------------------
+// The three-valued result model (I-D §7.7)
+// ---------------------------------------------------------------------------
+
+/// One of the three values a completed verification run reaches (I-D §7.7).
+///
+/// The value is scalar for a whole receipt and it is also the value of each per-assertion
+/// [`Finding`]: I-D §7.7 gives the findings "the same meanings as above". A run that does NOT
+/// complete yields none of these — see [`ExecutionError`].
+///
+/// The ordering is the reduction of I-D §7.7: "`invalid` if any required finding is `invalid`;
+/// otherwise `unverifiable` if any required finding is `unverifiable`; otherwise `verified`."
+/// That is the maximum under `Verified < Unverifiable < Invalid`, and [`Ord`] is derived in
+/// that order so the reduction is `max` and cannot drift from the sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Outcome {
+    /// The verifier established the asserted property from the presented material.
+    Verified,
+    /// The presented material neither establishes the asserted property nor contradicts it:
+    /// the verifier lacks material, a capability, a local configuration, or a local budget.
+    Unverifiable,
+    /// The presented material does not verify.
+    Invalid,
+}
+
+impl Outcome {
+    /// The token this value is reported under, as I-D §7.7 spells it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Unverifiable => "unverifiable",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
+impl core::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// One assertion a receipt requires, as I-D §7.7 defines the required set.
+///
+/// §7.7: "The required assertions of a receipt are exactly: every assertion its claim type's
+/// material requires under Section 7.2, together with the anchoring, envelope-validity,
+/// governance, and cross-field checks of Section 7.5 steps 1 through 4 and Section 7.6; its
+/// content binding, if and only if its own `assurance.content_binding` is not `none`; and for
+/// each embedded receipt, every required assertion of THAT receipt."
+///
+/// The variants name those assertions at the granularity of the §7.5 algorithm's own steps
+/// rather than one per check: every check this crate performs maps to exactly one of them,
+/// through [`ReceiptError::assertion`], and every rejection therefore names both the assertion
+/// it belongs to and — through [`ReceiptError::class`] — the §7.7 value it produces.
+/// The variants are DECLARED in the order the §7.5 algorithm reaches them, so the derived
+/// [`Ord`] is that order: an assertion greater than another is settled later, which is what
+/// decides how far a prerequisite's `unverifiable` outcome reaches. [`Self::ORDER`] lists them
+/// in the same order, and a [`Report`] is sorted by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Assertion {
+    /// `ahl_receipt_version`, `spec_version` and every carried statement's `ahl_version`
+    /// (I-D §7.5 step 1, §2.2).
+    Versions,
+    /// The §7.8 resource limits: the fixed limits, and the verifier-local budgets.
+    ResourceLimits,
+    /// The container schema of §7.1 and the identifier recomputation of §7.5 step 1.
+    Structure,
+    /// Adaptor-profile resolution from local possession (§7.5 step 2).
+    AdaptorProfile,
+    /// The key-independent path checks of §7.5 step 3: inclusion, the governance chain's own
+    /// paths, and the consistency path where `continued_history` is asserted.
+    Anchoring,
+    /// The governance bootstrap of §7.5.1 4a-4c: the configured genesis anchor, the manifest
+    /// lineage, the key induction, rotation proofs, and enumerated governance currency.
+    Governance,
+    /// Authenticated checkpoint validation (§7.5.1 4f), witness cosignatures included.
+    CheckpointAuthentication,
+    /// Envelope validity under §2.1 for the subject and every remaining carried envelope
+    /// (§7.5.1 4d).
+    EnvelopeValidity,
+    /// The cross-field consistency rules of §7.6.
+    CrossField,
+    /// The claim type's own material under §7.2 (§7.5 step 5), authority under 4e included.
+    ClaimMaterial,
+    /// This receipt's content binding (§7.3, §6.3, §2.6). Required if and only if its own
+    /// `assurance.content_binding` is not `none`, and — for an EMBEDDED receipt — never a
+    /// required assertion of the receipt that embeds it (§7.7).
+    ContentBinding,
+}
+
+impl Assertion {
+    /// Every assertion, in the order the §7.5 algorithm reaches it.
+    pub const ORDER: [Self; 11] = [
+        Self::Versions,
+        Self::ResourceLimits,
+        Self::Structure,
+        Self::AdaptorProfile,
+        Self::Anchoring,
+        Self::Governance,
+        Self::CheckpointAuthentication,
+        Self::EnvelopeValidity,
+        Self::CrossField,
+        Self::ClaimMaterial,
+        Self::ContentBinding,
+    ];
+
+    /// The name this assertion is reported under.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Versions => "versions",
+            Self::ResourceLimits => "resource-limits",
+            Self::Structure => "structure",
+            Self::AdaptorProfile => "adaptor-profile",
+            Self::Anchoring => "anchoring",
+            Self::Governance => "governance",
+            Self::CheckpointAuthentication => "checkpoint-authentication",
+            Self::EnvelopeValidity => "envelope-validity",
+            Self::CrossField => "cross-field",
+            Self::ClaimMaterial => "claim-material",
+            Self::ContentBinding => "content-binding",
+        }
+    }
+}
+
+impl core::fmt::Display for Assertion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The outcome of one required assertion, with what produced it (I-D §7.7).
+///
+/// I-D §7.7 requires the findings to be reported alongside the scalar result, "because the
+/// result alone does not say which assertion produced it, and a reader cannot act on
+/// `unverifiable` without knowing what was missing" — and a verifier "MUST NOT present a
+/// finding as though it were the result".
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Finding {
+    /// The assertion this finding is about.
+    pub assertion: Assertion,
+    /// Its outcome.
+    pub outcome: Outcome,
+    /// Where the assertion lives: empty for the receipt itself, otherwise the `claim_material`
+    /// member names of the embedded receipts leading to it, outermost first (for example
+    /// `["trigger", "introduction"]`).
+    pub receipt_path: Vec<String>,
+    /// For an outcome other than [`Outcome::Verified`], what produced it: the rendered rule
+    /// that fired, or the prerequisite assertion this one rests on.
+    pub detail: Option<String>,
+}
+
+impl Finding {
+    /// Whether this finding enters the reduction of the receipt that was verified.
+    ///
+    /// Every finding does, with the single exception I-D §7.7 states: "for each embedded
+    /// receipt, every required assertion of THAT receipt... with one exception: an embedded
+    /// receipt's CONTENT BINDING is never a required assertion of the receipt that embeds it."
+    /// The exception holds "because no claim type in Section 7.2 rests on an embedded receipt's
+    /// record bytes", and it applies at every level, so a content-binding finding at any
+    /// non-empty path is outside the reduction of the receipt the run was over.
+    #[must_use]
+    pub const fn counts_toward_result(&self) -> bool {
+        !matches!(self.assertion, Assertion::ContentBinding) || self.receipt_path.is_empty()
+    }
+}
+
+/// What a completed verification run produced: one scalar result, and the findings it reduces
+/// from (I-D §7.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Report {
+    /// The scalar result: "one receipt, one value."
+    pub result: Outcome,
+    /// One finding per required assertion the run reached, ordered by receipt path and then by
+    /// [`Assertion::ORDER`].
+    pub findings: Vec<Finding>,
+    /// The rendered claim boundary, present if and only if [`Self::result`] is
+    /// [`Outcome::Verified`].
+    ///
+    /// I-D §7.7: "Only `verified` MAY be rendered in words that assert the property. Neither
+    /// `invalid` nor `unverifiable` may be rendered as asserting OR denying it."
+    pub verdict: Option<Verdict>,
+}
+
+/// A verification run that did not complete, and therefore produced no result at all
+/// (I-D §7.7).
+///
+/// §7.7: "A run that does not complete — an I/O failure, an exhausted heap, a crash — yields no
+/// result in this model. It is a local execution failure, reported as such; it says nothing
+/// about the receipt and MUST NOT be rendered as any of the three values." This type is that
+/// outcome, kept structurally incapable of carrying one of the three values.
+///
+/// This crate is handed an already-parsed receipt and an already-loaded policy, performs no
+/// I/O, and allocates nothing it does not bound, so it produces this error nowhere today:
+/// every rejection it can reach is a completed run with a §7.7 value. The type exists so that
+/// the boundary is in the signature of [`verify_receipt_report`] rather than in prose, and so
+/// that a caller that adds I/O around it — reading the receipt, fetching a policy — has the
+/// one place to report such a failure that is not a statement about the receipt.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("verification run did not complete: {detail}")]
+pub struct ExecutionError {
+    /// What stopped the run, in the verifier's own terms. Never one of the three §7.7 values.
+    pub detail: String,
+}
+
+// ---------------------------------------------------------------------------
 // Rejection reasons
 // ---------------------------------------------------------------------------
 
@@ -807,6 +1016,28 @@ pub enum ReceiptError {
         claimed: String,
     },
 
+    /// The receipt asserts a `keyed-authorized` content binding over a dataset this verifier
+    /// holds no key for (I-D §7.3, §7.7).
+    ///
+    /// This is the I-D's `unverifiable` outcome, not `invalid`. §7.7 lists "a dataset key it is
+    /// not authorized to hold" among the capability gaps, and §7.3 states the consequence for
+    /// this member directly: a `keyed-authorized` binding "whose evidence is present and well
+    /// formed but for which the verifier holds no dataset key... MUST NOT be rendered as though
+    /// it had been established. Both are capability gaps rather than defects: that content
+    /// binding is `unverifiable` (Section 7.7), and the receipt is not thereby invalid."
+    ///
+    /// Distinct from [`Self::ContentBindingMismatch`], which reports carried bytes that DO
+    /// recompute and do not match: that is a cryptographic failure over material in hand, and
+    /// is `invalid` in every configuration.
+    #[error(
+        "dataset `{dataset}` is committed under a keyed mode and this verifier holds no key \
+         for it; its content-binding finding is unverifiable, not invalid (I-D §7.3, §7.7)"
+    )]
+    DatasetKeyNotHeld {
+        /// The dataset whose content-binding finding is affected.
+        dataset: String,
+    },
+
     /// A `trigger-effective` receipt's competing-trigger range is not the required range (§3).
     #[error(
         "competing-trigger range [{got_from}, {got_to}) is not the required \
@@ -863,6 +1094,225 @@ pub enum ReceiptError {
     /// A primitive operation failed on data read from the receipt.
     #[error(transparent)]
     Ahl(#[from] AhlError),
+}
+
+impl ReceiptError {
+    /// Which of I-D §7.7's three values this rejection produces.
+    ///
+    /// §7.7 resolves every rejection site in this document under one principle, and this match
+    /// is that principle applied variant by variant, with no wildcard: a variant added later
+    /// does not inherit a class by accident.
+    ///
+    /// *   "Material the receipt MUST carry and does not; a cryptographic check that fails; a
+    ///     schema failure; a disagreement among carried fields (Section 7.6) — `invalid`. What
+    ///     these share is that they are decidable from the receipt's own bytes, so every
+    ///     verifier decides them alike, in every year."
+    /// *   "A capability the verifier lacks, a local configuration it has not been given, or a
+    ///     local budget it has set — `unverifiable`. What these share is that they are
+    ///     properties of the verifier, not of the artifact."
+    ///
+    /// The division "is not stylistic. A verifier-local condition reported as `invalid` would
+    /// let two verifiers make contradictory statements about one artifact."
+    #[must_use]
+    pub const fn class(&self) -> Outcome {
+        match *self {
+            // Properties of the verifier, never of the artifact — §7.7's second bullet.
+            //
+            // "an artifact declaring a revision earlier than the one this document defines
+            // (Section 2.2)" (§7.7; §7.5 step 1).
+            Self::UnsupportedVersion { .. }
+            // §7.8: "Exhaustion of either budget yields `unverifiable`, never `invalid`: the
+            // artifact has not been shown defective, and a verifier reporting `invalid` here
+            // would contradict a better-resourced verifier's `verified` over the same bytes."
+            | Self::BudgetExhausted { .. }
+            // "an adaptor profile it does not possess" (§7.7); §7.5 step 2: "If the verifier
+            // possesses NO profile under that id, it lacks a capability and the result is
+            // `unverifiable`."
+            | Self::AdaptorUnknown { .. }
+            // A capability the pinned profile does not define, or one this build does not
+            // implement for the profile the receipt names: either way the run is short of a
+            // capability rather than holding a defect (§7.7 second bullet).
+            //
+            // AMBIGUITY (I-D §7.5 step 2): the section settles profile POSSESSION and profile
+            // HASH, and says nothing about a profile that is possessed at the pinned hash and
+            // defines no serialization for material the receipt carries. Read here as a
+            // capability gap, the minimal reading: `unverifiable` asserts nothing about the
+            // artifact, while `invalid` would assert a defect this verifier has not shown.
+            | Self::AdaptorCapabilityUnsupported { .. }
+            // "a local configuration it has not been given" (§7.7). A policy asserting a
+            // capability this build cannot make good on is a property of the verifier.
+            //
+            // AMBIGUITY (I-D §7.7): a misconfigured verifier could also be read as the
+            // non-completing run §7.7 scopes out. Read as `unverifiable` because the run does
+            // complete and reaches a defined stopping point; see [`ExecutionError`].
+            | Self::AdaptorProfileMisconfigured { .. }
+            // Receipt format §1 rule 1: "its absence — no configured genesis anchor, no dataset
+            // key, no adaptor profile — is `unverifiable` and never `invalid`; a configured
+            // anchor DIFFERING from the carried one is also `unverifiable`... since the receipt
+            // may be a perfectly valid receipt of another corpus."
+            | Self::GenesisAnchorMismatch
+            // A witness key the receipt sources from local policy that local policy does not
+            // hold: the set it must appear in is the verifier's own configuration.
+            | Self::WitnessKeyNotTrusted { .. }
+            // §6.3, verifier-resolution table: an identifier whose procedure this verifier does
+            // not implement makes "the content-binding FINDING for that dataset... unverifiable
+            // (Section 7.7)... Nothing else in the receipt is affected, and the receipt is not
+            // invalid evidence."
+            | Self::CanonicalizationUnsupported { .. }
+            // "a dataset key it is not authorized to hold" (§7.7); §7.3 for this member.
+            | Self::DatasetKeyNotHeld { .. }
+            // §7.4: "Such a receipt is `unverifiable` (Section 7.7), for want of material the
+            // mode does not carry. It is NOT `invalid`."
+            | Self::ProducerKeyNotCarried { .. } => Outcome::Unverifiable,
+
+            // Decidable from the receipt's own bytes — §7.7's first bullet.
+            //
+            // "a malformed or non-JCS artifact" (§7.7); a schema failure.
+            Self::Malformed(_)
+            // §7.8: the fixed limits "are properties of the artifact, decided identically by
+            // every verifier in every year, so a receipt exceeding either is `invalid`."
+            | Self::LimitExceeded(_)
+            // A disagreement among carried fields (§7.6, §7.5 step 1).
+            | Self::IdentifierMismatch { .. }
+            // §7.5 step 2: "If it possesses a profile under that id whose HASH DIFFERS from the
+            // receipt's, the receipt and the profile it names disagree, which is decidable from
+            // the bytes in hand, and the result is `invalid`."
+            | Self::AdaptorHashMismatch { .. }
+            // Two carriers of one pinned fact disagreeing (§3.2) — decidable from the bytes.
+            | Self::AdaptorBindingInvalid { .. }
+            // Material the claim type requires, absent or not the material it must be (§7.2).
+            | Self::CheckpointNotBound { .. }
+            | Self::GovernanceRangeNotComplete { .. }
+            | Self::CompetingRangeInsufficient { .. }
+            | Self::ClaimMaterialMissing { .. }
+            | Self::GovernanceSubjectNotManifest { .. }
+            | Self::GovernanceStateNotCurrent { .. }
+            | Self::TriggerNotAuthorized { .. }
+            // Cryptographic checks that fail.
+            | Self::CheckpointSignatureInvalid
+            | Self::WitnessCosignatureInvalid { .. }
+            | Self::CheckpointUnwitnessed { .. }
+            | Self::InclusionPathInvalid { .. }
+            | Self::ConsistencyPathInvalid
+            | Self::ClaimMaterialPathInvalid { .. }
+            | Self::RangeProofInvalid { .. }
+            | Self::TreeMaterialInvalid { .. }
+            | Self::ClosureMismatch(_)
+            | Self::EnvelopeSignatureInvalid { .. }
+            // §7.5 step 5: "A recomputed commitment differing from the one the subject statement
+            // names is a cryptographic failure and the result is `invalid`."
+            | Self::ContentBindingMismatch { .. }
+            // §6.3: the procedure IS implemented and the carried bytes fail it.
+            | Self::CanonicalizationFailed { .. }
+            // §6.3: "a verifier that implements the procedure and finds presence wrong reports
+            // that dataset's content-binding finding `invalid`."
+            | Self::MediaTypePresenceInvalid { .. }
+            // §6.3: "A mismatch in either member makes the receipt `invalid`; it is never
+            // downgraded."
+            | Self::ClaimDescriptorMismatch { .. }
+            // Schema and structural failures over carried governance material.
+            | Self::EntryIndexBeyondCheckpoint { .. }
+            | Self::KeyNotBound { .. }
+            | Self::WitnessNotDeclared { .. }
+            | Self::WitnessIdentityMismatch { .. }
+            | Self::GovernanceChainInvalid(_)
+            | Self::ManifestSchemaInvalid { .. }
+            // §7.7 names this one expressly: "A missing `governance.rotation_proofs[]` element
+            // for a governance-key rotation the carried chain contains... falls squarely in the
+            // first of those: the receipt was required to carry it, and its absence is not a
+            // capability the verifier lacks."
+            | Self::RotationProofInvalid { .. }
+            // Disagreements among carried fields (§7.6).
+            | Self::AssuranceMismatch { .. }
+            | Self::RecordSubjectMismatch { .. }
+            | Self::SubjectManifestPresence { .. }
+            | Self::SubjectManifestBindingInvalid(_)
+            | Self::EmbeddedOrderingViolation { .. }
+            | Self::EmbeddedSubjectMismatch { .. }
+            | Self::EmbeddedClaimTypeMismatch { .. }
+            // A combination the container format leaves no material to evidence: a disagreement
+            // between two members of the receipt, decided identically by every verifier.
+            //
+            // AMBIGUITY (I-D §7.7): the section does not name this case. Read as `invalid`
+            // because nothing about the verifier decides it — the same bytes are refused by
+            // every verifier in every year, which is §7.7's own test for the first bullet.
+            | Self::FormatConflict { .. }
+            // A decoding or field failure over the receipt's own bytes.
+            | Self::Ahl(_) => Outcome::Invalid,
+        }
+    }
+
+    /// Which required assertion (I-D §7.7) this rejection belongs to.
+    ///
+    /// Exhaustive and without a wildcard, for the same reason [`Self::class`] is: every check
+    /// this crate performs maps to exactly one assertion, and a variant added later must be
+    /// placed deliberately rather than inherit a home.
+    #[must_use]
+    pub fn assertion(&self) -> Assertion {
+        match *self {
+            Self::UnsupportedVersion { .. } => Assertion::Versions,
+            Self::LimitExceeded(_) | Self::BudgetExhausted { .. } => Assertion::ResourceLimits,
+            Self::Malformed(_) | Self::IdentifierMismatch { .. } | Self::Ahl(_) => {
+                Assertion::Structure
+            }
+            Self::AdaptorUnknown { .. }
+            | Self::AdaptorHashMismatch { .. }
+            | Self::AdaptorBindingInvalid { .. }
+            | Self::AdaptorCapabilityUnsupported { .. }
+            | Self::AdaptorProfileMisconfigured { .. } => Assertion::AdaptorProfile,
+            Self::EntryIndexBeyondCheckpoint { .. }
+            | Self::InclusionPathInvalid { .. }
+            | Self::ConsistencyPathInvalid => Assertion::Anchoring,
+            Self::GenesisAnchorMismatch
+            | Self::GovernanceChainInvalid(_)
+            | Self::ManifestSchemaInvalid { .. }
+            | Self::RotationProofInvalid { .. }
+            | Self::GovernanceRangeNotComplete { .. }
+            | Self::KeyNotBound { .. } => Assertion::Governance,
+            Self::CheckpointSignatureInvalid
+            | Self::WitnessCosignatureInvalid { .. }
+            | Self::WitnessKeyNotTrusted { .. }
+            | Self::WitnessNotDeclared { .. }
+            | Self::WitnessIdentityMismatch { .. }
+            | Self::CheckpointUnwitnessed { .. } => Assertion::CheckpointAuthentication,
+            Self::EnvelopeSignatureInvalid { .. } | Self::ProducerKeyNotCarried { .. } => {
+                Assertion::EnvelopeValidity
+            }
+            Self::AssuranceMismatch { .. }
+            | Self::RecordSubjectMismatch { .. }
+            | Self::SubjectManifestPresence { .. }
+            | Self::SubjectManifestBindingInvalid(_)
+            | Self::EmbeddedOrderingViolation { .. }
+            | Self::EmbeddedSubjectMismatch { .. }
+            | Self::FormatConflict { .. } => Assertion::CrossField,
+            // The one variant whose home depends on its own payload: the same range-proof
+            // recomputation authenticates governance currency (§7.5.1 4c) and competing-trigger
+            // and completeness material (§7.2), and the two are different assertions.
+            Self::RangeProofInvalid { what, .. } => {
+                if what == "governance" {
+                    Assertion::Governance
+                } else {
+                    Assertion::ClaimMaterial
+                }
+            }
+            Self::CheckpointNotBound { .. }
+            | Self::CompetingRangeInsufficient { .. }
+            | Self::GovernanceSubjectNotManifest { .. }
+            | Self::GovernanceStateNotCurrent { .. }
+            | Self::TriggerNotAuthorized { .. }
+            | Self::EmbeddedClaimTypeMismatch { .. }
+            | Self::ClaimMaterialMissing { .. }
+            | Self::ClaimMaterialPathInvalid { .. }
+            | Self::TreeMaterialInvalid { .. }
+            | Self::ClosureMismatch(_) => Assertion::ClaimMaterial,
+            Self::CanonicalizationUnsupported { .. }
+            | Self::CanonicalizationFailed { .. }
+            | Self::MediaTypePresenceInvalid { .. }
+            | Self::ClaimDescriptorMismatch { .. }
+            | Self::ContentBindingMismatch { .. }
+            | Self::DatasetKeyNotHeld { .. } => Assertion::ContentBinding,
+        }
+    }
 }
 
 type Result<T> = core::result::Result<T, ReceiptError>;
@@ -4771,13 +5221,13 @@ fn verify_content_binding(
     let recomputed = match ctx.assurance.content_binding.as_str() {
         "plain-verified" if declared_mode == "plain" => commit_plain(dataset, &ddig, &bytes)?,
         "keyed-authorized" if declared_mode == "keyed" => {
-            let key = ctx.policy.dataset_keys.get(dataset).ok_or_else(|| {
-                ReceiptError::ContentBindingMismatch {
-                    mode: "keyed-authorized".to_owned(),
-                    recomputed: "<no dataset key held>".to_owned(),
-                    claimed: record.to_owned(),
-                }
-            })?;
+            // I-D §7.3, §7.7: holding no key for the dataset is a capability gap on THIS
+            // dataset's content binding, never a demonstrated defect, so it is reported under
+            // its own `unverifiable` variant rather than as a commitment that did not match.
+            let key =
+                ctx.policy.dataset_keys.get(dataset).ok_or_else(|| {
+                    ReceiptError::DatasetKeyNotHeld { dataset: dataset.to_owned() }
+                })?;
             commit_keyed(key, dataset, &ddig, &bytes)?
         }
         // A binding mode the dataset's declared commitment mode cannot satisfy (§2.1).
