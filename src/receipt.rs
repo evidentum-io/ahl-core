@@ -2301,11 +2301,14 @@ fn check_merged_order(walked_index: u64, index: u64) -> Result<()> {
 /// [`crate::EnvelopeCheck`] separates cannot be conflated at one call site and kept apart at
 /// another. A signature that does not verify under a key the presented state DOES hold is a
 /// demonstrated defect and is `invalid` in either mode (I-D §7.5.1 4d: "An envelope carrying a
-/// non-verifying entry... is invalid"). A `key_id` the presented state holds no key for is the
-/// mode-dependent case: `invalid` under `enumerated`, where 4c's complete range forecloses
-/// omission, and [`ReceiptError::ProducerKeyNotCarried`] — the I-D's `unverifiable` — under
-/// `declared`, where §7.4 says the verifier is short of material rather than looking at a
-/// defect.
+/// non-verifying entry... is invalid"), and [`crate::check_envelope`] gives it precedence over
+/// an unresolved key on the SAME envelope, so a multi-signature envelope carrying both defects
+/// arrives here as `SignatureInvalid` whatever order the producer wrote them in. A `key_id` the
+/// presented state holds no key for — every resolvable entry on that envelope having verified —
+/// is the mode-dependent case: `invalid` under `enumerated`, where 4c's complete range
+/// forecloses omission, and [`ReceiptError::ProducerKeyNotCarried`] — the I-D's `unverifiable`
+/// — under `declared`, where §7.4 says the verifier is short of material rather than looking at
+/// a defect.
 fn envelope_outcome(check: &crate::EnvelopeCheck, mode: &str, index: u64) -> Result<()> {
     match check {
         crate::EnvelopeCheck::Verified => Ok(()),

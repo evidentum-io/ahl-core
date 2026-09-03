@@ -354,9 +354,16 @@ pub enum EnvelopeCheck {
     /// envelope carries no signature entries at all — unsigned objects are not AHL statements
     /// (spec §2.1).
     SignatureInvalid,
-    /// A signature entry names a `key_id` the resolver holds no key for.
+    /// A signature entry names a `key_id` the resolver holds no key for, AND every entry that
+    /// did resolve verified.
+    ///
+    /// The second half is the whole of the difference between "the verifier is short of
+    /// material" and "the verifier is short of material and has also been handed a forgery".
+    /// One resolvable entry that fails to verify makes the envelope [`Self::SignatureInvalid`]
+    /// whatever else the array holds (spec §2.1: "invalid regardless of how many other entries
+    /// verify").
     KeyNotResolved {
-        /// The `key_id` that resolved to nothing.
+        /// The first `key_id`, in array order, that resolved to nothing.
         key_id: String,
     },
 }
@@ -364,9 +371,24 @@ pub enum EnvelopeCheck {
 /// Verify every signature on an envelope against a `key_id -> pubkey` resolver, reporting
 /// WHICH way it failed.
 ///
-/// Signature entries are examined in array order and the first failure is returned, so an
-/// envelope carrying both kinds of defect reports whichever comes first — the order the
-/// producer chose, not a precedence this function invents.
+/// **EVERY entry is examined, and the result does not depend on the order the producer chose.**
+/// Spec §2.1 makes envelope validity "the conjunction of all entries", and an envelope
+/// "carrying a non-verifying entry, or an entry naming a key that is not active at that index,
+/// is invalid regardless of how many other entries verify". The two failures are therefore not
+/// alternatives to be raced: an envelope can carry both at once, and the AHL I-D's §7.7
+/// reduction fixes which one is reported — "`invalid` if any required finding is `invalid`;
+/// otherwise `unverifiable` if any required finding is `unverifiable`… `invalid` dominates
+/// `unverifiable` because a demonstrated defect in required material is a fact about the
+/// artifact, while a capability gap is not."
+///
+/// So the precedence is `SignatureInvalid` > `KeyNotResolved` > `Verified`, and it is applied
+/// as a sweep rather than an early return: a resolvable entry that fails to verify wins
+/// immediately, an unresolved `key_id` is only REMEMBERED, and it is returned only once every
+/// resolvable entry has verified. Returning on the first unresolved key instead would let a
+/// producer downgrade a demonstrated forgery to a capability gap by ordering the array — a
+/// signature the presented key state can prove is bad, reported as material the verifier merely
+/// lacks. Where several entries are unresolved, the FIRST is named; they are one finding under
+/// §2.1's conjunction, and naming one of them is a message-detail choice, not a verdict.
 ///
 /// # Errors
 ///
@@ -387,17 +409,20 @@ where
         return Ok(EnvelopeCheck::SignatureInvalid);
     }
     let msg = jcs(payload);
+    let mut unresolved: Option<String> = None;
     for entry in signatures {
         let key_id = field_str(entry, "key_id")?;
         let sig = field_str(entry, "sig")?;
         let Some(pubkey) = resolve(key_id) else {
-            return Ok(EnvelopeCheck::KeyNotResolved { key_id: key_id.to_owned() });
+            unresolved.get_or_insert_with(|| key_id.to_owned());
+            continue;
         };
         if !verify_signature(&decode_pubkey(&pubkey)?, &msg, sig)? {
             return Ok(EnvelopeCheck::SignatureInvalid);
         }
     }
-    Ok(EnvelopeCheck::Verified)
+    Ok(unresolved
+        .map_or(EnvelopeCheck::Verified, |key_id| EnvelopeCheck::KeyNotResolved { key_id }))
 }
 
 /// Verify every signature on an envelope against a `key_id -> pubkey` resolver.
@@ -1021,6 +1046,44 @@ mod tests {
         assert_eq!(
             check_envelope(&unsigned, |_| None).expect("well formed"),
             EnvelopeCheck::SignatureInvalid
+        );
+    }
+
+    /// Spec §2.1 makes envelope validity "the conjunction of all entries", so an envelope
+    /// carrying BOTH defects is invalid whichever order the producer wrote them in: the AHL
+    /// I-D's §7.7 reduction has `invalid` dominate `unverifiable`. Returning on the first
+    /// unresolved key would let the array order downgrade a demonstrated forgery to a
+    /// capability gap.
+    #[test]
+    fn a_resolvable_bad_signature_outranks_an_unresolvable_key_in_either_order() {
+        let signer = key();
+        let payload = json!({ "type": "key" });
+        let good = signer.sign(&jcs(&payload));
+        let bad = signer.sign(&jcs(&json!({ "type": "manifest" })));
+        // Only `signer` resolves; `sha256:00…` is a key the state does not hold.
+        let resolve = |id: &str| (id == signer.key_id()).then(|| signer.pubkey());
+        let absent = commitment(0);
+
+        let two = |first: Value, second: Value| json!({ "payload": payload, "signatures": [first, second] });
+        let uncarried = json!({ "key_id": absent, "sig": good });
+        let forged = json!({ "key_id": signer.key_id(), "sig": bad });
+        let genuine = json!({ "key_id": signer.key_id(), "sig": good });
+
+        for (env, case) in [
+            (two(uncarried.clone(), forged.clone()), "uncarried first"),
+            (two(forged, uncarried.clone()), "forged first"),
+        ] {
+            assert_eq!(
+                check_envelope(&env, resolve).expect("well formed"),
+                EnvelopeCheck::SignatureInvalid,
+                "{case}: a resolvable non-verifying entry is invalid regardless of position"
+            );
+        }
+
+        // With every resolvable entry verifying, the unresolved key is what is left to report.
+        assert_eq!(
+            check_envelope(&two(uncarried, genuine), resolve).expect("well formed"),
+            EnvelopeCheck::KeyNotResolved { key_id: absent }
         );
     }
 

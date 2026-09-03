@@ -589,6 +589,48 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 32 }),
         },
     });
+    out.push(Vector {
+        file: "statement-anchored-uncarried-key-with-bad-signature-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 33,
+            anchor: cp34,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: None,
+            note: "MUST FAIL, as INVALID — the third case, where BOTH of the preceding two \
+                   defects sit on ONE envelope, and the order they sit in must not decide the \
+                   outcome. Entry 33 carries two signature entries. The FIRST names \
+                   `producer-2`, which reaches a verifier only through a `key` statement and \
+                   which declared mode therefore does not carry — the \
+                   `statement-anchored-uncarried-key-transition-must-fail.ahl` case. The SECOND \
+                   names `producer-1`, which manifest version 2 lists and this chain resolves, \
+                   with a `sig` that is not a signature `producer-1` ever produced — the \
+                   `statement-anchored-non-verifying-envelope-must-fail.ahl` case. I-D §2.1 \
+                   makes envelope validity \"the conjunction of all entries\", and an envelope \
+                   \"carrying a non-verifying entry... is invalid regardless of how many other \
+                   entries verify\"; §7.7 reduces the two findings the same way — \"`invalid` \
+                   if any required finding is `invalid`; otherwise `unverifiable` if any \
+                   required finding is `unverifiable`\", because \"a demonstrated defect in \
+                   required material is a fact about the artifact, while a capability gap is \
+                   not\". So the result is the SIGNATURE failure. A verifier that stopped at \
+                   the first unresolvable `key_id` would report this receipt as unverifiable, \
+                   and a producer could then downgrade any forgery to a capability gap by \
+                   listing an uncarried key ahead of it."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §2.1 / §7.7 — a resolvable non-verifying entry is invalid however the \
+                   envelope orders its signatures",
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 33 }),
+        },
+    });
 
     // --- record-ingested ---------------------------------------------------------
     let ingested = |content_binding: &'static str, bytes: &[u8], note: &str| {

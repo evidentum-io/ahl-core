@@ -75,6 +75,13 @@
       "rule": "I-D §7.5.1 4d — a resolvable key whose signature does not verify is invalid in either governance mode"
     },
     {
+      "claim_type": "statement-anchored",
+      "expect": "reject",
+      "file": "statement-anchored-uncarried-key-with-bad-signature-must-fail.ahl",
+      "reason": "envelope signature at entry index 33 did not verify",
+      "rule": "I-D §2.1 / §7.7 — a resolvable non-verifying entry is invalid however the envelope orders its signatures"
+    },
+    {
       "boundary": "the subject ingestion introduced the named record into the corpus; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content verified against the commitment by an authorized key holder",
       "claim_type": "record-ingested",
       "embedded_receipts": 0,

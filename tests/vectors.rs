@@ -1294,7 +1294,14 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         | "propagation-complete-challenge-trigger-must-fail.ahl" => {
             matches!(error, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. })
         }
-        "trigger-effective-unverified-authority-signature-must-fail.ahl" => {
+        // Entry 33 carries a genuine signature from a non-authority key beside a non-verifying
+        // one naming the authority. The enumerated vector reaches it as 4d over the subject's
+        // own envelope; the declared one reaches it with the FIRST entry additionally
+        // unresolvable, and I-D §2.1's conjunction plus §7.7's reduction still put the
+        // signature failure on top. Asserting the specific variant is the point of the second:
+        // `ProducerKeyNotCarried` there would be the array order deciding a verdict.
+        "trigger-effective-unverified-authority-signature-must-fail.ahl"
+        | "statement-anchored-uncarried-key-with-bad-signature-must-fail.ahl" => {
             matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 33 })
         }
         "propagation-complete-past-declared-checkpoint-must-fail.ahl" => matches!(
