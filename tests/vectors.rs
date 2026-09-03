@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ahl_core::bitemporal::{Scope, ValidTime};
-use ahl_core::closure::{affected_set, RecordRef, TreeMaterial};
+use ahl_core::closure::{affected_set, edges, RecordRef, TreeMaterial};
 use ahl_core::descriptor;
 use ahl_core::receipt::{
     verify_receipt, AdaptorCapabilities, AdaptorProfile, Limits, ReceiptError, TrustPolicy,
@@ -26,7 +26,7 @@ use ahl_core::{
     checkpoint, checkpoint_signing_bytes, cosignature_bytes, decode_pubkey, entry_id, field_str,
     hash_hex, inclusion_proof, jcs, leaf_hash, parse_hash_hex, proof_from_hex, proof_path_hex,
     range_proof, sha256_hex, statement_id, tree_root, verify_envelope, verify_inclusion_proof,
-    verify_signature, TestKey,
+    verify_signature, AhlError, TestKey,
 };
 use serde_json::{json, Value};
 
@@ -3819,6 +3819,94 @@ fn dedup_keys_on_the_whole_receipt_not_the_envelope() {
         verify_receipt(&control, &policy),
         Err(ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. })
     ));
+}
+
+/// The committed-tree material the three `record-derived-input-set-*-must-fail.ahl` vectors
+/// carry, reassembled from the vectors themselves.
+///
+/// There is no third source of truth for it. Entry 37's batch is the corpus's non-conforming
+/// tree material, and it is deliberately absent from `vectors/merkle/`, where a reader would
+/// take it for conforming material; the receipt vectors are where it lives, each carrying one
+/// output leaf and the COMPLETE input set that leaf commits. Reassembling it here is what makes
+/// the closure regression below a statement about the same bytes the receipt vectors are
+/// rejected over, rather than about a copy that could drift from them.
+fn defective_tree_material() -> TreeMaterial {
+    let mut trees = tree_material();
+    let batch = &statement_vectors()[37]["envelope"]["payload"];
+    let mut outputs: Vec<(u64, Value)> = Vec::new();
+    for name in [
+        "record-derived-input-set-unsorted-must-fail.ahl",
+        "record-derived-input-set-duplicate-record-must-fail.ahl",
+        "record-derived-input-set-non-canonical-record-must-fail.ahl",
+    ] {
+        let (_, receipt) = read_receipt(name);
+        let material = &receipt["claim_material"];
+        let leaf = material["batch_leaf"].clone();
+        let root = field_str(&leaf["inputs"], "input_set_root").expect("input_set_root").to_owned();
+        let mut members: Vec<(u64, Value)> = material["input_members"]
+            .as_array()
+            .expect("input_members")
+            .iter()
+            .map(|member| {
+                (member["input_index"].as_u64().expect("input_index"), member["input"].clone())
+            })
+            .collect();
+        members.sort_by_key(|(index, _)| *index);
+        trees.insert(root, members.into_iter().map(|(_, input)| input).collect());
+        outputs.push((material["leaf_index"].as_u64().expect("leaf_index"), leaf));
+    }
+    outputs.sort_by_key(|(index, _)| *index);
+    trees.insert(
+        field_str(batch, "outputs_root").expect("outputs_root").to_owned(),
+        outputs.into_iter().map(|(_, leaf)| leaf).collect(),
+    );
+    trees
+}
+
+/// I-D §2.7: "Tree rules, identical for every AHL tree — outputs, input sets, and
+/// dispositions." Closure traversal is one of the two consumers of committed tree material, and
+/// it must reject a non-conforming tree exactly as receipt verification does.
+///
+/// `CONFORMING_TREE_PREFIX` caps every other closure walk in this suite at entry 37, so without
+/// this test nothing shows what happens at the entry the cap exists for — the rejection would
+/// be asserted only about receipts. Here the walk is deliberately run one entry further, over
+/// the SAME committed material the receipt vectors carry: entry 37's outputs tree is well
+/// formed and opens correctly, and the first input-set tree the traversal then opens carries a
+/// `record` that is not a family string, so the traversal stops on the tree rule rather than
+/// reading an edge out of material it has not validated.
+#[test]
+fn closure_traversal_rejects_a_non_conforming_committed_tree() {
+    let envelopes = envelopes(&statement_vectors());
+    let trees = defective_tree_material();
+
+    edges(&envelopes, &trees, CONFORMING_TREE_PREFIX)
+        .expect("the conforming prefix must traverse cleanly, or the cap is in the wrong place");
+
+    let error = edges(&envelopes, &trees, CONFORMING_TREE_PREFIX + 1)
+        .expect_err("a traversal reaching entry 37 must be refused by the §2.7 tree rules");
+    assert!(
+        matches!(&error, AhlError::InvalidCommitment(record) if record == "not-a-commitment"),
+        "the tree rule that fires must be the one the material breaks, got: {error}"
+    );
+
+    // The other two defects are reached by opening their own trees directly, since a traversal
+    // stops at the first one. Both are the strict-ascending rule, which is simultaneously the
+    // sort rule and the no-duplicate rule of §2.7.
+    for name in [
+        "record-derived-input-set-unsorted-must-fail.ahl",
+        "record-derived-input-set-duplicate-record-must-fail.ahl",
+    ] {
+        let (_, receipt) = read_receipt(name);
+        let inputs = &receipt["claim_material"]["batch_leaf"]["inputs"];
+        let root = field_str(inputs, "input_set_root").expect("input_set_root");
+        let count = inputs["input_set_count"].as_u64().expect("input_set_count");
+        let error = ValidatedLeafSet::open(root, count, trees[root].clone())
+            .expect_err("a tree breaking the §2.7 ordering rule must not open");
+        assert!(
+            matches!(&error, AhlError::TreeUnsorted { root: named, .. } if named == root),
+            "{name}: expected the §2.7 ordering rule for {root}, got: {error}"
+        );
+    }
 }
 
 #[test]

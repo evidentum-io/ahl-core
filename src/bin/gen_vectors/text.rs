@@ -238,7 +238,10 @@ ordinary artifact of a real log rather than something a producer must manufactur
    reaches and validates it against these same rules before reading an edge, so a closure walk
    reaching entry 37 fails by §2.7. Every closure scenario this corpus publishes stops at tree
    size 28 or below, and the three defective trees are deliberately absent from
-   `vectors/merkle/`, where they would be read as conforming material.
+   `vectors/merkle/`, where they would be read as conforming material. That rejection is
+   asserted rather than assumed: `tests/vectors.rs` reassembles the defective material from
+   the three receipt vectors that carry it and runs a traversal one entry PAST the conforming
+   prefix, which must stop on the tree rule the material breaks.
 12. **Where governance material travels.** I-D §7.1 defines every `governance.chain[]` element
    as "an anchored manifest statement's complete envelope", and §7.4 says the other governance
    type travels elsewhere: "`governance.chain[]` carries manifest statements; producer-key
