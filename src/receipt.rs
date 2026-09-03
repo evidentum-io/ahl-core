@@ -1852,6 +1852,23 @@ impl Run {
         Ok(None)
     }
 
+    /// Record the outcome of this receipt's content binding.
+    ///
+    /// One rejection is not about the binding at all: where the descriptor's manifest version
+    /// was never reached, because the induction stopped at a rotation it could not
+    /// authenticate, the finding rests on `governance` and is reported as resting on it. The
+    /// rejection is still registered, so [`verify_receipt`] has one to return.
+    fn settle_content_binding(&mut self, outcome: Result<()>) -> Result<()> {
+        if let Err(error @ ReceiptError::GovernanceRotationUnverifiable { .. }) = outcome {
+            self.phase(Assertion::ContentBinding);
+            self.pass_resting_on(Assertion::ContentBinding, &[Assertion::Governance]);
+            self.tolerate::<()>(Err(error))?;
+            self.phase(Assertion::ClaimMaterial);
+            return Ok(());
+        }
+        self.tolerate(outcome).map(|_| ())
+    }
+
     /// Turn the run into the report I-D §7.7 requires: the findings, and the scalar result
     /// they reduce to.
     ///
@@ -2060,6 +2077,33 @@ impl Governance<'_> {
         }
     }
 
+    /// The manifest a statement's `manifest` binding names, for a check that needs its CONTENT
+    /// — the dataset descriptors of §6.3 above all.
+    ///
+    /// The two ways this can fail are not the same failure, and I-D §7.7 separates them. A
+    /// version the induction WALKED and does not hold is material the receipt was required to
+    /// carry and does not: `invalid`, decidable from the receipt's own bytes. A version the
+    /// induction never reached, because it stopped at a rotation it could not authenticate, is
+    /// a capability this verifier lacks: `unverifiable`, and a better-equipped verifier would
+    /// resolve the same bytes. Reporting the second as the first would let two verifiers
+    /// contradict each other over one artifact.
+    fn manifest_for_binding(&self, version_id: &str) -> Result<(u64, &Value)> {
+        self.manifest_by_version_id.get(version_id).copied().map_or_else(
+            || {
+                self.unestablished_from.map_or_else(
+                    || {
+                        Err(ReceiptError::GovernanceChainInvalid(format!(
+                            "manifest version `{version_id}` named by the subject statement's \
+                             `manifest` binding is not in the carried governance chain"
+                        )))
+                    },
+                    |entry_index| Err(ReceiptError::GovernanceRotationUnverifiable { entry_index }),
+                )
+            },
+            Ok,
+        )
+    }
+
     /// Whether K is established for the manifest version active for a checkpoint of this size.
     ///
     /// A checkpoint of `tree_size` commits entries `[0, tree_size)`, so the manifest version
@@ -2069,13 +2113,7 @@ impl Governance<'_> {
     }
 }
 
-impl<'a> Governance<'a> {
-    /// The `(entry_index, payload)` of the manifest named by a statement's `manifest` field
-    /// (I-D §2.2, §2.4.5).
-    fn manifest_by_version_id(&self, version_id: &str) -> Option<(u64, &'a Value)> {
-        self.manifest_by_version_id.get(version_id).copied()
-    }
-
+impl Governance<'_> {
     /// The manifest version id ACTIVE at `index` (I-D §2.2). See [`active_manifest_version_id`].
     fn active_manifest_version_id_at(&self, index: u64) -> Option<String> {
         active_manifest_version_id(&self.manifests, &self.manifest_by_version_id, index)
@@ -5921,7 +5959,7 @@ fn verify_record_ingested(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     ctx.require_subject_type("ingestion")?;
     let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
     let binding = verify_content_binding(ctx, run, dataset, record, "record_bytes");
-    run.tolerate(binding).map(|_| ())
+    run.settle_content_binding(binding)
 }
 
 /// Recompute a commitment from carried canonical bytes per the dataset's declared mode
@@ -6001,13 +6039,7 @@ fn verify_content_binding(
     // From here the receipt's own content binding is what is being settled.
     run.phase(Assertion::ContentBinding);
     let manifest_version_id = text(ctx.payload, "manifest")?;
-    let (_, manifest) =
-        ctx.governance.manifest_by_version_id(manifest_version_id).ok_or_else(|| {
-            ReceiptError::GovernanceChainInvalid(format!(
-                "manifest version `{manifest_version_id}` named by the subject statement's \
-             `manifest` binding is not in the carried governance chain"
-            ))
-        })?;
+    let (_, manifest) = ctx.governance.manifest_for_binding(manifest_version_id)?;
     let declared = obj(obj(manifest, "datasets")?, dataset)?;
     let declared_mode = text(declared, "commitment_mode")?.to_owned();
     // `datasets_object` already validated this manifest's descriptor syntax at manifest-schema
@@ -6204,7 +6236,7 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     }
 
     let binding = verify_content_binding(ctx, run, &claimed.0, &claimed.1, "output_bytes");
-    run.tolerate(binding).map(|_| ())
+    run.settle_content_binding(binding)
 }
 
 /// `input_members` (I-D §7.2): each proves one input's membership in the leaf's input set.
@@ -7246,7 +7278,7 @@ mod tests {
 
     use super::{
         log_key_set, verify_rotation_proof, witness_key_set, AdaptorCapabilities, AdaptorProfile,
-        Assertion, Limits, Outcome, ReceiptError, RotationContext, Run, TrustPolicy,
+        Assertion, Governance, Limits, Outcome, ReceiptError, RotationContext, Run, TrustPolicy,
         MAX_EMBEDDED_RECEIPTS, TEST_ADAPTOR_PROFILE_ID,
     };
     use crate::{
@@ -7263,6 +7295,57 @@ mod tests {
     /// chain hop's own committed inclusion path before the rotation check is ever reached —
     /// the same structural constraint documented for the `media_type` presence test in
     /// `tests/vectors.rs`.
+    /// A manifest binding the induction never reached is a capability gap, not a defect.
+    ///
+    /// I-D §7.7 divides the two: material the receipt was required to carry and does not is
+    /// `invalid`, while "a capability the verifier lacks, a local configuration it has not been
+    /// given" is `unverifiable`. A manifest version absent from a chain the induction walked in
+    /// full is the first; the same version absent because the induction stopped at a rotation
+    /// it could not authenticate is the second, and a better-equipped verifier resolves it from
+    /// the same bytes.
+    ///
+    /// Tested here rather than through a vector because no receipt in this corpus can reach the
+    /// lookup with an unresolvable binding: the descriptor is read only where
+    /// `assurance.content_binding` is not `none`, and every statement anchored after the
+    /// corpus's one rotation either binds the PRE-rotation manifest (entry 34, stale by
+    /// construction) or carries no content evidence at all (the triggers, the key statements,
+    /// and the batch at entry 37, whose input-set trees are deliberately non-conforming).
+    #[test]
+    fn a_manifest_beyond_the_induction_is_unverifiable_not_invalid() {
+        let payload = json!({ "type": "manifest" });
+        let by_version_id =
+            std::collections::BTreeMap::from([("sha256:v1".to_owned(), (0u64, &payload))]);
+        let governance = |unestablished_from| Governance {
+            mode: "declared",
+            manifests: vec![(0, &payload)],
+            events: Vec::new(),
+            manifest_by_version_id: by_version_id.clone(),
+            unestablished_from,
+        };
+
+        // Walked in full: a version the chain does not carry is material the receipt owed.
+        let error = governance(None)
+            .manifest_for_binding("sha256:v2")
+            .expect_err("the chain carries no such version");
+        assert!(matches!(error, ReceiptError::GovernanceChainInvalid(_)), "{error}");
+        assert_eq!(error.class(), Outcome::Invalid);
+
+        // Stopped at a rotation: the same lookup is a gap in what this verifier could
+        // establish, and never a statement about the artifact.
+        let error = governance(Some(25))
+            .manifest_for_binding("sha256:v2")
+            .expect_err("the induction never reached that version");
+        assert!(
+            matches!(error, ReceiptError::GovernanceRotationUnverifiable { entry_index: 25 }),
+            "{error}"
+        );
+        assert_eq!(error.class(), Outcome::Unverifiable);
+        assert_eq!(error.assertion(), Assertion::Governance);
+
+        // A version the induction did reach resolves either way.
+        assert!(governance(Some(25)).manifest_for_binding("sha256:v1").is_ok());
+    }
+
     /// I-D §7.8's second fixed limit: "Maximum embedded receipts per file: 64."
     ///
     /// Tested directly on the counter rather than through a receipt, because no receipt can

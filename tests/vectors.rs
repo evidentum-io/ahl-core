@@ -1952,6 +1952,13 @@ fn an_unauthenticated_rotation_applies_no_effect_to_the_key_state() {
                 "{name}: {assertion} needs no key"
             );
         }
+        // And nothing the gap reached is reported as a DEFECT: a capability the verifier lacks
+        // never becomes a statement about the artifact (I-D §7.7).
+        assert!(
+            report.findings.iter().all(|finding| finding.outcome != Outcome::Invalid),
+            "{name}: a capability gap must produce no `invalid` finding: {:#?}",
+            report.findings
+        );
     }
 
     // A chain that rotates nothing is untouched by the same gap: only the assertions that rest
