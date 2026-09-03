@@ -371,7 +371,10 @@ pub enum EnvelopeCheck {
 /// Verify every signature on an envelope against a `key_id -> pubkey` resolver, reporting
 /// WHICH way it failed.
 ///
-/// **EVERY entry is examined, and the result does not depend on the order the producer chose.**
+/// **Unresolved entries are swept past, and the result does not depend on the order the
+/// producer chose: the first resolvable entry that fails to verify ends the sweep with a
+/// conclusive `SignatureInvalid`, and an unresolved key is reported only once every
+/// resolvable entry has verified.**
 /// Spec §2.1 makes envelope validity "the conjunction of all entries", and an envelope
 /// "carrying a non-verifying entry, or an entry naming a key that is not active at that index,
 /// is invalid regardless of how many other entries verify". The two failures are therefore not
