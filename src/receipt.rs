@@ -5189,11 +5189,13 @@ fn decode_enumeration(
 /// does not run: the envelope-validity assertion rests on `governance` and says so, exactly as
 /// the subject's does.
 ///
-/// Returns the entry indexes it VERIFIED. One logical envelope is verified — and charged to the
-/// §7.8 verification-work budget — exactly once: under enumerated governance the same manifest
-/// is also carried by the enumerated range (§7.5.1 4c requires the chain to show every manifest
-/// the range reveals), and charging it twice could exhaust a budget sized for the receipt and
-/// turn a `verified` run into `unverifiable` over nothing the receipt did.
+/// Returns the entry indexes it VERIFIED. The set lets the enumerated sweep skip one repeated
+/// envelope-signature verification of the same envelope: under enumerated governance the same
+/// manifest is also carried by the enumerated range (§7.5.1 4c requires the chain to show every
+/// manifest the range reveals), and repeating the signature check there would charge the §7.8
+/// verification-work budget a second time for one 4d duty. Other charges over that entry — the
+/// range proof, for one — are separate work and stay where they are; §7.8 makes the budget
+/// verifier-local policy and defines no unit of work.
 fn verify_void_chain_envelopes(
     governance: &Governance<'_>,
     run: &mut Run,
@@ -7714,8 +7716,8 @@ mod tests {
         assert!(verified.is_empty(), "an unverified index is not an exempt one");
     }
 
-    /// One logical envelope, one verification — and one charge against the §7.8
-    /// verification-work budget.
+    /// One envelope-signature verification per carried envelope under 4d — the repeated
+    /// signature check is the one charge this suppresses, not every charge over that entry.
     ///
     /// Under enumerated governance the void chain hop is also an entry of the range, since
     /// §7.5.1 4c requires the chain to show every manifest the range reveals. Verifying it in
