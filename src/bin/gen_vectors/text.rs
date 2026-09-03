@@ -55,11 +55,23 @@ rather than silently mis-verifying wherever the gap could otherwise be mistaken 
     `Result<Verdict, ReceiptError>` it always was, rather than a completed-run outcome carrying
     a scalar result plus a findings list. A handful of `ReceiptError` variants represent the
     I-D's `unverifiable` outcome rather than `invalid` — `UnsupportedVersion` (I-D §7.1
-    "Revision and rule selection") and `CanonicalizationUnsupported` (I-D §6.3) among them — and
-    each says so on its own doc comment, but a caller that needs to DISTINGUISH `invalid` from
-    `unverifiable` must match on the specific variant, and a capability gap on one assertion
-    still aborts the whole run rather than being isolated to its own finding while independent
-    assertions continue to be checked.
+    "Revision and rule selection"), `CanonicalizationUnsupported` (I-D §6.3), `AdaptorUnknown`
+    (I-D §7.5 step 2) and `ProducerKeyNotCarried` (I-D §7.4, "Declared mode and producer-key
+    transitions") — and each says so on its own doc comment, but a caller that needs to
+    DISTINGUISH `invalid` from `unverifiable` must match on the specific variant, and a
+    capability gap on one assertion still aborts the whole run rather than being isolated to its
+    own finding while independent assertions continue to be checked.
+
+    `ProducerKeyNotCarried` is the one of these decided by the receipt's governance MODE rather
+    than by this build's capabilities. Under `declared` governance an envelope naming a producer
+    key the presented chain holds nothing for is `unverifiable` — the transition is a `key`
+    statement, and I-D §7.4 carries those in enumeration material alone, so the receipt is short
+    of material rather than defective. Under `enumerated` the same condition is `invalid`
+    (`EnvelopeSignatureInvalid`), because the range proof over exactly `[0, tree_size(C))`
+    forecloses omission (§7.5.1 4c). The pair
+    `statement-anchored-uncarried-key-transition-must-fail.ahl` and
+    `trigger-effective-derived-rotated-key.ahl` carry the SAME entry-19 envelope under the two
+    modes: the first is refused as unverifiable, the second accepts.
 *   **Canonicalization procedures beyond `jcs` and `exact-bytes` (I-D §2.6).** These are the
     only two the I-D itself defines, and the only two this crate implements. A dataset declaring
     any other `canonicalization` identifier — a registered one this crate has not implemented,

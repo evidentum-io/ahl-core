@@ -640,6 +640,47 @@ pub enum ReceiptError {
         entry_index: u64,
     },
 
+    /// Under `declared` governance, an envelope names a producer key the presented material
+    /// does not account for (I-D §7.4, "Declared mode and producer-key transitions").
+    ///
+    /// This is the I-D's `unverifiable` outcome, not `invalid`, and the distinction is
+    /// normative: "Such a receipt is `unverifiable` (Section 7.7), for want of material the
+    /// mode does not carry. It is NOT `invalid`: the omitted transition is not material this
+    /// mode required the receipt to carry, and a verifier holding the enumerated material
+    /// would verify the same bytes, so `invalid` would put two verifiers in contradiction over
+    /// one artifact. A verifier MUST NOT silently treat the named key as active, and MUST NOT
+    /// silently treat the envelope as invalid." Refusing under a variant of its own is how this
+    /// crate does neither.
+    ///
+    /// It arises only under `declared` governance. Producer-key transitions are `key`
+    /// statements and reach a verifier through enumeration material alone (§7.4), so declared
+    /// mode never sees them; under `enumerated` the range proof over exactly
+    /// `[0, tree_size(C))` forecloses omission (§7.5.1 4c), the presented key state IS the
+    /// state that was in force, and an unresolvable `key_id` there is a defect —
+    /// [`Self::EnvelopeSignatureInvalid`], `invalid`.
+    ///
+    /// The condition this variant reports is broader than §7.4's own sentence, which describes
+    /// a key some `key` statement added or retired. Declared mode cannot tell that key from
+    /// one no statement ever mentioned — telling them apart needs exactly the enumerated
+    /// material the mode does not carry — so any narrower rule would require a verifier to
+    /// decide a question its evidence cannot reach. `unverifiable` is what both cases are.
+    ///
+    /// Distinct from [`Self::KeyNotBound`], which is about the receipt's own `keys` listing
+    /// rather than about a signature: a `manifest-chain` binding naming an entry index that
+    /// holds no matching key object is decidable from the presented chain alone, and is
+    /// `invalid` in either mode.
+    #[error(
+        "the envelope at entry index {entry_index} is signed by producer key `{key_id}`, which \
+         the presented declared-mode governance material does not carry a transition for \
+         (I-D §7.4: unverifiable, not invalid)"
+    )]
+    ProducerKeyNotCarried {
+        /// The entry index of the envelope whose signer could not be resolved.
+        entry_index: u64,
+        /// The `key_id` the envelope names.
+        key_id: String,
+    },
+
     /// A structured assurance field does not match what verification established (§2.3).
     #[error("assurance field `{field}` overstates what the receipt proves")]
     AssuranceMismatch {
@@ -1013,6 +1054,14 @@ struct KeyEvent {
 
 /// The verified governance state carried by a receipt.
 struct Governance<'a> {
+    /// `governance.currency.mode` — one of I-D §7.4's two tokens, already held to that domain
+    /// by the caller.
+    ///
+    /// Carried here because it decides what an unresolvable producer key MEANS: under
+    /// `enumerated` the state is the state that was in force (§7.5.1 4c) and an unresolvable
+    /// key is a defect, while under `declared` the state is only what the chain implies and
+    /// §7.4 makes the same condition `unverifiable`. See [`envelope_outcome`].
+    mode: &'a str,
     /// Manifest statements in the chain, ascending by entry index.
     manifests: Vec<(u64, &'a Value)>,
     /// Producer key transitions, ascending by entry index.
@@ -2246,6 +2295,29 @@ fn check_merged_order(walked_index: u64, index: u64) -> Result<()> {
     Ok(())
 }
 
+/// Turn an envelope check into the outcome the receipt's governance MODE fixes for it.
+///
+/// Every producer-key signature check in this module ends here, so the two conditions
+/// [`crate::EnvelopeCheck`] separates cannot be conflated at one call site and kept apart at
+/// another. A signature that does not verify under a key the presented state DOES hold is a
+/// demonstrated defect and is `invalid` in either mode (I-D §7.5.1 4d: "An envelope carrying a
+/// non-verifying entry... is invalid"). A `key_id` the presented state holds no key for is the
+/// mode-dependent case: `invalid` under `enumerated`, where 4c's complete range forecloses
+/// omission, and [`ReceiptError::ProducerKeyNotCarried`] — the I-D's `unverifiable` — under
+/// `declared`, where §7.4 says the verifier is short of material rather than looking at a
+/// defect.
+fn envelope_outcome(check: &crate::EnvelopeCheck, mode: &str, index: u64) -> Result<()> {
+    match check {
+        crate::EnvelopeCheck::Verified => Ok(()),
+        crate::EnvelopeCheck::KeyNotResolved { key_id } if mode == DECLARED_MODE => {
+            Err(ReceiptError::ProducerKeyNotCarried { entry_index: index, key_id: key_id.clone() })
+        }
+        crate::EnvelopeCheck::SignatureInvalid | crate::EnvelopeCheck::KeyNotResolved { .. } => {
+            Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index })
+        }
+    }
+}
+
 /// I-D §7.5.1 4b phase 1, identical for both induction types: "Verify the envelope under the
 /// envelope signature rule of Section 2.1 against K AS ESTABLISHED SO FAR — the governance
 /// state in force immediately before this statement's own entry index."
@@ -2259,17 +2331,15 @@ fn verify_governance_phase_1(
     manifests: &[(u64, &Value)],
     events: &[KeyEvent],
     index: u64,
+    mode: &str,
     budget: &mut Budget,
 ) -> Result<()> {
     let k_so_far = producer_keys_at_in(manifests, events, index);
     budget.spend(1)?;
-    if crate::verify_envelope(envelope, |key_id| {
+    let check = crate::check_envelope(envelope, |key_id| {
         k_so_far.get(key_id).map(|bound| bound.pubkey.clone())
-    })? {
-        Ok(())
-    } else {
-        Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index })
-    }
+    })?;
+    envelope_outcome(&check, mode, index)
 }
 
 /// I-D §7.5.1 4b(K) phase 2: a `key` statement's own form, validated before its effect on K.
@@ -2382,6 +2452,7 @@ fn read_chain<'a>(
     profile: &AdaptorProfile,
     profile_id: &str,
     key_statements: &[(u64, &Value)],
+    mode: &'a str,
     budget: &mut Budget,
 ) -> Result<Governance<'a>> {
     let chain = array(obj(receipt, "governance")?, "chain")?;
@@ -2537,7 +2608,7 @@ fn read_chain<'a>(
             walked_index = index;
             let payload = payload_of(envelope)?;
             check_ahl_version(payload)?;
-            verify_governance_phase_1(envelope, &manifests, &events, index, budget)?;
+            verify_governance_phase_1(envelope, &manifests, &events, index, mode, budget)?;
             common_payload_fields(payload)?;
             // Phase 2 (4b(K)) and phase 3 (the producer-key effect), in that order.
             events.push(validate_key_statement(
@@ -2557,7 +2628,7 @@ fn read_chain<'a>(
         let payload = payload_of(envelope)?;
         check_ahl_version(payload)?;
 
-        verify_governance_phase_1(envelope, &manifests, &events, index, budget)?;
+        verify_governance_phase_1(envelope, &manifests, &events, index, mode, budget)?;
 
         // "A failure at phase 1 or phase 2 is invalid, and the induction does not continue past
         // it. No effect is ever applied to K by a statement that has not completed both
@@ -2707,7 +2778,7 @@ fn read_chain<'a>(
         ));
     }
 
-    Ok(Governance { manifests, events, manifest_by_version_id })
+    Ok(Governance { mode, manifests, events, manifest_by_version_id })
 }
 
 // ---------------------------------------------------------------------------
@@ -3992,7 +4063,8 @@ fn verify_nested(
         currency_enumeration.as_ref().map_or_else(Vec::new, enumerated_key_statements);
 
     // --- §7.5 step 4: the governance bootstrap, as an induction (4a-4c) -------------
-    let governance = read_chain(receipt, policy, profile, adaptor_id, &key_statements, budget)?;
+    let governance =
+        read_chain(receipt, policy, profile, adaptor_id, &key_statements, mode, budget)?;
     // 4c under enumerated governance: what the induction walked is everything the range holds.
     if let Some(enumeration) = &currency_enumeration {
         check_manifest_completeness(enumeration, &governance)?;
@@ -4162,8 +4234,12 @@ const COMPETING_RANGE_TYPES: [&str; 3] =
 /// `record-*` receipt, which carries its own assurance block and is verified as its own claim.
 const CONTENT_EVIDENCE_TYPES: [&str; 2] = ["record-ingested", "record-derived"];
 
+/// The `declared` governance mode of I-D §7.4: chain validity from genesis only, carrying no
+/// producer-key transitions.
+const DECLARED_MODE: &str = "declared";
+
 /// The two governance modes of I-D §7.4.
-const GOVERNANCE_MODES: [&str; 2] = ["declared", "enumerated"];
+const GOVERNANCE_MODES: [&str; 2] = [DECLARED_MODE, "enumerated"];
 
 /// The two competing-trigger values of I-D §7.3.
 const COMPETING_TRIGGER_VALUES: [&str; 2] = ["not-checked", "enumerated"];
@@ -4280,6 +4356,11 @@ const DECLARED_MODE_TYPES: [&str; 5] = [
     "disposition-declared",
 ];
 
+/// I-D §7.5.1 4d for one carried envelope: verified under COMPLETED K, at its OWN entry index.
+///
+/// A failure is decided by [`envelope_outcome`] under the receipt's governance mode, so a
+/// declared-mode receipt naming a producer key the mode does not carry a transition for is
+/// reported as §7.4's `unverifiable` rather than as a defect.
 fn verify_envelope_at(
     envelope: &Value,
     governance: &Governance<'_>,
@@ -4288,11 +4369,8 @@ fn verify_envelope_at(
 ) -> Result<()> {
     let keys = governance.producer_pubkeys_at(index);
     budget.spend(1)?;
-    if crate::verify_envelope(envelope, |key_id| keys.get(key_id).cloned())? {
-        Ok(())
-    } else {
-        Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index })
-    }
+    let check = crate::check_envelope(envelope, |key_id| keys.get(key_id).cloned())?;
+    envelope_outcome(&check, governance.mode, index)
 }
 
 /// Decode and authenticate the `enumerated` governance currency material (I-D §7.4), ahead of

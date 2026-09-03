@@ -516,6 +516,80 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         },
     });
 
+    // I-D §7.4, "Declared mode and producer-key transitions": the `unverifiable` outcome, and
+    // its `invalid` neighbour, on two receipts that differ only in which defect they carry.
+    out.push(Vector {
+        file: "statement-anchored-uncarried-key-transition-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 19,
+            anchor: cp20,
+            chain: vec![0],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: None,
+            note: "MUST FAIL, as UNVERIFIABLE rather than invalid. The subject at entry 19 is \
+                   signed by `producer-2`, which the `key` statement at entry 9 added after the \
+                   genesis manifest — and declared mode carries no `key` statements at all: \
+                   I-D §7.4 puts producer-key transitions in enumeration material alone. So \
+                   the induction never sees the transition, and the envelope names a key the \
+                   presented state holds nothing for. I-D §7.4: \"Such a receipt is \
+                   `unverifiable` (Section 7.7), for want of material the mode does not carry. \
+                   It is NOT `invalid`: the omitted transition is not material this mode \
+                   required the receipt to carry, and a verifier holding the enumerated \
+                   material would verify the same bytes.\" That verifier exists in this \
+                   corpus: `trigger-effective-derived-rotated-key.ahl` carries the same entry-19 \
+                   envelope under enumerated currency and ACCEPTS. A verifier that reported \
+                   this file as `invalid` would be in contradiction with that one over the \
+                   same bytes; a verifier that accepted it would be treating an unproven key \
+                   as active. Refusing under a variant of its own is neither."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.4 — a declared-mode envelope naming a key the mode does not carry is \
+                   unverifiable, not invalid",
+            matches: |e| matches!(e, ReceiptError::ProducerKeyNotCarried { entry_index: 19, .. }),
+        },
+    });
+    out.push(Vector {
+        file: "statement-anchored-non-verifying-envelope-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 32,
+            anchor: cp34,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: None,
+            note: "MUST FAIL, as INVALID. The counterpart to \
+                   `statement-anchored-uncarried-key-transition-must-fail.ahl`, and the reason \
+                   that file's outcome is not simply what declared mode does with every \
+                   signature failure. The subject at entry 32 names `producer-1`, which \
+                   manifest version 2 lists and the presented chain therefore RESOLVES — but \
+                   its `sig` is not a signature `producer-1` ever produced. Nothing is missing \
+                   here; the defect is demonstrated from the bytes in hand, and I-D §7.5.1 4d \
+                   makes it `invalid`: \"An envelope carrying a non-verifying entry... is \
+                   invalid however many other entries verify.\" The governance mode does not \
+                   enter into it."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4d — a resolvable key whose signature does not verify is invalid \
+                   in either governance mode",
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 32 }),
+        },
+    });
+
     // --- record-ingested ---------------------------------------------------------
     let ingested = |content_binding: &'static str, bytes: &[u8], note: &str| {
         Spec {

@@ -337,15 +337,41 @@ pub fn envelope(payload: Value, key: &TestKey) -> Value {
     Value::Object(env)
 }
 
-/// Verify every signature on an envelope against a `key_id -> pubkey` resolver.
+/// Why [`check_envelope`] did not accept an envelope — or that it did.
 ///
-/// Returns `false` for an envelope with no signatures: unsigned objects are not AHL
-/// statements (spec §2.1).
+/// The two failure variants are the same outcome under spec §2.1's envelope rule and are kept
+/// apart because the AHL I-D's §7.4 makes the caller's response to them differ: an envelope
+/// naming a key the presented key state does not hold is missing MATERIAL, while an envelope
+/// whose signature does not verify under a key that IS held is a demonstrated defect. Which of
+/// the two a given resolver reports is a property of what the caller put in the resolver, so
+/// only the caller can decide what each one means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EnvelopeCheck {
+    /// Every signature entry resolved to a key and verified over `JCS(payload)`.
+    Verified,
+    /// A signature entry did not verify under the key the resolver returned for it, or the
+    /// envelope carries no signature entries at all — unsigned objects are not AHL statements
+    /// (spec §2.1).
+    SignatureInvalid,
+    /// A signature entry names a `key_id` the resolver holds no key for.
+    KeyNotResolved {
+        /// The `key_id` that resolved to nothing.
+        key_id: String,
+    },
+}
+
+/// Verify every signature on an envelope against a `key_id -> pubkey` resolver, reporting
+/// WHICH way it failed.
+///
+/// Signature entries are examined in array order and the first failure is returned, so an
+/// envelope carrying both kinds of defect reports whichever comes first — the order the
+/// producer chose, not a precedence this function invents.
 ///
 /// # Errors
 ///
 /// Returns an error if the envelope shape is wrong or a resolved key cannot be decoded.
-pub fn verify_envelope<F>(env: &Value, resolve: F) -> AhlResult<bool>
+pub fn check_envelope<F>(env: &Value, resolve: F) -> AhlResult<EnvelopeCheck>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -358,18 +384,36 @@ where
         .and_then(Value::as_array)
         .ok_or_else(|| AhlError::Field("signatures".to_owned()))?;
     if signatures.is_empty() {
-        return Ok(false);
+        return Ok(EnvelopeCheck::SignatureInvalid);
     }
     let msg = jcs(payload);
     for entry in signatures {
         let key_id = field_str(entry, "key_id")?;
         let sig = field_str(entry, "sig")?;
-        let Some(pubkey) = resolve(key_id) else { return Ok(false) };
+        let Some(pubkey) = resolve(key_id) else {
+            return Ok(EnvelopeCheck::KeyNotResolved { key_id: key_id.to_owned() });
+        };
         if !verify_signature(&decode_pubkey(&pubkey)?, &msg, sig)? {
-            return Ok(false);
+            return Ok(EnvelopeCheck::SignatureInvalid);
         }
     }
-    Ok(true)
+    Ok(EnvelopeCheck::Verified)
+}
+
+/// Verify every signature on an envelope against a `key_id -> pubkey` resolver.
+///
+/// Returns `false` for an envelope with no signatures: unsigned objects are not AHL
+/// statements (spec §2.1). Callers that need to tell an unresolvable `key_id` from a signature
+/// that does not verify use [`check_envelope`].
+///
+/// # Errors
+///
+/// Returns an error if the envelope shape is wrong or a resolved key cannot be decoded.
+pub fn verify_envelope<F>(env: &Value, resolve: F) -> AhlResult<bool>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    Ok(check_envelope(env, resolve)? == EnvelopeCheck::Verified)
 }
 
 // ---------------------------------------------------------------------------
@@ -949,6 +993,35 @@ mod tests {
     fn unsigned_envelope_is_rejected() {
         let env = json!({ "payload": { "type": "key" }, "signatures": [] });
         assert!(!verify_envelope(&env, |_| None).expect("well-formed envelope"));
+    }
+
+    /// The two ways a signature check fails are separated, because callers act on them
+    /// differently (AHL I-D §7.4). `verify_envelope` collapses both to `false`.
+    #[test]
+    fn check_envelope_separates_an_unresolvable_key_from_a_bad_signature() {
+        let k = key();
+        let env = envelope(json!({ "type": "key" }), &k);
+        let resolve = |id: &str| (id == k.key_id()).then(|| k.pubkey());
+
+        assert_eq!(check_envelope(&env, resolve).expect("well formed"), EnvelopeCheck::Verified);
+        assert_eq!(
+            check_envelope(&env, |_| None).expect("well formed"),
+            EnvelopeCheck::KeyNotResolved { key_id: k.key_id() }
+        );
+
+        // The key resolves; the signature does not verify over this payload.
+        let mut tampered = env;
+        tampered["payload"]["type"] = json!("manifest");
+        assert_eq!(
+            check_envelope(&tampered, resolve).expect("well formed"),
+            EnvelopeCheck::SignatureInvalid
+        );
+
+        let unsigned = json!({ "payload": { "type": "key" }, "signatures": [] });
+        assert_eq!(
+            check_envelope(&unsigned, |_| None).expect("well formed"),
+            EnvelopeCheck::SignatureInvalid
+        );
     }
 
     #[test]

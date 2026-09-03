@@ -61,6 +61,20 @@
       "rule": "spec §7.2 — a manifest's producer key array is a snapshot that discards the prior one"
     },
     {
+      "claim_type": "statement-anchored",
+      "expect": "reject",
+      "file": "statement-anchored-uncarried-key-transition-must-fail.ahl",
+      "reason": "the envelope at entry index 19 is signed by producer key `sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827`, which the presented declared-mode governance material does not carry a transition for (I-D §7.4: unverifiable, not invalid)",
+      "rule": "I-D §7.4 — a declared-mode envelope naming a key the mode does not carry is unverifiable, not invalid"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "reject",
+      "file": "statement-anchored-non-verifying-envelope-must-fail.ahl",
+      "reason": "envelope signature at entry index 32 did not verify",
+      "rule": "I-D §7.5.1 4d — a resolvable key whose signature does not verify is invalid in either governance mode"
+    },
+    {
       "boundary": "the subject ingestion introduced the named record into the corpus; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content verified against the commitment by an authorized key holder",
       "claim_type": "record-ingested",
       "embedded_receipts": 0,

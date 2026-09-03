@@ -1368,6 +1368,12 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "governance-key-rotation-proof-key-bound-to-incoming-must-fail.ahl" => {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 25, .. })
         }
+        // The pair I-D §7.4 separates. Both assertions name the specific variant, because the
+        // whole content of the rule is which of the two fires: a test satisfied by either
+        // would pass on a verifier that had collapsed them back into one outcome.
+        "statement-anchored-uncarried-key-transition-must-fail.ahl" => {
+            matches!(error, ReceiptError::ProducerKeyNotCarried { entry_index: 19, .. })
+        }
         "record-ingested-stale-manifest-must-fail.ahl" => {
             matches!(error, ReceiptError::SubjectManifestBindingInvalid(_))
         }
@@ -1421,13 +1427,17 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             ReceiptError::EmbeddedSubjectMismatch { what: "replacement introduction", .. }
         ),
         // I-D §7.5.1 4d: every enumerated envelope is verified under K at its own entry index.
-        // The two vectors reach the same rule from opposite ends — one where the defective
-        // envelope IS a competing candidate for the subject record (§7.2: "Every competing
-        // candidate's envelope MUST be verified under Section 2.1 before authority is
-        // compared"), one where no claim-specific rule looks at it at all — and both name the
-        // entry index of the first non-verifying envelope in range, never a later one.
+        // The three vectors reach the same rule from three directions — one where the
+        // defective envelope IS a competing candidate for the subject record (§7.2: "Every
+        // competing candidate's envelope MUST be verified under Section 2.1 before authority is
+        // compared"), one where no claim-specific rule looks at it at all, and one where it is
+        // the SUBJECT of a declared-mode receipt — and all three name the entry index of the
+        // first non-verifying envelope in range, never a later one. The third is the `invalid`
+        // half of the I-D §7.4 pair: the key it names IS resolvable, so the defect is
+        // demonstrated rather than missing, and the governance mode does not enter into it.
         "trigger-effective-non-verifying-candidate-must-fail.ahl"
-        | "governance-state-non-verifying-entry-must-fail.ahl" => {
+        | "governance-state-non-verifying-entry-must-fail.ahl"
+        | "statement-anchored-non-verifying-envelope-must-fail.ahl" => {
             matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 32 })
         }
         // I-D §2.7: one set of tree rules, "identical for every AHL tree — outputs, input sets,
@@ -1510,6 +1520,59 @@ fn every_accepted_receipt_carries_manifests_only_in_its_governance_chain() {
         }
     }
     assert!(checked >= 15, "the accepted vectors must carry chain elements at all, got {checked}");
+}
+
+/// I-D §7.4's argument for `unverifiable` is that "a verifier holding the enumerated material
+/// would verify the same bytes, so `invalid` would put two verifiers in contradiction over one
+/// artifact". That argument is only made in this corpus if the two receipts really do carry the
+/// same bytes.
+///
+/// Both vectors are subject entry 19, whose envelope is signed by `producer-2` — added by the
+/// `key` statement at entry 9, which declared mode does not carry. The declared one is refused
+/// as `unverifiable`; the enumerated one is in the accept list. A generator change that moved
+/// either subject would leave both files passing while the pair stopped being a pair.
+#[test]
+fn the_declared_and_enumerated_receipts_over_entry_19_carry_one_envelope() {
+    let (_, declared) = read_receipt("statement-anchored-uncarried-key-transition-must-fail.ahl");
+    let (_, enumerated) = read_receipt("trigger-effective-derived-rotated-key.ahl");
+
+    assert_eq!(declared["subject"]["entry_index"], json!(19));
+    assert_eq!(declared["envelope"], enumerated["envelope"], "the two vectors must be one pair");
+    assert_eq!(declared["governance"]["currency"]["mode"], json!("declared"));
+    assert_eq!(enumerated["governance"]["currency"]["mode"], json!("enumerated"));
+
+    let signer = field_str(&declared["envelope"]["signatures"][0], "key_id").expect("key_id");
+    assert_eq!(signer, test_key("producer-2").key_id(), "entry 19 is signed by producer-2");
+
+    // The enumerated half really does accept, so the contradiction §7.4 rules out would be a
+    // live one if the declared half were reported `invalid`.
+    verify_receipt(&enumerated, &trust_policy()).expect("the enumerated counterpart accepts");
+}
+
+/// The other side of I-D §7.4's rule, which no vector can carry: under `enumerated` governance
+/// the range proof over exactly `[0, tree_size(C))` "forecloses omission, so K at each index IS
+/// the state that was in force" (§7.5.1 4c). An unresolvable `key_id` there is not missing
+/// material — it is a key the complete record shows was never in force — so it stays `invalid`.
+///
+/// A vector cannot demonstrate this, because a conforming corpus anchors no such envelope: the
+/// case is reachable only by mutation.
+#[test]
+fn an_unresolvable_producer_key_is_invalid_under_enumerated_governance() {
+    assert_rejects_anchored(
+        "governance-state-valid.ahl",
+        // Entry 3 is an ordinary derivation inside the enumerated range, and not a chain hop.
+        // Corrupting the `key_id` its signature names — not the signature — leaves the
+        // envelope well formed and its named key unresolvable under any state.
+        |r| {
+            corrupt(
+                &mut r["governance"]["currency"]["material"]["entries"][3]["envelope"]
+                    ["signatures"][0]["key_id"],
+            );
+        },
+        |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 3 }),
+        "I-D §7.5.1 4c/4d — under enumerated governance an unresolvable key is invalid, never \
+         the §7.4 unverifiable outcome",
+    );
 }
 
 #[test]
