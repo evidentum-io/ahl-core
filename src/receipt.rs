@@ -2045,6 +2045,13 @@ struct Governance<'a> {
     /// them is ever a capability gap, and none is downgraded." What the INDUCTION decides is
     /// something else — which version was active, and what its contents may be trusted for.
     chain_index: BTreeMap<String, u64>,
+    /// Every entry index the chain carries an element at, void duplicates included.
+    ///
+    /// What §7.5.1 4c asks of enumerated currency is that the CHAIN carry every manifest the
+    /// range reveals — "the range proof forecloses omission" holds only if the presented chain
+    /// shows them all — and an element the induction skipped as a void duplicate (I-D §2.1) is
+    /// still an element the chain carries.
+    chain_indexes: BTreeSet<u64>,
     /// The entry index of the governance statement whose effect the induction did NOT apply,
     /// where it stopped early (I-D §7.5.1 4b, [`ReceiptError::GovernanceRotationUnverifiable`]).
     ///
@@ -3504,6 +3511,30 @@ fn validate_key_statement(
 /// enumeration material".
 // The governance-key-rotation check (I-D §7.1, §7.5.1) folds naturally into this same
 // per-manifest walk rather than a second pass over the same material.
+/// What the raw chain carries: the entry index GOVERNING each manifest version id, and every
+/// entry index the chain has an element at (void duplicates included).
+type ChainIndex = (BTreeMap<String, u64>, BTreeSet<u64>);
+
+/// Every manifest version the chain carries, by version id, to the entry index that GOVERNS it.
+///
+/// I-D §2.1: "A producer MUST NOT anchor two envelopes bearing the same statement id. If
+/// duplicates nevertheless occur, the envelope with the smallest entry index governs and later
+/// ones are void." So the map is FIRST-WINS, and since §7.1 requires the chain in ascending
+/// `entry_index` order — checked in §7.5 step 3, before this runs — the first occurrence in the
+/// array is the smallest index. Overwriting would let a later, void duplicate answer a §7.6
+/// question about the version that actually governs, and a valid `subject.manifest` reference
+/// would then read as "anchored at or after the subject".
+fn chain_version_index(chain: &[Value]) -> Result<ChainIndex> {
+    let mut governing = BTreeMap::new();
+    let mut carried = BTreeSet::new();
+    for hop in chain {
+        let index = number(hop, "entry_index")?;
+        governing.entry(statement_id(obj(hop, "envelope")?)?).or_insert(index);
+        carried.insert(index);
+    }
+    Ok((governing, carried))
+}
+
 #[allow(clippy::too_many_lines)]
 fn read_chain<'a>(
     receipt: &'a Value,
@@ -3523,10 +3554,7 @@ fn read_chain<'a>(
     // rules about `subject.manifest` are decidable from the receipt alone and are never
     // downgraded, so they must not depend on how far the walk got. Step 3 has already proven
     // each element's `entry_index` by recomputing its inclusion path at that index.
-    let mut chain_index = BTreeMap::new();
-    for hop in chain {
-        chain_index.insert(statement_id(obj(hop, "envelope")?)?, number(hop, "entry_index")?);
-    }
+    let (chain_index, chain_indexes) = chain_version_index(chain)?;
 
     // I-D §7.1: "REQUIRED IF AND ONLY IF the carried governance chain contains a
     // GOVERNANCE-KEY ROTATION"; "The member is ABSENT where the chain rotates neither set";
@@ -3639,6 +3667,8 @@ fn read_chain<'a>(
     let mut events: Vec<KeyEvent> = Vec::new();
     let mut manifest_by_version_id: BTreeMap<String, (u64, &Value)> = BTreeMap::new();
     manifest_by_version_id.insert(statement_id(genesis_envelope)?, (0, genesis_payload));
+    // The genesis hop is the smallest index there is, so nothing can precede it; every later
+    // insertion below is first-wins (I-D §2.1).
     let mut previous_index = 0u64;
     let mut previous_manifest_entry_id = entry_id(genesis_envelope);
     let mut previous_manifest_payload = genesis_payload;
@@ -3669,6 +3699,12 @@ fn read_chain<'a>(
     // them." Both input streams are already ascending — the chain by the check just made, the
     // enumerated key statements by the range proof's own index continuity — so the merge is a
     // two-cursor walk and needs no sort.
+    // I-D §2.1: "If duplicates nevertheless occur, the envelope with the smallest entry index
+    // governs and later ones are void." Both merged streams are walked in ascending entry-index
+    // order, so the first statement id seen is the governing one and any later envelope bearing
+    // it is void — skipped whole, applying no effect and consuming no rotation proof. Seeded
+    // with the genesis manifest, which the base case above has already walked.
+    let mut governing_ids = BTreeSet::from([statement_id(genesis_envelope)?]);
     let mut chain_cursor = 0usize;
     let mut key_cursor = 0usize;
     // The genesis manifest, at entry index 0, is the statement the base case has just walked.
@@ -3690,6 +3726,12 @@ fn read_chain<'a>(
             key_cursor += 1;
             check_merged_order(walked_index, index)?;
             walked_index = index;
+            // §2.1 again, over the other stream: a `key` statement anchored a second time
+            // governs nothing, and applying its effect twice would change the key state from
+            // the duplicate's index onward.
+            if !governing_ids.insert(statement_id(envelope)?) {
+                continue;
+            }
             let payload = payload_of(envelope)?;
             check_ahl_version(payload)?;
             verify_governance_phase_1(envelope, &manifests, &events, index, mode, run)?;
@@ -3708,6 +3750,23 @@ fn read_chain<'a>(
         chain_cursor += 1;
         check_merged_order(walked_index, index)?;
         walked_index = index;
+
+        // I-D §2.1: where two envelopes bear the same statement id, "the envelope with the
+        // smallest entry index governs and later ones are void". A void element governs
+        // nothing: it is not walked as a hop, applies no effect, consumes no
+        // `governance.rotation_proofs[]` element, and never becomes the version a
+        // `subject.manifest` reference resolves to — the governing copy, already walked, is all
+        // three. The `predecessor` linkage of any later manifest is therefore computed against
+        // that governing copy, which is what `previous_manifest_*` still holds here.
+        //
+        // AMBIGUITY (I-D §7.5.1 4d): whether a void carried envelope must nonetheless verify is
+        // not settled — 4d is scoped to "every carried envelope that is NOT part of the
+        // induction", and a void duplicate is part of neither. Read minimally: an envelope that
+        // governs nothing is not validated as though it did, and skipping it can establish
+        // nothing, since the governing copy of the same bytes was walked in full.
+        if !governing_ids.insert(statement_id(envelope)?) {
+            continue;
+        }
 
         let payload = payload_of(envelope)?;
         check_ahl_version(payload)?;
@@ -3835,7 +3894,9 @@ fn read_chain<'a>(
                 previous_manifest_entry_id = entry_id(envelope);
                 previous_manifest_payload = payload;
                 previous_manifest_index = index;
-                manifest_by_version_id.insert(statement_id(envelope)?, (index, payload));
+                // First-wins for the same §2.1 reason as [`chain_version_index`]; a void
+                // duplicate never reaches here, and the entry API states the rule at the site.
+                manifest_by_version_id.entry(statement_id(envelope)?).or_insert((index, payload));
                 manifests.push((index, payload));
             }
             other => {
@@ -3889,6 +3950,7 @@ fn read_chain<'a>(
         events,
         manifest_by_version_id,
         chain_index,
+        chain_indexes,
         unestablished_from,
     })
 }
@@ -5963,10 +6025,13 @@ fn check_manifest_completeness(
     enumeration: &Enumeration,
     governance: &Governance<'_>,
 ) -> Result<()> {
-    let presented: BTreeSet<u64> = governance.manifests.iter().map(|(index, _)| *index).collect();
+    // What the CHAIN carries, not what the induction applied: an element skipped as a void
+    // duplicate (I-D §2.1) is carried, and 4c asks whether the chain shows the range's manifests.
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
         let index = enumeration.from_index + offset as u64;
-        if statement_type_literal(envelope) == Some("manifest") && !presented.contains(&index) {
+        if statement_type_literal(envelope) == Some("manifest")
+            && !governance.chain_indexes.contains(&index)
+        {
             return Err(ReceiptError::GovernanceChainInvalid(format!(
                 "enumeration reveals a `manifest` statement at entry index {index} that the \
                  presented chain omits"
@@ -7406,13 +7471,13 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        log_key_set, verify_rotation_proof, witness_key_set, AdaptorCapabilities, AdaptorProfile,
-        Assertion, Governance, Limits, Outcome, ReceiptError, RotationContext, Run, TrustPolicy,
-        MAX_EMBEDDED_RECEIPTS, TEST_ADAPTOR_PROFILE_ID,
+        chain_version_index, log_key_set, verify_rotation_proof, witness_key_set,
+        AdaptorCapabilities, AdaptorProfile, Assertion, Governance, Limits, Outcome, ReceiptError,
+        RotationContext, Run, TrustPolicy, MAX_EMBEDDED_RECEIPTS, TEST_ADAPTOR_PROFILE_ID,
     };
     use crate::{
-        checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, sha256_hex, tree_root,
-        TestKey,
+        checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, sha256_hex, statement_id,
+        tree_root, TestKey,
     };
 
     /// I-D §6.2: "Each manifest version's log and witness key objects replace the prior set in
@@ -7424,6 +7489,71 @@ mod tests {
     /// chain hop's own committed inclusion path before the rotation check is ever reached —
     /// the same structural constraint documented for the `media_type` presence test in
     /// `tests/vectors.rs`.
+    /// I-D §2.1: "A producer MUST NOT anchor two envelopes bearing the same statement id. If
+    /// duplicates nevertheless occur, the envelope with the smallest entry index governs and
+    /// later ones are void."
+    ///
+    /// The two scenarios this covers are the ones §7.6 reads off the raw chain: with the
+    /// induction STOPPED, a subject naming a manifest that is also duplicated later must be
+    /// judged against the GOVERNING index — the ordering rule asks whether the named version is
+    /// anchored strictly before the subject, and a void copy anchored after it answers nothing;
+    /// and without a stop, the same duplicate is void, so it never becomes the version a
+    /// `subject.manifest` reference resolves to and the receipt's outcome is whatever the rest
+    /// of its material earns.
+    ///
+    /// Tested on the index the rules consume rather than end to end, for a structural reason:
+    /// §7.5 step 3 proves every chain element's `entry_index` by recomputing its inclusion path
+    /// at that index, and §7.1 requires the chain STRICTLY ascending, so a duplicate statement
+    /// id in a chain needs the same envelope genuinely anchored at two entry indexes. This
+    /// corpus's log contains no such pair, and a fabricated second index cannot open the
+    /// checkpoint root.
+    #[test]
+    fn a_duplicate_statement_id_is_governed_by_its_smallest_index() {
+        let envelope = json!({
+            "payload": { "type": "manifest", "ahl_version": "0.4", "issued_at": "2026-01-01T00:00:00Z" },
+            "signatures": [],
+        });
+        let governing = statement_id(&envelope).expect("a well-formed envelope");
+        let later = json!({
+            "payload": { "type": "manifest", "ahl_version": "0.4", "issued_at": "2026-06-01T00:00:00Z" },
+            "signatures": [],
+        });
+        let chain = vec![
+            json!({ "envelope": envelope, "entry_index": 0 }),
+            json!({ "envelope": later, "entry_index": 25 }),
+            // The same statement, anchored again after the rotation: void.
+            json!({ "envelope": envelope, "entry_index": 30 }),
+        ];
+
+        let (index, carried) = chain_version_index(&chain).expect("a well-formed chain");
+        assert_eq!(
+            index.get(&governing),
+            Some(&0),
+            "the smallest entry index governs; the later copy is void (I-D §2.1)"
+        );
+        // A subject at entry index 20 naming that version passes §7.6's ordering rule against
+        // the governing index and would fail it against the void copy's.
+        assert!(index[&governing] < 20);
+        // Every carried index is still reported, void copies included: §7.5.1 4c asks what the
+        // CHAIN carries against what the range reveals.
+        assert_eq!(carried, std::collections::BTreeSet::from([0, 25, 30]));
+
+        // And the rule the induction applies to the same chain, walked in ascending order: the
+        // first envelope bearing a statement id governs, later ones are void and are skipped
+        // whole — no effect, no rotation proof consumed, no version to resolve to. With no
+        // induction stop the receipt's outcome is therefore whatever the rest of its material
+        // earns: a void element neither adds evidence nor withdraws any.
+        let mut governing_ids = std::collections::BTreeSet::new();
+        let void: Vec<bool> = chain
+            .iter()
+            .map(|hop| {
+                let id = statement_id(&hop["envelope"]).expect("a well-formed envelope");
+                !governing_ids.insert(id)
+            })
+            .collect();
+        assert_eq!(void, vec![false, false, true]);
+    }
+
     /// A manifest binding the induction never reached is a capability gap, not a defect.
     ///
     /// I-D §7.7 divides the two: material the receipt was required to carry and does not is
@@ -7455,6 +7585,7 @@ mod tests {
             events: Vec::new(),
             manifest_by_version_id: by_version_id.clone(),
             chain_index: chain_index.clone(),
+            chain_indexes: std::collections::BTreeSet::from([0, 25]),
             unestablished_from,
         };
 
