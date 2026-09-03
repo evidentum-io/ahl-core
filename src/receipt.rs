@@ -2033,6 +2033,18 @@ struct Governance<'a> {
     /// `statement_id` (I-D §2.4.5), which is what a subject statement's `manifest` field
     /// references (I-D §2.2). Distinct from `entry_id`, which `predecessor` references.
     manifest_by_version_id: BTreeMap<String, (u64, &'a Value)>,
+    /// Every manifest version the chain CARRIES, by its manifest version id (I-D §2.4.5: the
+    /// manifest statement's own statement id), to the entry index the chain asserts for it.
+    ///
+    /// Built from the raw chain before the induction walks a step, and never truncated by where
+    /// the walk stopped. §7.5 step 3 has already recomputed each element's inclusion path at
+    /// that asserted index — "the path proof IS the index proof" — so this is step-3 material,
+    /// established without any key. §7.6's rules about `subject.manifest` are read off it:
+    /// "Each of the following is a disagreement among fields the receipt itself carries,
+    /// decidable from the receipt alone... A receipt failing any of them is `invalid`; none of
+    /// them is ever a capability gap, and none is downgraded." What the INDUCTION decides is
+    /// something else — which version was active, and what its contents may be trusted for.
+    chain_index: BTreeMap<String, u64>,
     /// The entry index of the governance statement whose effect the induction did NOT apply,
     /// where it stopped early (I-D §7.5.1 4b, [`ReceiptError::GovernanceRotationUnverifiable`]).
     ///
@@ -2088,20 +2100,24 @@ impl Governance<'_> {
     /// resolve the same bytes. Reporting the second as the first would let two verifiers
     /// contradict each other over one artifact.
     fn manifest_for_binding(&self, version_id: &str) -> Result<(u64, &Value)> {
-        self.manifest_by_version_id.get(version_id).copied().map_or_else(
-            || {
-                self.unestablished_from.map_or_else(
-                    || {
-                        Err(ReceiptError::GovernanceChainInvalid(format!(
-                            "manifest version `{version_id}` named by the subject statement's \
-                             `manifest` binding is not in the carried governance chain"
-                        )))
-                    },
-                    |entry_index| Err(ReceiptError::GovernanceRotationUnverifiable { entry_index }),
-                )
-            },
-            Ok,
-        )
+        if let Some(found) = self.manifest_by_version_id.get(version_id) {
+            return Ok(*found);
+        }
+        // A version the chain CARRIES, at or after the point the walk stopped, is one whose
+        // CONTENTS this verifier could not establish: `unverifiable`, and a better-equipped
+        // verifier resolves it from the same bytes. Anything else — a version the chain does not
+        // carry at all, or one the walk did reach — is material the receipt owed, and is
+        // `invalid` whether or not the walk stopped somewhere else.
+        let carried_at = self.chain_index.get(version_id).copied();
+        match (self.unestablished_from, carried_at) {
+            (Some(stopped_at), Some(index)) if index >= stopped_at => {
+                Err(ReceiptError::GovernanceRotationUnverifiable { entry_index: stopped_at })
+            }
+            _ => Err(ReceiptError::GovernanceChainInvalid(format!(
+                "manifest version `{version_id}` named by the subject statement's `manifest` \
+                 binding is not in the carried governance chain"
+            ))),
+        }
     }
 
     /// Whether K is established for the manifest version active for a checkpoint of this size.
@@ -3481,6 +3497,15 @@ fn read_chain<'a>(
         return Err(ReceiptError::GovernanceChainInvalid("chain is empty".to_owned()));
     }
 
+    // The raw index of what the chain CARRIES, taken before the induction walks anything: §7.6's
+    // rules about `subject.manifest` are decidable from the receipt alone and are never
+    // downgraded, so they must not depend on how far the walk got. Step 3 has already proven
+    // each element's `entry_index` by recomputing its inclusion path at that index.
+    let mut chain_index = BTreeMap::new();
+    for hop in chain {
+        chain_index.insert(statement_id(obj(hop, "envelope")?)?, number(hop, "entry_index")?);
+    }
+
     // I-D §7.1: "REQUIRED IF AND ONLY IF the carried governance chain contains a
     // GOVERNANCE-KEY ROTATION"; "The member is ABSENT where the chain rotates neither set";
     // "one element per rotation, in ascending `manifest_entry_index` order." §7.5.1: "Type
@@ -3836,7 +3861,14 @@ fn read_chain<'a>(
         ));
     }
 
-    Ok(Governance { mode, manifests, events, manifest_by_version_id, unestablished_from })
+    Ok(Governance {
+        mode,
+        manifests,
+        events,
+        manifest_by_version_id,
+        chain_index,
+        unestablished_from,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -5494,6 +5526,25 @@ fn verify_nested(
     // version absent from the chain, or anchored at or after the subject, cannot have governed
     // the subject."
     if let Some(claimed) = carried_manifest {
+        // Both of these are §7.6 rules over what the receipt itself carries: "A receipt failing
+        // any of them is `invalid`; none of them is ever a capability gap, and none is
+        // downgraded." They are therefore read off the RAW chain index — every version the
+        // chain carries, at the entry index step 3 proved for it — and hold whether or not the
+        // induction later stopped somewhere. They are checked before the equality rule below so
+        // that each is reportable on its own; all three are `invalid` on `cross-field`.
+        let carried_at = governance.chain_index.get(claimed).copied().ok_or_else(|| {
+            ReceiptError::SubjectManifestBindingInvalid(format!(
+                "`subject.manifest` (`{claimed}`) is not PRESENT in `governance.chain`; a named \
+                 version absent from the chain cannot have governed the subject (I-D §7.6)"
+            ))
+        })?;
+        if carried_at >= subject_index {
+            return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
+                "`subject.manifest` (`{claimed}`) is anchored at entry index {carried_at}, not \
+                 strictly before subject.entry_index {subject_index}; a version anchored at or \
+                 after the subject cannot have governed it (I-D §7.6)"
+            )));
+        }
         let payload_manifest = text(payload, "manifest")?;
         if claimed != payload_manifest {
             return Err(ReceiptError::SubjectManifestBindingInvalid(format!(
@@ -7315,17 +7366,34 @@ mod tests {
         let payload = json!({ "type": "manifest" });
         let by_version_id =
             std::collections::BTreeMap::from([("sha256:v1".to_owned(), (0u64, &payload))]);
+        // The chain CARRIES both versions; the walk reached only the first.
+        let chain_index = std::collections::BTreeMap::from([
+            ("sha256:v1".to_owned(), 0u64),
+            ("sha256:v2".to_owned(), 25u64),
+        ]);
         let governance = |unestablished_from| Governance {
             mode: "declared",
             manifests: vec![(0, &payload)],
             events: Vec::new(),
             manifest_by_version_id: by_version_id.clone(),
+            chain_index: chain_index.clone(),
             unestablished_from,
         };
 
-        // Walked in full: a version the chain does not carry is material the receipt owed.
-        let error = governance(None)
-            .manifest_for_binding("sha256:v2")
+        // Walked in full: a version the walk reached and does not hold is material the receipt
+        // owed, and so is one the chain does not carry at all.
+        for version in ["sha256:v2", "sha256:absent"] {
+            let error = governance(None)
+                .manifest_for_binding(version)
+                .expect_err("the walk holds no such version");
+            assert!(matches!(error, ReceiptError::GovernanceChainInvalid(_)), "{error}");
+            assert_eq!(error.class(), Outcome::Invalid);
+        }
+
+        // Stopped, and the version is one the chain does not carry AT ALL: still `invalid` —
+        // the stop says nothing about a version no element of the chain ever named.
+        let error = governance(Some(25))
+            .manifest_for_binding("sha256:absent")
             .expect_err("the chain carries no such version");
         assert!(matches!(error, ReceiptError::GovernanceChainInvalid(_)), "{error}");
         assert_eq!(error.class(), Outcome::Invalid);

@@ -1981,6 +1981,73 @@ fn an_unauthenticated_rotation_applies_no_effect_to_the_key_state() {
     }
 }
 
+/// §7.6's `subject.manifest` rules hold whether or not the induction stopped.
+///
+/// §7.6: "Each of the following is a disagreement among fields the receipt itself carries,
+/// decidable from the receipt alone and identically by every verifier. A receipt failing any of
+/// them is `invalid`; none of them is ever a capability gap, and none is downgraded." Among
+/// them: "The manifest version named by `subject.manifest` is PRESENT in `governance.chain` —
+/// as the element whose envelope's statement id equals that value — and that element's
+/// `entry_index` is strictly smaller than `subject.entry_index`."
+///
+/// Both are read off the chain the receipt carries, at the entry index step 3 proved for each
+/// element, so a capability gap elsewhere — no adaptor profile, an induction stopped at a
+/// rotation — cannot turn either into `unverifiable`.
+#[test]
+fn the_subject_manifest_rules_are_never_downgraded_by_a_gap() {
+    let mut gapped = trust_policy();
+    gapped.adaptor_profiles.clear();
+    let absent = format!("sha256:{}", "0".repeat(64));
+
+    // A post-stop subject (entry 29, past the rotation at 25) naming a version the chain does
+    // not carry: `invalid`, on `cross-field`, with no profile held.
+    let (_, base) = read_receipt("trigger-effective-co-signed-by-authority.ahl");
+    assert_eq!(base["subject"]["entry_index"], json!(29));
+    let mut unknown_version = base.clone();
+    unknown_version["subject"]["manifest"] = json!(absent);
+    let report = verify_receipt_report(&unknown_version, &gapped).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    let finding = report.finding(Assertion::CrossField).expect("cross-field finding");
+    assert_eq!(finding.outcome, Outcome::Invalid);
+    assert!(
+        finding.detail.as_ref().is_some_and(|detail| detail.contains("PRESENT")),
+        "the presence rule must be the one that fired: {finding:?}"
+    );
+
+    // A subject naming a version anchored at or after it — the rotating manifest at entry 25,
+    // named by the subject at entry 8 — is `invalid` on the same terms. The subject cannot also
+    // be post-stop here: this corpus carries one rotation, so the only version at or after a
+    // post-stop subject is that rotation itself, and it is the stop.
+    let (_, propagation) = read_receipt("propagation-complete-valid-across-manifest-rotation.ahl");
+    assert_eq!(propagation["subject"]["entry_index"], json!(8));
+    let rotated = statement_id(&propagation["governance"]["chain"][1]["envelope"])
+        .expect("the rotating manifest's version id");
+    let mut not_before = propagation;
+    not_before["subject"]["manifest"] = json!(rotated);
+    let report = verify_receipt_report(&not_before, &gapped).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    let finding = report.finding(Assertion::CrossField).expect("cross-field finding");
+    assert_eq!(finding.outcome, Outcome::Invalid);
+    assert!(
+        finding.detail.as_ref().is_some_and(|detail| detail.contains("strictly before")),
+        "the ordering rule must be the one that fired: {finding:?}"
+    );
+
+    // And the receipt that names its version correctly is `unverifiable` under the same gap,
+    // exactly as in round 24: only what needs the manifest's CONTENT is a capability gap.
+    let report = verify_receipt_report(&base, &gapped).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+    assert!(report.findings.iter().all(|finding| finding.outcome != Outcome::Invalid));
+
+    // With the profile, both mutations are `invalid` too: the rules never depended on the gap.
+    for receipt in [&unknown_version, &not_before] {
+        assert!(matches!(
+            verify_receipt(receipt, &trust_policy()),
+            Err(ReceiptError::SubjectManifestBindingInvalid(_))
+        ));
+    }
+}
+
 /// An untrusted `local-policy` witness entry no cosignature names costs the run nothing.
 ///
 /// I-D §7.1: "Every key USED in verification MUST appear in `keys` with its source and its
