@@ -124,6 +124,34 @@
       "rule": "receipt §3 — `leaf_path` must open `outputs_root`"
     },
     {
+      "claim_type": "record-derived",
+      "expect": "reject",
+      "file": "record-derived-partial-input-members-must-fail.ahl",
+      "reason": "tree material for `sha256:617e00fdd320f027066b55fc2a792c24033405d22d995eb313c7c1a2cbc35d21` is invalid: commits 3 input(s), 1 proven by `input_members` — I-D §7.2 requires \"the listed inputs and no others\"",
+      "rule": "I-D §7.2 — `input_members` proves the listed inputs and no others"
+    },
+    {
+      "claim_type": "record-derived",
+      "expect": "reject",
+      "file": "record-derived-missing-input-members-must-fail.ahl",
+      "reason": "claim material for `record-derived` is missing `input_members`",
+      "rule": "I-D §7.2 — `input_members` is REQUIRED where `batch_leaf.inputs` is the input-set form"
+    },
+    {
+      "boundary": "the subject derivation committed the named output record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "record-derived",
+      "embedded_receipts": 0,
+      "expect": "accept",
+      "file": "record-derived-full-input-array.ahl"
+    },
+    {
+      "claim_type": "record-derived",
+      "expect": "reject",
+      "file": "record-derived-input-members-on-full-array-must-fail.ahl",
+      "reason": "malformed receipt: `claim_material.input_members` is carried ONLY where `batch_leaf.inputs` is the input-set form; the full-array form of I-D §2.7 lists its inputs in the leaf and commits no `input_set_root` for a member to open (I-D §7.2)",
+      "rule": "I-D §7.2 / §2.7 — `input_members` is carried only with the input-set form"
+    },
+    {
       "boundary": "a trigger naming the record is anchored and signed under the declared chain by the declared issuer; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-declared",
       "embedded_receipts": 2,

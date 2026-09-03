@@ -690,8 +690,18 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     // --- record-derived (batch member, with input-set membership) ----------------
     let w1_leaf = leaf_index(corpus, &corpus.wide_outputs_root, &r.w1);
     let w2_leaf = leaf_index(corpus, &corpus.wide_outputs_root, &r.w2);
-    let a2_input = leaf_index(corpus, &corpus.input_set_root, &r.c_a2);
-    let derived = |path: Vec<String>, note: &str| {
+    // I-D §7.2: `input_members` proves "the listed inputs and no others", so the complete
+    // committed input set is carried — one member per leaf of the input-set tree.
+    let input_members: Vec<Value> = (0..corpus.tree_leaves(&corpus.input_set_root).len())
+        .map(|index| {
+            json!({
+                "input": corpus.tree_leaves(&corpus.input_set_root)[index],
+                "input_index": index,
+                "input_path": corpus.tree_path(&corpus.input_set_root, index),
+            })
+        })
+        .collect();
+    let derived = |path: Vec<String>, members: Value, note: &str| {
         Spec {
             claim_type: "record-derived",
             subject_index: 10,
@@ -707,11 +717,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 "batch_leaf": corpus.tree_leaves(&corpus.wide_outputs_root)[w1_leaf],
                 "leaf_index": w1_leaf,
                 "leaf_path": path,
-                "input_members": [ {
-                    "input": corpus.tree_leaves(&corpus.input_set_root)[a2_input],
-                    "input_index": a2_input,
-                    "input_path": corpus.tree_path(&corpus.input_set_root, a2_input),
-                } ],
+                "input_members": members,
             }),
             producer_keys: None,
             note: note.to_owned(),
@@ -722,13 +728,17 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "record-derived-valid.ahl",
         receipt: derived(
             corpus.tree_path(&corpus.wide_outputs_root, w1_leaf),
+            json!(input_members),
             "Proves that the batch derivation at entry 10 committed output record W1, by \
              opening the batch output tree at the carried `ahl-leaf-v2` leaf, and — through \
-             `input_members` — that record A2 is a member of the input set that leaf commits by \
-             root. Two trees are traversed: the outputs tree against `outputs_root`, and the \
-             input-set tree against the leaf's `inputs.input_set_root`. It proves nothing about \
-             the batch's other output, nothing about the input set's other two members, and \
-             nothing about A2's own upstream provenance — those are separate claims.",
+             `input_members` — that the leaf's input set is exactly the three inputs carried, \
+             each opening the `input_set_root` that leaf commits. Two trees are traversed: the \
+             outputs tree against `outputs_root`, and the input-set tree against the leaf's \
+             `inputs.input_set_root`. The whole input set is carried because I-D §7.2 asks the \
+             member to prove \"the listed inputs and no others\": a subset would leave the \
+             derivation's remaining inputs unstated under a root that says how many there \
+             were. It proves nothing about the batch's other output, and nothing about those \
+             inputs' own upstream provenance — those are separate claims.",
         ),
         expect: Expect::Accept,
     });
@@ -736,6 +746,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "record-derived-wrong-path-must-fail.ahl",
         receipt: derived(
             corpus.tree_path(&corpus.wide_outputs_root, w2_leaf),
+            json!(input_members),
             "MUST FAIL. `leaf_index` and `batch_leaf` name W1 but `leaf_path` is the inclusion \
              path of the other leaf of the same tree, so recomputation does not reach \
              `outputs_root`. Everything else is byte-identical to record-derived-valid.ahl.",
@@ -744,6 +755,126 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             rule: "receipt §3 — `leaf_path` must open `outputs_root`",
             matches: |e| {
                 matches!(e, ReceiptError::InclusionPathInvalid { what: "batch output leaf" })
+            },
+        },
+    });
+    out.push(Vector {
+        file: "record-derived-partial-input-members-must-fail.ahl",
+        receipt: derived(
+            corpus.tree_path(&corpus.wide_outputs_root, w1_leaf),
+            json!([input_members[0]]),
+            "MUST FAIL. One genuine, correctly proven input membership out of the three the \
+             leaf's `input_set_count` commits. Nothing carried is wrong: the member opens \
+             `input_set_root` at its own index. What is missing is the rest of the set. I-D \
+             §7.2 requires `input_members` to prove \"the listed inputs and no others\", so a \
+             partial list is not a weaker proof of the same claim but a proof of a different \
+             one — and accepting it would let a producer disclose the convenient inputs of a \
+             batch derivation and withhold the rest, under a root that states how many there \
+             were.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.2 — `input_members` proves the listed inputs and no others",
+            matches: |e| matches!(e, ReceiptError::TreeMaterialInvalid { .. }),
+        },
+    });
+    out.push(Vector {
+        file: "record-derived-missing-input-members-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "record-derived",
+            subject_index: 10,
+            anchor: cp20,
+            chain: vec![0],
+            record_subject: scores(&r.w1),
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({
+                "output": { "dataset": DS_SCORES, "record": r.w1 },
+                "batch_leaf": corpus.tree_leaves(&corpus.wide_outputs_root)[w1_leaf],
+                "leaf_index": w1_leaf,
+                "leaf_path": corpus.tree_path(&corpus.wide_outputs_root, w1_leaf),
+            }),
+            producer_keys: None,
+            note: "MUST FAIL. The output side is impeccable — the leaf opens `outputs_root` at \
+                   its own index — and `input_members` is simply absent. The leaf takes the \
+                   input-set form of I-D §2.7, which commits its inputs by ROOT and lists none \
+                   of them, so with no members the derivation's inputs are not carried at all. \
+                   I-D §7.2 makes the member REQUIRED under exactly that form. A verifier \
+                   treating it as optional would accept a batch derivation that states its \
+                   outputs and keeps every input unstated, which is the one thing the \
+                   input-set form exists to make provable."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.2 — `input_members` is REQUIRED where `batch_leaf.inputs` is the \
+                   input-set form",
+            matches: |e| {
+                matches!(e, ReceiptError::ClaimMaterialMissing { field: "input_members", .. })
+            },
+        },
+    });
+
+    // The other form of §2.7's `inputs`: the batch at entry 4 lists its inputs in the leaf and
+    // commits no `input_set_root`, so `input_members` is forbidden there rather than optional.
+    let s2_batch_leaf = leaf_index(corpus, &corpus.batch_root, &r.s2);
+    let full_array_batch = |members: Option<Value>, note: &str| {
+        let mut claim_material = json!({
+            "output": { "dataset": DS_SCORES, "record": r.s2 },
+            "batch_leaf": corpus.tree_leaves(&corpus.batch_root)[s2_batch_leaf],
+            "leaf_index": s2_batch_leaf,
+            "leaf_path": corpus.tree_path(&corpus.batch_root, s2_batch_leaf),
+        });
+        if let Some(members) = members {
+            claim_material["input_members"] = members;
+        }
+        Spec {
+            claim_type: "record-derived",
+            subject_index: 4,
+            anchor: cp20,
+            chain: vec![0],
+            record_subject: scores(&r.s2),
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material,
+            producer_keys: None,
+            note: note.to_owned(),
+        }
+        .build(corpus, keys)
+    };
+    out.push(Vector {
+        file: "record-derived-full-input-array.ahl",
+        receipt: full_array_batch(
+            None,
+            "Proves that the batch derivation at entry 4 committed output record S2, through \
+             the other form of I-D §2.7's `inputs`: the leaf carries the full array of input \
+             objects rather than an input-set root. The inputs are therefore in the leaf that \
+             `leaf_path` opens against `outputs_root`, already covered by the derivation's own \
+             signature and anchoring, and `input_members` is absent because there is no \
+             `input_set_root` for a membership path to open. Compare `record-derived-valid.ahl`, \
+             whose leaf uses the input-set form and must carry the members in full.",
+        ),
+        expect: Expect::Accept,
+    });
+    out.push(Vector {
+        file: "record-derived-input-members-on-full-array-must-fail.ahl",
+        receipt: full_array_batch(
+            Some(json!(input_members)),
+            "MUST FAIL. The same claim as `record-derived-full-input-array.ahl`, with \
+             `input_members` carried anyway. The members are genuine — they are the complete, \
+             correctly proven input set of the OTHER batch, at entry 10 — and that is exactly \
+             the problem: this leaf commits no `input_set_root`, so nothing here binds those \
+             members to this derivation, and a verifier that opened them against whatever root \
+             it could find would be reporting one batch's inputs as another's. I-D §7.2 carries \
+             the member only where `batch_leaf.inputs` is the input-set form.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.2 / §2.7 — `input_members` is carried only with the input-set form",
+            matches: |e| {
+                matches!(e, ReceiptError::Malformed(detail) if detail.contains("input_members"))
             },
         },
     });

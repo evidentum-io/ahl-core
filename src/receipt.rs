@@ -4470,14 +4470,33 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
     verify_content_binding(ctx, &claimed.0, &claimed.1, "output_bytes")
 }
 
-/// Optional `input_members` (§3): each proves one input's membership in the leaf's input set.
+/// `input_members` (I-D §7.2): each proves one input's membership in the leaf's input set.
+///
+/// §7.2's `record-derived` row carries the member "only where `batch_leaf.inputs` is the
+/// input-set form, proving the listed inputs and no others", and §2.7 gives the two forms
+/// `inputs` may take: the full array of input objects, or `{input_set_root, input_set_count}`.
+/// So the member is REQUIRED under one form and forbidden under the other, and each direction
+/// is its own defect:
+///
+/// *   Under the input-set form the leaf commits its inputs by ROOT and lists none of them, so
+///     without the members the derivation's inputs are not carried at all. Accepting the leaf
+///     anyway would let a batch derivation claim outputs while keeping every input unstated —
+///     the one thing the input-set form exists to make provable.
+/// *   Under the full-array form the leaf lists its inputs itself and commits no root, so
+///     there is nothing for a membership path to open; a carried member could only be about
+///     some other tree.
+///
+/// "The listed inputs and no others" is a statement about the WHOLE set, so the members must
+/// cover it exactly: one member per committed leaf, at distinct indexes, each opening the
+/// committed root. A short list proves a subset and would let a producer disclose the
+/// convenient inputs and withhold the rest under a root that says how many there were.
 fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -> Result<()> {
     let material = ctx.material()?;
     // Where present, the member is an array; a wrong type is `invalid` and is never read as
     // absent, which would silently skip every input-membership proof the receipt carries.
     let members = match material.get("input_members") {
-        None => return Ok(()),
-        Some(Value::Array(members)) => members,
+        None => None,
+        Some(Value::Array(members)) => Some(members),
         Some(_) => {
             return Err(ReceiptError::Malformed(
                 "`claim_material.input_members`, where present, MUST be an array (I-D §7.2)"
@@ -4486,21 +4505,66 @@ fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -
         }
     };
     let inputs = leaf.get("inputs").ok_or_else(|| ctx.missing("batch_leaf.inputs"))?;
-    let root = text(inputs, "input_set_root")?;
-    let count = number(inputs, "input_set_count")?;
-    for member in members {
-        let input = obj(member, "input")?;
-        check_inclusion(
-            &jcs(input),
-            number(member, "input_index")?,
-            count,
-            &path_strings(member, "input_path")?,
-            &parse_hash_hex(root)?,
-            "input-set member",
-            budget,
-        )?;
+    match inputs {
+        Value::Array(_) => {
+            if members.is_some() {
+                return Err(ReceiptError::Malformed(
+                    "`claim_material.input_members` is carried ONLY where `batch_leaf.inputs` \
+                     is the input-set form; the full-array form of I-D §2.7 lists its inputs in \
+                     the leaf and commits no `input_set_root` for a member to open (I-D §7.2)"
+                        .to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        Value::Object(_) => {
+            let members = members.ok_or_else(|| ctx.missing("input_members"))?;
+            let root = text(inputs, "input_set_root")?;
+            let count = number(inputs, "input_set_count")?;
+            let mut opened = BTreeSet::new();
+            for member in members {
+                let input = obj(member, "input")?;
+                let index = number(member, "input_index")?;
+                check_inclusion(
+                    &jcs(input),
+                    index,
+                    count,
+                    &path_strings(member, "input_path")?,
+                    &parse_hash_hex(root)?,
+                    "input-set member",
+                    budget,
+                )?;
+                if !opened.insert(index) {
+                    return Err(ReceiptError::TreeMaterialInvalid {
+                        root: root.to_owned(),
+                        detail: format!(
+                            "two `input_members` entries open index {index}; the set is proven \
+                             once per committed leaf (I-D §7.2)"
+                        ),
+                    });
+                }
+            }
+            // Every index opened is distinct and, by `check_inclusion`, smaller than `count`,
+            // so an equal cardinality is exactly the committed set.
+            if opened.len() as u64 == count {
+                Ok(())
+            } else {
+                Err(ReceiptError::TreeMaterialInvalid {
+                    root: root.to_owned(),
+                    detail: format!(
+                        "commits {count} input(s), {} proven by `input_members` — I-D §7.2 \
+                         requires \"the listed inputs and no others\"",
+                        opened.len()
+                    ),
+                })
+            }
+        }
+        _ => Err(ReceiptError::Malformed(
+            "`batch_leaf.inputs` is either the full array of input objects or the input-set \
+             form `{input_set_root, input_set_count}` (I-D §2.7)"
+                .to_owned(),
+        )),
     }
-    Ok(())
 }
 
 /// Render a `(dataset, record)` pair for an error message.

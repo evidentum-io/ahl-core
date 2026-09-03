@@ -1317,6 +1317,21 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl" => {
             matches!(error, ReceiptError::FormatConflict { .. })
         }
+        // I-D §7.2's `record-derived` row: `input_members` is carried "only where
+        // `batch_leaf.inputs` is the input-set form, proving the listed inputs and no others",
+        // and I-D §2.7 gives the two forms. Three ways to break that, three different errors:
+        // absent under the form that requires it, short of the committed set, and carried
+        // under the form that commits no root for it to open.
+        "record-derived-missing-input-members-must-fail.ahl" => {
+            matches!(error, ReceiptError::ClaimMaterialMissing { field: "input_members", .. })
+        }
+        "record-derived-partial-input-members-must-fail.ahl" => {
+            matches!(error, ReceiptError::TreeMaterialInvalid { detail, .. }
+                if detail.contains("no others"))
+        }
+        "record-derived-input-members-on-full-array-must-fail.ahl" => {
+            matches!(error, ReceiptError::Malformed(detail) if detail.contains("input_members"))
+        }
         // I-D §7.2's record rows: the bytes and `canonicalization` are carried if and only if
         // `content_binding` is not `none`, `media_type` only alongside a carried descriptor.
         // Breaking the biconditional either way is `invalid`; the error distinguishes the two
