@@ -1437,6 +1437,18 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             matches!(error, ReceiptError::TreeMaterialInvalid { detail, .. }
                 if detail.contains("is not a canonical record commitment"))
         }
+        // I-D §7.1's container shape for `governance.chain[]` — "an anchored manifest
+        // statement's complete envelope" — and I-D §7.5.1 4c's completeness rule, the two
+        // halves of where governance material may travel once §7.4 puts producer-key
+        // transitions in enumeration material alone.
+        "governance-chain-key-statement-element-must-fail.ahl" => {
+            matches!(error, ReceiptError::GovernanceChainInvalid(detail)
+                if detail.contains("carries a `key` statement at entry index 9"))
+        }
+        "governance-enumerated-manifest-omitted-must-fail.ahl" => {
+            matches!(error, ReceiptError::GovernanceChainInvalid(detail)
+                if detail.contains("`manifest` statement at entry index 25"))
+        }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };
     assert!(fired, "{name}: expected rejection by {rule}, got: {error}");
@@ -1461,6 +1473,36 @@ fn every_negative_receipt_is_rejected_by_the_rule_it_names() {
         rejected += 1;
     }
     assert!(rejected >= 15, "every registry claim type needs a negative vector, got {rejected}");
+}
+
+/// I-D §7.1: every `governance.chain[]` element is "an anchored manifest statement's complete
+/// envelope", and §7.4 puts producer-key transitions in enumeration material alone.
+///
+/// This guards the corpus premise the round's structural change rests on. A future generator
+/// change that put a `key` statement back into some chain would leave every vector still
+/// passing — the receipt would simply be refused for a different reason, or, if the rule were
+/// ever relaxed, silently accepted — while the corpus quietly stopped demonstrating where
+/// governance material travels.
+#[test]
+fn every_accepted_receipt_carries_manifests_only_in_its_governance_chain() {
+    let mut checked = 0;
+    for entry in receipt_index()["vectors"].as_array().expect("vectors") {
+        if field_str(entry, "expect").expect("expect") != "accept" {
+            continue;
+        }
+        let name = field_str(entry, "file").expect("file");
+        let (_, receipt) = read_receipt(name);
+        for hop in receipt["governance"]["chain"].as_array().expect("chain") {
+            let kind = field_str(&hop["envelope"]["payload"], "type").expect("statement type");
+            assert_eq!(
+                kind, "manifest",
+                "{name}: `governance.chain[]` carries a `{kind}` statement at entry index {}",
+                hop["entry_index"]
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 15, "the accepted vectors must carry chain elements at all, got {checked}");
 }
 
 #[test]

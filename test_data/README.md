@@ -207,6 +207,30 @@ ordinary artifact of a real log rather than something a producer must manufactur
    reaching entry 37 fails by §2.7. Every closure scenario this corpus publishes stops at tree
    size 28 or below, and the three defective trees are deliberately absent from
    `vectors/merkle/`, where they would be read as conforming material.
+12. **Where governance material travels.** I-D §7.1 defines every `governance.chain[]` element
+   as "an anchored manifest statement's complete envelope", and §7.4 says the other governance
+   type travels elsewhere: "`governance.chain[]` carries manifest statements; producer-key
+   transitions are `key` statements, and those reach a verifier only through enumeration
+   material." Every chain in this corpus therefore carries manifests and nothing else — `[0]`
+   or `[0, 25]` — while the `key` statements at entries 9, 28, 30 and 31 reach a verifier
+   through the enumerated range, which §7.5.1 4b merges with the chain in entry-index order to
+   form one induction. Two negatives police the two halves of that split.
+   `governance-chain-key-statement-element-must-fail.ahl` carries the genuine entry-9 `key`
+   statement as a chain element — real envelope, real signature, real inclusion path — and is
+   refused as a container the format does not define, because a chain that may carry key
+   transitions is a second, unenumerated carrier for them.
+   `governance-enumerated-manifest-omitted-must-fail.ahl` omits manifest v2's chain element
+   from a receipt whose own enumeration proves v2 anchored at entry 25, and is refused because
+   §7.5.1 4c's "the range proof forecloses omission" holds only if the induction walked every
+   manifest the range reveals.
+
+   One consequence follows for declared mode and is worth stating: a declared-mode receipt
+   carries no `key` statement at all, so a subject signed by a key some `key` statement added
+   after the manifest version the subject binds to is not verifiable in that mode. I-D §7.4
+   governs, and puts the obligation on the producer: "A producer intending its receipts to be
+   verifiable in declared mode MUST anchor a manifest version snapshotting the current producer
+   key set before issuing them." Every declared-mode vector in this corpus satisfies that: its
+   subject resolves against the manifest snapshot in force at its own entry index.
 
 ## Regenerating
 

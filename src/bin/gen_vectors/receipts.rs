@@ -2083,6 +2083,86 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Accept,
     });
 
+    // I-D §7.1's container shape for `governance.chain[]`, from the other side: an element
+    // that is not a manifest statement at all.
+    out.push(Vector {
+        file: "governance-chain-key-statement-element-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 3,
+            anchor: cp20,
+            chain: vec![0, 9],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: None,
+            note: "MUST FAIL. The chain carries the genuine `key` statement anchored at entry \
+                   9 as a second element: real envelope, real signature by a producer key in \
+                   force at that index, real inclusion path to cp20's root. I-D §7.1 defines \
+                   each `governance.chain[]` element as \"an anchored manifest statement's \
+                   complete envelope\", and §7.4 says where the other governance type travels: \
+                   \"`governance.chain[]` carries manifest statements; producer-key \
+                   transitions are `key` statements, and those reach a verifier only through \
+                   enumeration material.\" A chain that carries one anyway is a container the \
+                   format does not define, and a verifier that walked it would let the chain \
+                   be a second, unenumerated carrier for key transitions — the exact omission \
+                   the enumerated range proof exists to foreclose. The type is read only after \
+                   the element's own signature has verified, so the refusal never rests on \
+                   bytes no key vouches for."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 / §7.4 — every governance.chain[] element is a manifest statement",
+            matches: |e| {
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail)
+                    if detail.contains("carries a `key` statement at entry index 9"))
+            },
+        },
+    });
+
+    // The completeness rule of I-D §7.5.1 4c, in the one direction enumerated mode still has
+    // to police once `key` statements are the induction's own second stream: a MANIFEST the
+    // range reveals but the chain does not carry.
+    out.push(Vector {
+        file: "governance-enumerated-manifest-omitted-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "governance-state",
+            subject_index: 25,
+            anchor: cp28,
+            chain: vec![0],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 28, cp28),
+            claim_material: json!({ "target_index": 26 }),
+            producer_keys: None,
+            note: "MUST FAIL. Everything `governance-state-valid.ahl` carries is here except \
+                   manifest version 2's own chain element, and the enumeration over [0, 28) \
+                   proves that version 2 IS anchored at entry 25. I-D §7.5.1 4c: \"Under \
+                   `enumerated` governance the range proof over exactly [0, tree_size(C)) \
+                   forecloses omission, so K at each index IS the state that was in force\" — \
+                   which it can only be if the induction walked every manifest the range \
+                   reveals. Accepting this would report a key state derived from the genesis \
+                   snapshot as the state active at entry 26, when a manifest the receipt \
+                   itself proves anchored had already replaced it in full."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4c — the chain carries every manifest the enumerated range \
+                   reveals",
+            matches: |e| {
+                matches!(e, ReceiptError::GovernanceChainInvalid(detail)
+                    if detail.contains("`manifest` statement at entry index 25 that the presented chain omits"))
+            },
+        },
+    });
+
     // --- governance-key rotation proofs (I-D §7.1, §7.5.1 4b(M)): four ways an element can
     // fail, each mutating the one genuine rotation proof `governance_state_valid` carries.
     out.push(Vector {

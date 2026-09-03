@@ -348,6 +348,20 @@
       "file": "governance-state-self-retiring-key.ahl"
     },
     {
+      "claim_type": "statement-anchored",
+      "expect": "reject",
+      "file": "governance-chain-key-statement-element-must-fail.ahl",
+      "reason": "governance chain invalid: `governance.chain[]` carries a `key` statement at entry index 9; each element is an anchored MANIFEST statement's envelope (I-D §7.1), and producer-key transitions reach a verifier only through enumeration material (I-D §7.4)",
+      "rule": "I-D §7.1 / §7.4 — every governance.chain[] element is a manifest statement"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-enumerated-manifest-omitted-must-fail.ahl",
+      "reason": "governance chain invalid: enumeration reveals a `manifest` statement at entry index 25 that the presented chain omits",
+      "rule": "I-D §7.5.1 4c — the chain carries every manifest the enumerated range reveals"
+    },
+    {
       "claim_type": "governance-state",
       "expect": "reject",
       "file": "governance-key-rotation-proof-missing-must-fail.ahl",
