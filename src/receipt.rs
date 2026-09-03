@@ -1668,14 +1668,21 @@ type Tolerated = (Assertion, Vec<String>, ReceiptError);
 /// *   The witness cosignatures rest on both of those and on the checkpoint itself, since a
 ///     cosignature is over the checkpoint the log signed.
 /// *   Envelope validity rests on GOVERNANCE: §2.1 wants a key active at the envelope's own
-///     entry index, and it is the induction that establishes which keys those are.
+///     entry index, and it is the induction that establishes which keys those are. Where the
+///     induction stopped early ([`Governance::established_at`]), the checks that would resolve
+///     a key at or after that index are SKIPPED rather than run against the superseded state,
+///     and their assertions are settled here.
 /// *   Claim material rests on governance and envelope validity only where the claim type's own
 ///     material does — §7.5.1 4e is "applied ONLY to envelopes already valid under 4d", and
 ///     only the authority-dependent types reach it. That one is decided by the claim type at
 ///     the call site rather than here (see [`AUTHORITY_DEPENDENT_TYPES`]).
-/// *   Cross-field and content binding rest on nothing: every §7.6 rule is decidable from the
-///     receipt's own bytes, and a content binding resolves its descriptor from the CARRIED
-///     manifest, whose authenticity is a separate assertion from its contents.
+/// *   Content binding rests on nothing: it resolves its descriptor from the CARRIED manifest,
+///     whose authenticity is a separate assertion from its contents.
+/// *   Cross-field rests on nothing STATICALLY, because every §7.6 rule is decidable from the
+///     receipt's own bytes — except the two that compare an assurance member against what 4f
+///     established. Where one of those was not evaluated, the call site names the assertion
+///     that blocked it, and the finding is `unverifiable` rather than `verified`: a rule that
+///     was skipped is not a rule that held.
 const fn prerequisites(assertion: Assertion) -> &'static [Assertion] {
     match assertion {
         Assertion::CheckpointAuthentication => &[Assertion::AdaptorProfile, Assertion::Governance],

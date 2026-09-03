@@ -75,14 +75,31 @@ reaches is fixed rather than left to the order of the algorithm:
 
 | Unverifiable | What rests on it | What is still checked |
 | --- | --- | --- |
-| `adaptor-profile` (no profile held, one this build cannot interpret, a capability it does not define, a policy claiming one this build cannot parse) | `checkpoint-authentication`, `witnesses` — the profile document fixes the checkpoint serialization the signature is computed over | structure, paths, governance induction, envelope validity, cross-field, claim material, content binding |
-| `governance` (the configured genesis anchor differs, or the configured genesis key fingerprints do) | `envelope-validity`, `checkpoint-authentication`, `witnesses`, and the claim material of the authority-dependent types | structure, paths, the chain walk itself, cross-field, claim-material shape checks, content binding |
-| `witnesses` (a `local-policy` witness key the verifier does not hold) | nothing | everything else, the checkpoint signature included |
+| `adaptor-profile` (no profile held, one this build cannot interpret, a capability it does not define, a policy claiming one this build cannot parse) | `checkpoint-authentication`, `witnesses` — the profile document fixes the checkpoint serialization the signature is computed over — and, where the chain rotates a governance key set, `governance` too (see below) | structure, paths, the chain walk, envelope validity, claim material, content binding |
+| `governance` (the configured genesis anchor differs, the configured genesis key fingerprints do, or the induction stopped at a rotation it could not authenticate) | `envelope-validity`, `checkpoint-authentication`, `witnesses`, and the claim material of the authority-dependent types | structure, paths, the chain walk itself, claim-material shape checks, content binding |
+| `witnesses` (a `local-policy` witness key the verifier does not hold) | `cross-field`, since §7.6's `witnessed` rule is one of its rules | everything else, both checkpoint signatures included |
 | `envelope-validity` (a declared-mode producer-key transition the mode does not carry) | the claim material of the authority-dependent types (§7.5.1 4e is applied only to envelopes valid under 4d) | everything else |
 | `content-binding` (an unimplemented canonicalization procedure, a dataset key not held) | nothing | everything else |
 
 An assertion resting on an unverifiable one is itself `unverifiable`, with a detail naming that
-prerequisite. Two conditions end the run even so, both ordering rules rather than reductions: an
+prerequisite, and dependence is transitive.
+
+Two consequences are worth stating on their own. **A rotation that cannot be authenticated
+applies no effect.** I-D §7.5.1 4b(M) proves a rotating manifest's own anchoring under the
+OUTGOING key state, and that proof rests on a checkpoint — so without the adaptor profile phase
+2 has not passed, and 4b's "No effect is ever applied to K by a statement that has not completed
+both earlier phases" governs: the induction stops before that manifest, K stays pre-rotation,
+`governance` is `unverifiable` naming the entry index, and every check that would resolve a key
+at or after it is skipped rather than run against a superseded state — which is also 4f's own
+rule. A chain that rotates nothing is untouched. **Each checkpoint's cosignatures are their
+own question.** A `local-policy` witness key the verifier does not hold leaves the cosignatures
+that NAME it unevaluated and nothing else: the cosignatures under keys that did resolve are
+verified, both the primary and the later checkpoint's log signatures are verified, and
+`assurance.continued_history` is still evaluated against `later_checkpoint`, `later_witnesses`
+and `consistency_path`. A later checkpoint that does not verify is `invalid` and is never hidden
+behind an unrelated gap. Where a §7.6 rule COULD not be evaluated — `witnessed` or
+`continued_history` — the `cross-field` finding is `unverifiable` naming what blocked it, since
+a rule that was skipped is not a rule that held. Two conditions end the run even so, both ordering rules rather than reductions: an
 unsupported version, which §7.5 step 1 follows with "no further processing", and an exhausted
 verifier-local budget, which §7.8 requires to fail closed. A boundary is rendered only for
 `verified`, and no result is ever expressed by rewriting the receipt's own assurance fields.
