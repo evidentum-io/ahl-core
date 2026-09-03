@@ -2039,7 +2039,19 @@ fn reanchor(receipt: &mut Value) {
     };
     let mut anchored = envelopes(&statement_vectors());
     let subject_index = index_of(&receipt["subject"]);
-    for hop in receipt["governance"]["chain"].as_array().expect("chain").clone() {
+    // Both carriers of governance material are read as substitutions into the log: the chain
+    // for manifest statements (I-D §7.1) and the enumeration for `key` statements (I-D §7.4).
+    // Where an index appears in both, the chain hop governs and the enumerated entry is
+    // rewritten from it below, so the two carriers never disagree about one entry.
+    let carried: Vec<Value> = receipt["governance"]["currency"]["material"]["entries"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .chain(receipt["governance"]["chain"].as_array().expect("chain"))
+        .cloned()
+        .collect();
+    for hop in carried {
         anchored[index_of(&hop)] = hop["envelope"].clone();
         // A governance statement that is ALSO the receipt's subject is ONE anchored entry, and
         // one entry index holds one envelope. An edit to the hop is therefore an edit to the
@@ -2068,6 +2080,22 @@ fn reanchor(receipt: &mut Value) {
         let index =
             usize::try_from(hop["entry_index"].as_u64().expect("entry_index")).expect("index fits");
         hop["inclusion_path"] = path(index);
+    }
+    // Enumerated currency is authenticated against the same root, so its range proof is
+    // reissued over the rebuilt tree; without this every edited receipt would fail on the range
+    // proof rather than on the rule under test.
+    let material = &mut receipt["governance"]["currency"]["material"];
+    if let Some(range) = material.get("range").cloned() {
+        let from = range["from_index"].as_u64().expect("from_index");
+        let to = range["to_index"].as_u64().expect("to_index");
+        let hashes: Vec<_> = prefix.iter().map(|leaf| leaf_hash(leaf)).collect();
+        let proof = range_proof::generate(&hashes, from, to).expect("range within the checkpoint");
+        for entry in material["entries"].as_array_mut().expect("entries") {
+            let index =
+                usize::try_from(entry["entry_index"].as_u64().expect("entry_index")).expect("fits");
+            entry["envelope"] = anchored[index].clone();
+        }
+        material["range_proof"] = json!({ "adaptor_form": range_proof::encode(&proof) });
     }
 
     let signed = checkpoint(
@@ -3328,11 +3356,11 @@ fn governance_chain_rules_reject() {
     assert_rejects_anchored(
         "governance-state-valid.ahl",
         |r| {
-            r["governance"]["chain"][2]["envelope"]["payload"]
+            r["governance"]["chain"][1]["envelope"]["payload"]
                 .as_object_mut()
                 .expect("manifest payload")
                 .remove("predecessor");
-            resign(&mut r["governance"]["chain"][2]["envelope"], &producer_key());
+            resign(&mut r["governance"]["chain"][1]["envelope"], &producer_key());
         },
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — a non-genesis manifest references its predecessor",
@@ -3340,8 +3368,8 @@ fn governance_chain_rules_reject() {
     assert_rejects_anchored(
         "governance-state-valid.ahl",
         |r| {
-            corrupt(&mut r["governance"]["chain"][2]["envelope"]["payload"]["predecessor"]);
-            resign(&mut r["governance"]["chain"][2]["envelope"], &producer_key());
+            corrupt(&mut r["governance"]["chain"][1]["envelope"]["payload"]["predecessor"]);
+            resign(&mut r["governance"]["chain"][1]["envelope"], &producer_key());
         },
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — the predecessor reference is the predecessor's entry id",
@@ -3352,11 +3380,14 @@ fn governance_chain_rules_reject() {
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.5 — chain hops ascend by entry index",
     );
+    // The `key` statement's own 4b(K) rules are exercised through the ENUMERATION, which is
+    // where I-D §7.4 puts producer-key transitions; entry 9 is the corpus's first one.
     assert_rejects_anchored(
         "governance-state-valid.ahl",
         |r| {
-            r["governance"]["chain"][1]["envelope"]["payload"]["action"] = json!("revoke");
-            resign(&mut r["governance"]["chain"][1]["envelope"], &producer_key());
+            let entry = &mut r["governance"]["currency"]["material"]["entries"][9];
+            entry["envelope"]["payload"]["action"] = json!("revoke");
+            resign(&mut entry["envelope"], &producer_key());
         },
         |e| matches!(e, ReceiptError::GovernanceChainInvalid(_)),
         "§2.3.6 — key actions are add or retire",
@@ -3381,8 +3412,8 @@ fn governance_chain_rules_reject() {
 /// result", which is a licence to check early, never a licence to REPORT in that order.
 #[test]
 fn step_3_path_checks_precede_the_step_4_induction() {
-    // Entry 9's `key` statement, anchored WITH a signature that does not verify: corrupting a
-    // signature changes the envelope's bytes and therefore its entry id, so the hop has to be
+    // Manifest version 2's chain hop, anchored WITH a signature that does not verify: corrupting
+    // a signature changes the envelope's bytes and therefore its entry id, so the hop has to be
     // re-anchored or the defect under test never gets past step 3 on its own.
     let (_, mut signature_only) = read_receipt("governance-state-valid.ahl");
     corrupt(&mut signature_only["governance"]["chain"][1]["envelope"]["signatures"][0]["sig"]);
@@ -3392,7 +3423,7 @@ fn step_3_path_checks_precede_the_step_4_induction() {
     assert!(
         matches!(
             verify_receipt(&signature_only, &trust_policy()),
-            Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: 9 })
+            Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: 25 })
         ),
         "a chain hop whose signature does not verify is caught by the induction (4b phase 1)"
     );
@@ -3496,10 +3527,20 @@ fn cross_field_consistency_rules_reject() {
             r["claim"]["assurance"]["governance"] = json!("assumed");
             r["governance"]["currency"]["mode"] = json!("assumed");
         },
-        // I-D §7.3 closes the domain at the assurance block, so an unknown token is caught
-        // there — ahead of the currency mode it has to equal.
+        // I-D §7.1 draws `governance.currency.mode` as the enumerated token
+        // `"declared | enumerated"`, and the mode now decides at step 3 whether enumeration
+        // material is decoded at all, so an unknown token is a container-shape failure there —
+        // ahead of the assurance block it has to equal.
+        |e| matches!(e, ReceiptError::Malformed(detail) if detail.contains("governance mode")),
+        "I-D §7.1 — governance.currency.mode is declared or enumerated",
+    );
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        // The same unknown token on the assurance side alone, where §7.3's closed domain is
+        // what rejects it.
+        |r| r["claim"]["assurance"]["governance"] = json!("assumed"),
         |e| matches!(e, ReceiptError::AssuranceMismatch { field: "governance" }),
-        "I-D §7.3 — governance is declared or enumerated",
+        "I-D §7.3 — assurance.governance is declared or enumerated",
     );
     assert_rejects(
         "trigger-declared-valid.ahl",

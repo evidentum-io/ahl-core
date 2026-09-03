@@ -2212,9 +2212,151 @@ fn verify_rotation_proof(
     Ok(())
 }
 
-/// Build and structurally validate the governance chain (I-D §7.5.1 4a-4c): the base case,
+/// I-D §7.5.1 4b's ascending-entry-index requirement over the MERGED induction stream.
+///
+/// Both sources are internally ascending, so the only thing left to rule out is one entry index
+/// arriving twice — once from `governance.chain[]` and once from the enumerated `key`
+/// statements. That would be two hash proofs against one root disagreeing about what the log
+/// holds at that index, which no conforming material can produce; the walk refuses it rather
+/// than choosing an order for the pair.
+fn check_merged_order(walked_index: u64, index: u64) -> Result<()> {
+    if walked_index >= index {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "the merged governance walk reaches entry index {index} after {walked_index}; the \
+             manifest chain and the enumerated `key` statements are walked in ascending \
+             entry-index order, and no index may be claimed by both (I-D §7.5.1 4b)"
+        )));
+    }
+    Ok(())
+}
+
+/// I-D §7.5.1 4b phase 1, identical for both induction types: "Verify the envelope under the
+/// envelope signature rule of Section 2.1 against K AS ESTABLISHED SO FAR — the governance
+/// state in force immediately before this statement's own entry index."
+///
+/// `manifests` and `events` hold only statements strictly before `index` when this is called,
+/// so the state derived from them is exactly that pre-effect state — computed BEFORE anything
+/// about this statement's own content (schema, predecessor linkage, rotation proof, `key`
+/// object) is read.
+fn verify_governance_phase_1(
+    envelope: &Value,
+    manifests: &[(u64, &Value)],
+    events: &[KeyEvent],
+    index: u64,
+    budget: &mut Budget,
+) -> Result<()> {
+    let k_so_far = producer_keys_at_in(manifests, events, index);
+    budget.spend(1)?;
+    if crate::verify_envelope(envelope, |key_id| {
+        k_so_far.get(key_id).map(|bound| bound.pubkey.clone())
+    })? {
+        Ok(())
+    } else {
+        Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index })
+    }
+}
+
+/// I-D §7.5.1 4b(K) phase 2: a `key` statement's own form, validated before its effect on K.
+///
+/// "A statement that verifies under a valid key is thereby authentic, not thereby well formed,
+/// and applying an `action` that was never checked would let a malformed statement modify the
+/// key set." Returns the phase-3 effect for the caller to apply, so the two phases cannot be
+/// reordered by accident: there is no way to reach the [`KeyEvent`] without passing every check
+/// here first.
+fn validate_key_statement(
+    payload: &Value,
+    index: u64,
+    manifests: &[(u64, &Value)],
+    manifest_by_version_id: &BTreeMap<String, (u64, &Value)>,
+) -> Result<KeyEvent> {
+    // Phase 2, 4b(K): action, key-object shape, key-id/pubkey binding, and
+    // `valid_from` (I-D §7.5.1 4b(K)): "before a `key` statement's effect touches
+    // K, validate its form... a failure is `invalid`, and the event is NOT
+    // applied."
+    let key = obj(payload, "key")?;
+    let added = match text(payload, "action")? {
+        "add" => true,
+        "retire" => false,
+        other => {
+            return Err(ReceiptError::GovernanceChainInvalid(format!(
+                "unknown key action `{other}`"
+            )))
+        }
+    };
+    let key_id = text(key, "key_id")?.to_owned();
+    if !is_family_hash(&key_id) {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries `key.key_id` that is \
+             not a `sha256:` family string in lowercase hex (I-D §7.5.1 4b(K))"
+        )));
+    }
+    let pubkey = text(key, "pubkey")?.to_owned();
+    // "`pubkey` decodes to exactly 32 octets" and "`key_id` RECOMPUTED from
+    // `pubkey` and equal to the carried one" — the SAME rule and SAME helper I-D
+    // §6.2 states for a manifest's own producer key objects
+    // ([`recompute_producer_key_id`]), shared rather than re-derived here.
+    let recomputed = recompute_producer_key_id(&pubkey).map_err(|_| {
+        ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries `key.pubkey` that does \
+             not decode to exactly 32 octets (I-D §7.5.1 4b(K))"
+        ))
+    })?;
+    if recomputed != key_id {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries `key.key_id` \
+             (`{key_id}`) that does not equal `sha256:`-of-`key.pubkey` \
+             (`{recomputed}`) (I-D §7.5.1 4b(K))"
+        )));
+    }
+    // "`valid_from` REQUIRED and well-formed RFC 3339 (informative for ordering,
+    // but required)"
+    let valid_from = key.get("valid_from").and_then(Value::as_str).ok_or_else(|| {
+        ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries no `key.valid_from` — \
+             the member is REQUIRED (I-D §7.5.1 4b(K))"
+        ))
+    })?;
+    crate::bitemporal::parse_rfc3339("key.valid_from", valid_from).map_err(|source| {
+        ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} carries `key.valid_from` \
+                 that is not well-formed RFC 3339 (I-D §7.5.1 4b(K)): {source}"
+        ))
+    })?;
+    // I-D §2.2: a `key` statement is not a manifest statement, so it carries a
+    // `manifest` field of its own, and that field is held to the SAME rule as the
+    // subject's copy (§7.6) — it must name the manifest version ACTIVE at THIS
+    // statement's own entry index, never a stale one.
+    let claimed_manifest = text(payload, "manifest")?;
+    let active =
+        active_manifest_version_id(manifests, manifest_by_version_id, index).ok_or_else(|| {
+            ReceiptError::GovernanceChainInvalid(format!(
+                "no manifest version is active at entry index {index} (I-D §2.2)"
+            ))
+        })?;
+    if claimed_manifest != active {
+        return Err(ReceiptError::GovernanceChainInvalid(format!(
+            "key statement at entry index {index} names manifest \
+             `{claimed_manifest}`, which is not the manifest version active at \
+             that index (`{active}`) (I-D §2.2)"
+        )));
+    }
+    // Phase 3: effect — modifies the producer key set only (I-D §6.2: log and
+    // witness keys rotate only by anchoring a new manifest version).
+    Ok(KeyEvent { entry_index: index, key_id, pubkey, added })
+}
+
+/// Build and structurally validate the governance state (I-D §7.5.1 4a-4c): the base case,
 /// then the induction, each carried statement's SIGNATURE verified against K as established by
 /// its predecessors before anything about its own content is trusted.
+///
+/// The induction walks TWO streams merged in ascending entry-index order, which is what I-D
+/// §7.5.1 4b states: "the manifest statements of `governance.chain[]`, merged in entry-index
+/// order with the `key` statements the enumeration material carries where the mode carries
+/// them." `key_statements` is that second stream — empty under `declared` governance, which
+/// carries no producer-key transitions at all (§7.4). The chain itself carries manifests and
+/// nothing else: §7.1 defines each of its elements as "an anchored MANIFEST statement's
+/// complete envelope", and §7.4 says producer-key transitions "reach a verifier only through
+/// enumeration material".
 // The governance-key-rotation check (I-D §7.1, §7.5.1) folds naturally into this same
 // per-manifest walk rather than a second pass over the same material.
 #[allow(clippy::too_many_lines)]
@@ -2223,6 +2365,7 @@ fn read_chain<'a>(
     policy: &TrustPolicy,
     profile: &AdaptorProfile,
     profile_id: &str,
+    key_statements: &[(u64, &Value)],
     budget: &mut Budget,
 ) -> Result<Governance<'a>> {
     let chain = array(obj(receipt, "governance")?, "chain")?;
@@ -2333,36 +2476,78 @@ fn read_chain<'a>(
     // to. Genesis is anchored at entry index 0.
     let mut previous_manifest_index = 0u64;
 
-    // --- I-D §7.5.1 4b. Inductive step: three phases, in this order, for every later hop. ---
+    // The chain's own entry indexes, read before the walk. This is a container-level read —
+    // an integer per element, no typed content — of exactly the kind I-D §7.5 step 3 already
+    // performs over the same member, so it precedes every signature without breaking the
+    // phase discipline the induction below keeps.
+    let mut chain_hops: Vec<(u64, &Value)> = Vec::with_capacity(chain.len().saturating_sub(1));
     for hop in &chain[1..] {
         let index = number(hop, "entry_index")?;
         if previous_index >= index {
             return Err(ReceiptError::GovernanceChainInvalid(CHAIN_ASCENDING.to_owned()));
         }
         previous_index = index;
+        chain_hops.push((index, obj(hop, "envelope")?));
+    }
 
-        let envelope = obj(hop, "envelope")?;
+    // --- I-D §7.5.1 4b. Inductive step: three phases, in this order, for every later hop. ---
+    //
+    // "Walk the carried governance statements after the genesis manifest in ascending
+    // ENTRY-INDEX order: the manifest statements of `governance.chain[]`, merged in entry-index
+    // order with the `key` statements the enumeration material carries where the mode carries
+    // them." Both input streams are already ascending — the chain by the check just made, the
+    // enumerated key statements by the range proof's own index continuity — so the merge is a
+    // two-cursor walk and needs no sort.
+    let mut chain_cursor = 0usize;
+    let mut key_cursor = 0usize;
+    // The genesis manifest, at entry index 0, is the statement the base case has just walked.
+    let mut walked_index = 0u64;
+    while chain_cursor < chain_hops.len() || key_cursor < key_statements.len() {
+        let take_key = match (chain_hops.get(chain_cursor), key_statements.get(key_cursor)) {
+            (Some((chain_index, _)), Some((key_index, _))) => key_index < chain_index,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        // The two streams are processed in separate arms rather than through one merged
+        // binding: the chain's envelopes are borrowed from the receipt and outlive this
+        // function inside [`Governance`], while the enumerated ones are borrowed from
+        // enumeration material the caller owns. Phases 1 and 2 are identical for both, and are
+        // shared through [`check_merged_order`], [`verify_governance_phase_1`] and
+        // [`validate_key_statement`].
+        if take_key {
+            let (index, envelope) = key_statements[key_cursor];
+            key_cursor += 1;
+            check_merged_order(walked_index, index)?;
+            walked_index = index;
+            let payload = payload_of(envelope)?;
+            check_ahl_version(payload)?;
+            verify_governance_phase_1(envelope, &manifests, &events, index, budget)?;
+            common_payload_fields(payload)?;
+            // Phase 2 (4b(K)) and phase 3 (the producer-key effect), in that order.
+            events.push(validate_key_statement(
+                payload,
+                index,
+                &manifests,
+                &manifest_by_version_id,
+            )?);
+            continue;
+        }
+
+        let (index, envelope) = chain_hops[chain_cursor];
+        chain_cursor += 1;
+        check_merged_order(walked_index, index)?;
+        walked_index = index;
+
         let payload = payload_of(envelope)?;
         check_ahl_version(payload)?;
 
-        // Phase 1: "Verify the envelope under the envelope signature rule of Section 2.1
-        // against K AS ESTABLISHED SO FAR — the governance state in force immediately before
-        // this statement's own entry index." `manifests`/`events` so far contain only hops
-        // strictly before `index`, so this is exactly that state, computed BEFORE anything
-        // about this hop's own content — schema, predecessor linkage, rotation proof — is read.
-        let k_so_far = producer_keys_at_in(&manifests, &events, index);
-        budget.spend(1)?;
-        if !crate::verify_envelope(envelope, |key_id| {
-            k_so_far.get(key_id).map(|bound| bound.pubkey.clone())
-        })? {
-            return Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index });
-        }
+        verify_governance_phase_1(envelope, &manifests, &events, index, budget)?;
 
         // "A failure at phase 1 or phase 2 is invalid, and the induction does not continue past
         // it. No effect is ever applied to K by a statement that has not completed both
         // earlier phases." Phase 2 (type-specific validation) and phase 3 (effect) follow —
         // starting with the common payload fields I-D §2.2 requires of EVERY statement, before
-        // either the manifest-specific or key-statement-specific content below is read.
+        // the manifest-specific content below is read.
         common_payload_fields(payload)?;
         match statement_type(payload)? {
             "manifest" => {
@@ -2464,89 +2649,22 @@ fn read_chain<'a>(
                 manifest_by_version_id.insert(statement_id(envelope)?, (index, payload));
                 manifests.push((index, payload));
             }
-            "key" => {
-                // Phase 2, 4b(K): action, key-object shape, key-id/pubkey binding, and
-                // `valid_from` (I-D §7.5.1 4b(K)): "before a `key` statement's effect touches
-                // K, validate its form... a failure is `invalid`, and the event is NOT
-                // applied."
-                let key = obj(payload, "key")?;
-                let added = match text(payload, "action")? {
-                    "add" => true,
-                    "retire" => false,
-                    other => {
-                        return Err(ReceiptError::GovernanceChainInvalid(format!(
-                            "unknown key action `{other}`"
-                        )))
-                    }
-                };
-                let key_id = text(key, "key_id")?.to_owned();
-                if !is_family_hash(&key_id) {
-                    return Err(ReceiptError::GovernanceChainInvalid(format!(
-                        "key statement at entry index {index} carries `key.key_id` that is \
-                         not a `sha256:` family string in lowercase hex (I-D §7.5.1 4b(K))"
-                    )));
-                }
-                let pubkey = text(key, "pubkey")?.to_owned();
-                // "`pubkey` decodes to exactly 32 octets" and "`key_id` RECOMPUTED from
-                // `pubkey` and equal to the carried one" — the SAME rule and SAME helper I-D
-                // §6.2 states for a manifest's own producer key objects
-                // ([`recompute_producer_key_id`]), shared rather than re-derived here.
-                let recomputed = recompute_producer_key_id(&pubkey).map_err(|_| {
-                    ReceiptError::GovernanceChainInvalid(format!(
-                        "key statement at entry index {index} carries `key.pubkey` that does \
-                         not decode to exactly 32 octets (I-D §7.5.1 4b(K))"
-                    ))
-                })?;
-                if recomputed != key_id {
-                    return Err(ReceiptError::GovernanceChainInvalid(format!(
-                        "key statement at entry index {index} carries `key.key_id` \
-                         (`{key_id}`) that does not equal `sha256:`-of-`key.pubkey` \
-                         (`{recomputed}`) (I-D §7.5.1 4b(K))"
-                    )));
-                }
-                // "`valid_from` REQUIRED and well-formed RFC 3339 (informative for ordering,
-                // but required)"
-                let valid_from =
-                    key.get("valid_from").and_then(Value::as_str).ok_or_else(|| {
-                        ReceiptError::GovernanceChainInvalid(format!(
-                            "key statement at entry index {index} carries no `key.valid_from` — \
-                         the member is REQUIRED (I-D §7.5.1 4b(K))"
-                        ))
-                    })?;
-                crate::bitemporal::parse_rfc3339("key.valid_from", valid_from).map_err(
-                    |source| {
-                        ReceiptError::GovernanceChainInvalid(format!(
-                            "key statement at entry index {index} carries `key.valid_from` \
-                             that is not well-formed RFC 3339 (I-D §7.5.1 4b(K)): {source}"
-                        ))
-                    },
-                )?;
-                // I-D §2.2: a `key` statement is not a manifest statement, so it carries a
-                // `manifest` field of its own, and that field is held to the SAME rule as the
-                // subject's copy (§7.6) — it must name the manifest version ACTIVE at THIS
-                // statement's own entry index, never a stale one.
-                let claimed_manifest = text(payload, "manifest")?;
-                let active = active_manifest_version_id(&manifests, &manifest_by_version_id, index)
-                    .ok_or_else(|| {
-                        ReceiptError::GovernanceChainInvalid(format!(
-                            "no manifest version is active at entry index {index} (I-D §2.2)"
-                        ))
-                    })?;
-                if claimed_manifest != active {
-                    return Err(ReceiptError::GovernanceChainInvalid(format!(
-                        "key statement at entry index {index} names manifest \
-                         `{claimed_manifest}`, which is not the manifest version active at \
-                         that index (`{active}`) (I-D §2.2)"
-                    )));
-                }
-                // Phase 3: effect — modifies the producer key set only (I-D §6.2: log and
-                // witness keys rotate only by anchoring a new manifest version).
-                events.push(KeyEvent { entry_index: index, key_id, pubkey, added });
-            }
             other => {
+                // I-D §7.1: each `governance.chain[]` element is "an anchored MANIFEST
+                // statement's complete envelope", and §7.4 states where the other governance
+                // type travels: "`governance.chain[]` carries manifest statements; producer-key
+                // transitions are `key` statements, and those reach a verifier only through
+                // enumeration material." A chain element of any other type is a container the
+                // format does not define, so it is refused as a shape defect rather than
+                // silently walked as though the chain were a second carrier for key
+                // transitions. The type is read HERE, after phase 1, so the refusal never rests
+                // on bytes no key has vouched for.
                 return Err(ReceiptError::GovernanceChainInvalid(format!(
-                    "`{other}` is not a governance statement"
-                )))
+                    "`governance.chain[]` carries a `{other}` statement at entry index \
+                     {index}; each element is an anchored MANIFEST statement's envelope (I-D \
+                     §7.1), and producer-key transitions reach a verifier only through \
+                     enumeration material (I-D §7.4)"
+                )));
             }
         }
     }
@@ -2580,10 +2698,12 @@ fn read_chain<'a>(
 // Anchoring
 // ---------------------------------------------------------------------------
 
-/// The verified anchoring context every later step checks material against.
+/// What 4f established about the receipt's anchoring, for the §7.3 assurance comparison.
+///
+/// The checkpoint's own `tree_size` and `root_hash` are read at step 3, where every path and
+/// range recomputation that needs them already runs; nothing after 4f reaches for them again,
+/// so they are deliberately not carried forward here.
 struct Anchoring {
-    tree_size: u64,
-    root: Hash,
     witnessed: bool,
     continued_history: bool,
 }
@@ -3227,7 +3347,6 @@ fn verify_checkpoint(
     let anchoring = obj(receipt, "anchoring")?;
     let checkpoint = checkpoint_object(obj(anchoring, "checkpoint")?)?;
     let tree_size = number(checkpoint, "tree_size")?;
-    let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
     let (active_index, active_manifest) = governance.active_for(tree_size)?;
     let active_log = log_object(active_manifest)?;
 
@@ -3300,7 +3419,7 @@ fn verify_checkpoint(
         )?;
     }
 
-    Ok(Anchoring { tree_size, root, witnessed, continued_history })
+    Ok(Anchoring { witnessed, continued_history })
 }
 
 /// The key-independent half of `continued_history` (I-D §7.5 step 3: "`consistency_path`
@@ -3460,9 +3579,18 @@ impl Enumeration {
     }
 }
 
-fn verify_enumeration(
+/// Decode enumeration material and authenticate it against the checkpoint root.
+///
+/// This is KEY-INDEPENDENT work of exactly the class I-D §7.5 step 3 collects — "Each is an
+/// integer comparison or a hash recomputation" — so it can, and for governance currency MUST,
+/// run before any signature is verified: §7.5.1 4b walks "the manifest statements of
+/// `governance.chain[]`, merged in entry-index order with the `key` statements the enumeration
+/// material carries", which makes those statements an INPUT to the induction rather than
+/// something the induction produces. As in step 3, `root` is at this point an unauthenticated
+/// structural commitment; 4f is what upgrades every result here from a statement about carried
+/// bytes to a statement about the log's state.
+fn decode_enumeration(
     material: &Value,
-    governance: &Governance<'_>,
     root: &Hash,
     tree_size: u64,
     what: &'static str,
@@ -3529,6 +3657,15 @@ fn verify_enumeration(
         });
     }
 
+    Ok(Enumeration { from_index, to_index, entries: envelopes })
+}
+
+/// I-D §7.5.1 4d over material [`decode_enumeration`] has already authenticated.
+fn verify_enumerated_envelopes(
+    enumeration: &Enumeration,
+    governance: &Governance<'_>,
+    budget: &mut Budget,
+) -> Result<()> {
     // I-D §7.5.1 4d: with K established, every carried envelope that is NOT part of the
     // induction is verified under the envelope signature rule of §2.1 at ITS OWN entry index —
     // enumerated material included, and no subset of it. "An envelope carrying a non-verifying
@@ -3544,7 +3681,7 @@ fn verify_enumeration(
     // to be the entry the log committed at that index, rather than carried bytes claiming to
     // be. It is the one choke point all three enumerated forms pass through — governance
     // currency, competing-trigger candidates, and the propagation-completeness prefix.
-    for (offset, envelope) in envelopes.iter().enumerate() {
+    for (offset, envelope) in enumeration.entries.iter().enumerate() {
         // 4d's scope is "every carried envelope that is NOT part of the induction", and the
         // exclusion is load-bearing rather than a convenience. A `manifest` or `key` statement
         // was already verified by [`read_chain`] under 4b phase 1, "against K AS ESTABLISHED SO
@@ -3558,19 +3695,34 @@ fn verify_enumeration(
         // ask for.
         //
         // Membership is decided by statement TYPE, not by position in the range: 4b walks
-        // exactly the `manifest` and `key` statements, whatever indexes they occupy, and
-        // [`verify_governance_enumeration`] separately requires every enumerated statement of
-        // those two types to appear in the chain the induction actually walked — under
-        // enumerated mode that check spans `[0, tree_size(C))`, a superset of every other
-        // enumerated range, and it runs before any claim-specific material is read. Nothing is
-        // exempted here that the induction has not already verified.
+        // exactly the `manifest` and `key` statements, whatever indexes they occupy. The
+        // enumerated `key` statements ARE the induction's second stream, so every one of them
+        // has been through 4b phase 1 by construction, and [`check_manifest_completeness`]
+        // separately requires every enumerated `manifest` to appear in the chain the induction
+        // walked — under enumerated mode over `[0, tree_size(C))`, a superset of every other
+        // enumerated range, and before 4d runs at all. Nothing is exempted here that the
+        // induction has not already verified.
         if matches!(statement_type(payload_of(envelope)?)?, "manifest" | "key") {
             continue;
         }
-        verify_envelope_at(envelope, governance, from_index + offset as u64, budget)?;
+        verify_envelope_at(envelope, governance, enumeration.from_index + offset as u64, budget)?;
     }
 
-    Ok(Enumeration { from_index, to_index, entries: envelopes })
+    Ok(())
+}
+
+/// All three enumerated forms that are read AFTER K exists: decode, authenticate, then 4d.
+fn verify_enumeration(
+    material: &Value,
+    governance: &Governance<'_>,
+    root: &Hash,
+    tree_size: u64,
+    what: &'static str,
+    budget: &mut Budget,
+) -> Result<Enumeration> {
+    let enumeration = decode_enumeration(material, root, tree_size, what, budget)?;
+    verify_enumerated_envelopes(&enumeration, governance, budget)?;
+    Ok(enumeration)
 }
 
 // ---------------------------------------------------------------------------
@@ -3743,8 +3895,68 @@ fn verify_nested(
     let continued_history =
         check_continued_history_paths(anchoring_block, tree_size, &root, budget)?;
 
+    // Still step 3, and the last of it: the governance currency mode, and — under `enumerated`
+    // — the currency material itself, decoded and recomputed against `root`.
+    //
+    // The mode is a container token, and the two facts read from it here are both decidable
+    // without a key. The material has to be in hand this early because I-D §7.5.1 4b walks
+    // "the manifest statements of `governance.chain[]`, MERGED in entry-index order with the
+    // `key` statements the enumeration material carries": those statements are an INPUT to the
+    // induction, and §7.4 makes enumeration material their only carrier. What runs here is a
+    // range-proof recomputation against the same `root_hash` step 3's inclusion paths run
+    // against, on the same terms — an unauthenticated structural commitment, upgraded wholesale
+    // by 4f — so it precedes every signature without making any signature's outcome depend on
+    // material no key vouches for.
+    let currency = obj(obj(receipt, "governance")?, "currency")?;
+    let mode = text(currency, "mode")?;
+    if !GOVERNANCE_MODES.contains(&mode) {
+        return Err(ReceiptError::Malformed(format!("unknown governance mode `{mode}`")));
+    }
+    // Enumerated currency and a later checkpoint cannot both be evidenced. §2.1 requires the
+    // governance material to cover through `later_checkpoint.tree_size`; §4 fixes enumerated
+    // material at exactly `[0, tree_size(C))` for the receipt's verified checkpoint, which §3
+    // binds to `anchoring.checkpoint`. Since a later checkpoint is at a greater tree size, no
+    // range satisfies both rules, and the format defines no second authenticated range.
+    //
+    // The tempting move is to verify the enumeration through the anchoring checkpoint, accept
+    // the later checkpoint separately, and call the receipt good. That reports as established a
+    // coverage requirement nothing in the receipt proves: a manifest anchored between the two
+    // checkpoints could have rotated the log key set, and the enumeration would never show it.
+    // A defective format is a reason not to fabricate evidence; it is not a reason to declare
+    // missing evidence verified. So the combination is refused, under an error naming the
+    // conflict rather than pretending some rule failed — and refused BEFORE the material is
+    // decoded, since it is a contradiction between two members of the container alone.
+    // Declared mode is unaffected: it makes no currency claim in the first place (§2.1).
+    if mode == "enumerated" && anchoring_block.get("later_checkpoint").is_some() {
+        return Err(ReceiptError::FormatConflict {
+            combination:
+                "enumerated governance currency together with `anchoring.later_checkpoint`",
+            conflict: "receipt format §2.1 requires governance material covering through \
+                       `later_checkpoint.tree_size`, while §4 fixes enumerated material at \
+                       exactly [0, tree_size(anchoring.checkpoint)); no range satisfies both, so \
+                       the coverage §2.1 mandates is absent and the receipt is refused rather \
+                       than accepted on unproven governance",
+        });
+    }
+    let currency_enumeration = match mode {
+        "enumerated" => Some(decode_governance_enumeration(currency, &root, tree_size, budget)?),
+        // I-D §7.4: "`governance.chain[]` carries manifest statements; producer-key transitions
+        // are `key` statements, and those reach a verifier only through enumeration material."
+        // Declared mode carries none, so the induction's second stream is empty and the key
+        // state is exactly what the presented chain implies (§7.5.1 4c).
+        _ => None,
+    };
+    let key_statements = match &currency_enumeration {
+        Some(enumeration) => enumerated_key_statements(enumeration)?,
+        None => Vec::new(),
+    };
+
     // --- §7.5 step 4: the governance bootstrap, as an induction (4a-4c) -------------
-    let governance = read_chain(receipt, policy, profile, adaptor_id, budget)?;
+    let governance = read_chain(receipt, policy, profile, adaptor_id, &key_statements, budget)?;
+    // 4c under enumerated governance: what the induction walked is everything the range holds.
+    if let Some(enumeration) = &currency_enumeration {
+        check_manifest_completeness(enumeration, &governance)?;
+    }
 
     // --- §7.5.1 4f: authenticated checkpoint validation -----------------------------
     // Only on passing this do step 3's path results become claims about the log's state
@@ -3776,8 +3988,6 @@ fn verify_nested(
     let claim = obj(receipt, "claim")?;
     let claim_type = text(claim, "type")?.to_owned();
     let assurance = read_assurance(obj(claim, "assurance")?, &claim_type)?;
-    let currency = obj(obj(receipt, "governance")?, "currency")?;
-    let mode = text(currency, "mode")?;
     if assurance.governance != mode {
         return Err(ReceiptError::AssuranceMismatch { field: "governance" });
     }
@@ -3788,47 +3998,21 @@ fn verify_nested(
         return Err(ReceiptError::AssuranceMismatch { field: "continued_history" });
     }
 
-    // Enumerated currency and a later checkpoint cannot both be evidenced. §2.1 requires the
-    // governance material to cover through `later_checkpoint.tree_size`; §4 fixes enumerated
-    // material at exactly `[0, tree_size(C))` for the receipt's verified checkpoint, which §3
-    // binds to `anchoring.checkpoint`. Since a later checkpoint is at a greater tree size, no
-    // range satisfies both rules, and the format defines no second authenticated range.
-    //
-    // The tempting move is to verify the enumeration through the anchoring checkpoint, accept
-    // the later checkpoint separately, and call the receipt good. That reports as established a
-    // coverage requirement nothing in the receipt proves: a manifest anchored between the two
-    // checkpoints could have rotated the log key set, and the enumeration would never show it.
-    // A defective format is a reason not to fabricate evidence; it is not a reason to declare
-    // missing evidence verified. So the combination is refused, under an error naming the
-    // conflict rather than pretending some rule failed. Declared mode is unaffected: it makes
-    // no currency claim in the first place (§2.1).
-    if mode == "enumerated" && obj(receipt, "anchoring")?.get("later_checkpoint").is_some() {
-        return Err(ReceiptError::FormatConflict {
-            combination:
-                "enumerated governance currency together with `anchoring.later_checkpoint`",
-            conflict: "receipt format §2.1 requires governance material covering through \
-                       `later_checkpoint.tree_size`, while §4 fixes enumerated material at \
-                       exactly [0, tree_size(anchoring.checkpoint)); no range satisfies both, so \
-                       the coverage §2.1 mandates is absent and the receipt is refused rather \
-                       than accepted on unproven governance",
-        });
-    }
-
-    let enumeration = match mode {
-        "declared" => {
+    // §7.5.1 4d over the currency material. The decode and the range checks already ran at
+    // step 3, because the induction consumed the `key` statements they authenticate; what is
+    // left is the envelope-signature rule over the enumerated entries the induction did NOT
+    // walk, which needs the completed K and therefore belongs here.
+    let enumeration = match &currency_enumeration {
+        None => {
             if !DECLARED_MODE_TYPES.contains(&claim_type.as_str()) {
                 return Err(ReceiptError::AssuranceMismatch { field: "governance" });
             }
             None
         }
-        "enumerated" => {
-            Some(verify_governance_enumeration(currency, &governance, &anchoring, budget)?)
+        Some(enumeration) => {
+            verify_enumerated_envelopes(enumeration, &governance, budget)?;
+            Some(enumeration)
         }
-        // Unreachable by construction — `mode` was just required to equal
-        // `assurance.governance`, whose domain [`read_assurance`] closed at §7.3's two tokens
-        // — and kept as a guard so the match cannot silently gain a third behaviour if either
-        // check is ever moved.
-        other => return Err(ReceiptError::Malformed(format!("unknown governance mode `{other}`"))),
     };
 
     // --- §2.3 / I-D §7.6: subject-level cross-field consistency ----------------------
@@ -3900,7 +4084,7 @@ fn verify_nested(
         claim_type: &claim_type,
         assurance: &assurance,
         record_subject: record_subject.as_ref(),
-        enumeration: enumeration.as_ref(),
+        enumeration,
         depth,
     };
     verify_claim_material(&ctx, budget)?;
@@ -4071,53 +4255,80 @@ fn verify_envelope_at(
     }
 }
 
-/// Verify enumerated governance currency: the presented chain is the complete set of
-/// manifest/key entries in the enumerated range (§4).
-fn verify_governance_enumeration(
+/// Decode and authenticate the `enumerated` governance currency material (I-D §7.4), ahead of
+/// the induction that consumes it.
+///
+/// Two facts are established here, both key-independent. The range proof binds `entries` to the
+/// checkpoint root, so the `key` statements the induction is about to walk are the entries the
+/// log committed at those indexes rather than bytes the presenter chose. And the range is
+/// exactly `[0, tree_size(C))`, which is what §7.4 fixes for enumerated currency and what
+/// §7.5.1 4c leans on: "Under `enumerated` governance the range proof over exactly
+/// `[0, tree_size(C))` forecloses omission, so K at each index IS the state that was in force."
+/// Anything narrower would feed the induction a key stream with holes in it — a receipt
+/// enumerating only `[0, 1)` could hide a later key retirement and validate a signature with a
+/// key the corpus had already retired — so the width is checked before the stream is used, not
+/// after.
+fn decode_governance_enumeration(
     currency: &Value,
-    governance: &Governance<'_>,
-    anchoring: &Anchoring,
+    root: &Hash,
+    tree_size: u64,
     budget: &mut Budget,
 ) -> Result<Enumeration> {
     let material = obj(currency, "material")?;
-    let enumeration = verify_enumeration(
-        material,
-        governance,
-        &anchoring.root,
-        anchoring.tree_size,
-        "governance",
-        budget,
-    )?;
-
-    // Format §4: enumerated currency is an authenticated range over **exactly**
-    // `[0, tree_size(C))`, where C is the receipt's verified checkpoint. Anything narrower
-    // proves nothing about authority: a receipt that enumerated only `[0, 1)` could hide a
-    // later key retirement and validate a signature with a key the corpus had already retired.
-    // Claim types that name a checkpoint bind it field-exact to `anchoring.checkpoint` (§3),
-    // so `anchoring.tree_size` is `tree_size(C)` for every enumerated claim type.
-    if enumeration.from_index != 0 || enumeration.to_index != anchoring.tree_size {
+    let enumeration = decode_enumeration(material, root, tree_size, "governance", budget)?;
+    if enumeration.from_index != 0 || enumeration.to_index != tree_size {
         return Err(ReceiptError::GovernanceRangeNotComplete {
             got_from: enumeration.from_index,
             got_to: enumeration.to_index,
-            tree_size: anchoring.tree_size,
+            tree_size,
         });
     }
+    Ok(enumeration)
+}
 
+/// The `key` statements the enumeration carries, with their entry indexes, ascending.
+///
+/// I-D §7.5.1 4b's second induction stream. Selecting them by `type` is not type-specific
+/// VALIDATION of unsigned material — 4b(K)'s checks still run inside phase 2, after phase 1 —
+/// it is the selection the merge is defined in terms of, over bytes the range proof has already
+/// bound to the checkpoint root.
+fn enumerated_key_statements(enumeration: &Enumeration) -> Result<Vec<(u64, &Value)>> {
+    let mut out = Vec::new();
+    for (offset, envelope) in enumeration.entries.iter().enumerate() {
+        if statement_type(payload_of(envelope)?)? == "key" {
+            out.push((enumeration.from_index + offset as u64, envelope));
+        }
+    }
+    Ok(out)
+}
+
+/// I-D §7.5.1 4c under `enumerated` governance: the carried chain is the complete set of
+/// MANIFEST statements in the enumerated range.
+///
+/// The enumerated `key` statements need no such check — they are the induction's own second
+/// stream, so an enumerated `key` statement is walked by construction. A manifest is different:
+/// the chain is where manifests travel (§7.1), and one anchored inside the range but absent
+/// from the chain would change which version is active at some index while the induction never
+/// saw it. This runs immediately after the induction and BEFORE 4f, because 4f resolves its
+/// checkpoint key from "the manifest version active for the checkpoint being verified...
+/// established under the receipt's governance mode": a chain with a manifest missing has not
+/// established that version, and reporting the omission is more honest than reporting the key
+/// binding that fails downstream of it.
+fn check_manifest_completeness(
+    enumeration: &Enumeration,
+    governance: &Governance<'_>,
+) -> Result<()> {
     let presented: BTreeSet<u64> = governance.manifests.iter().map(|(index, _)| *index).collect();
-    let mut presented_all = presented;
-    presented_all.extend(governance.events.iter().map(|e| e.entry_index));
-
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
         let index = enumeration.from_index + offset as u64;
-        let kind = statement_type(payload_of(envelope)?)?;
-        if matches!(kind, "manifest" | "key") && !presented_all.contains(&index) {
+        if statement_type(payload_of(envelope)?)? == "manifest" && !presented.contains(&index) {
             return Err(ReceiptError::GovernanceChainInvalid(format!(
-                "enumeration reveals a `{kind}` statement at entry index {index} that the \
+                "enumeration reveals a `manifest` statement at entry index {index} that the \
                  presented chain omits"
             )));
         }
     }
-    Ok(enumeration)
+    Ok(())
 }
 
 /// Enforce the §3 subject rule and the §2.3 `record_subject` match.

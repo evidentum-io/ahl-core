@@ -1076,13 +1076,23 @@ impl Corpus {
     /// the same log key over the new root, and its cosignature reissued by the same witness.
     /// Everything the receipt asserts about anchoring is then true; the one thing wrong with it
     /// is the rule the vector exists to trip.
-    pub fn reanchor(&self, receipt: &mut Value, keys: &Keys) {
+    ///
+    /// `substitutions` names entries the receipt does not carry in `governance.chain[]` — since
+    /// I-D §7.4 moved producer-key transitions out of the chain, a defective `key` statement
+    /// reaches the verifier through the enumeration material instead, so its substitution is
+    /// given here and the material is regenerated over the same rebuilt tree. A log anchors
+    /// opaque bytes and validates no AHL statement, so a malformed `key` statement genuinely
+    /// anchored at its index is exactly the material I-D §7.5.1 4b(K) exists to reject.
+    pub fn reanchor(&self, receipt: &mut Value, substitutions: &[(usize, Value)], keys: &Keys) {
         let mut envelopes = self.envelopes.clone();
         let chain = receipt["governance"]["chain"].as_array().expect("chain").clone();
         for hop in &chain {
             let index = usize::try_from(hop["entry_index"].as_u64().expect("entry_index"))
                 .expect("entry index fits");
             envelopes[index] = hop["envelope"].clone();
+        }
+        for (index, envelope) in substitutions {
+            envelopes[*index] = envelope.clone();
         }
         let leaves = leaf_bytes(&envelopes);
         let checkpoint_object = receipt["anchoring"]["checkpoint"].clone();
@@ -1100,6 +1110,24 @@ impl Corpus {
             path(receipt["subject"]["entry_index"].as_u64().expect("entry_index"));
         for hop in receipt["governance"]["chain"].as_array_mut().expect("chain") {
             hop["inclusion_path"] = path(hop["entry_index"].as_u64().expect("entry_index"));
+        }
+        // The currency material is authenticated against the same root, so it is reissued over
+        // the rebuilt tree: the substituted envelope at its own index, and a range proof that
+        // opens to the new root.
+        let material = &mut receipt["governance"]["currency"]["material"];
+        if let Some(range) = material.get("range").cloned() {
+            let from = range["from_index"].as_u64().expect("from_index");
+            let to = range["to_index"].as_u64().expect("to_index");
+            let hashes: Vec<_> = prefix.iter().map(|leaf| leaf_hash(leaf)).collect();
+            let proof =
+                range_proof::generate(&hashes, from, to).expect("range within the checkpoint");
+            material["entries"] = json!((from..to)
+                .map(|index| json!({
+                    "entry_index": index,
+                    "envelope": envelopes[at(index)],
+                }))
+                .collect::<Vec<_>>());
+            material["range_proof"] = json!({ "adaptor_form": range_proof::encode(&proof) });
         }
 
         let log_key = keys.by_key_id(field_str(&checkpoint_object, "key_id").expect("key_id"));

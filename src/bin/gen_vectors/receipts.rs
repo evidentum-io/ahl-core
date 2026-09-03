@@ -212,26 +212,8 @@ impl Spec<'_> {
         }
 
         let (witness_key, _) = keys.witness_for(anchor.manifest_index);
-        let producer_keys = self.producer_keys.clone().unwrap_or_else(|| {
-            // §7.2 snapshot rule: the producer key set in force at the subject's entry index
-            // starts from the manifest with the greatest entry index *below* it (the genesis
-            // manifest for the corpus prefix), then applies later `key` statements. Each key
-            // binds to the governance statement that actually put it there (§2.2).
-            let subject = self.subject_index as u64;
-            let snapshot = self
-                .chain
-                .iter()
-                .copied()
-                .rfind(|index| {
-                    corpus.payload(*index)["type"] == "manifest" && (*index as u64) < subject
-                })
-                .unwrap_or(0) as u64;
-            let mut block = vec![key_entry(&keys.producer_1, None, snapshot)];
-            if self.chain.contains(&9) && snapshot < 9 && 9 <= subject {
-                block.push(key_entry(&keys.producer_2, None, 9));
-            }
-            block
-        });
+        let producer_keys =
+            self.producer_keys.clone().unwrap_or_else(|| producer_key_block(self, corpus, keys));
 
         let mut receipt = json!({
             "ahl_receipt_version": "2",
@@ -296,6 +278,43 @@ impl Spec<'_> {
         }
         receipt
     }
+}
+
+/// The `keys.producer[]` block a receipt carries: the key set in force at its subject's entry
+/// index, each key bound to the governance statement that put it there (I-D §7.1, §2.2).
+///
+/// §7.2's snapshot rule starts from the manifest with the greatest entry index *below* the
+/// subject — the genesis manifest for the corpus prefix — and then applies later `key`
+/// statements. WHICH of those apply is a property of the governance MODE rather than of the
+/// chain: I-D §7.4 puts producer-key transitions in enumeration material alone, so a
+/// declared-mode receipt sees none of them, while an enumerated one sees every transition its
+/// range covers — and that range is exactly `[0, tree_size(C))`, which contains the subject, so
+/// every transition at or before the subject applies.
+fn producer_key_block(spec: &Spec<'_>, corpus: &Corpus, keys: &Keys) -> Vec<Value> {
+    let subject = spec.subject_index as u64;
+    let snapshot = spec
+        .chain
+        .iter()
+        .copied()
+        .rfind(|index| corpus.payload(*index)["type"] == "manifest" && (*index as u64) < subject)
+        .unwrap_or(0) as u64;
+    let mut block = vec![key_entry(&keys.producer_1, None, snapshot)];
+    if spec.currency_mode != "enumerated" {
+        return block;
+    }
+    // The transitions the snapshot has not already folded in, applied in entry order.
+    let mut bound_at: Option<u64> = None;
+    for index in (snapshot + 1)..=subject {
+        let payload = corpus.payload(usize::try_from(index).expect("small entry index"));
+        if payload["type"] != "key" || payload["key"]["key_id"] != json!(keys.producer_2.key_id()) {
+            continue;
+        }
+        bound_at = (payload["action"] == json!("add")).then_some(index);
+    }
+    if let Some(index) = bound_at {
+        block.push(key_entry(&keys.producer_2, None, index));
+    }
+    block
 }
 
 /// A `keys` block entry (receipt format §2.2).
@@ -462,7 +481,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "statement-anchored",
             subject_index: 26,
             anchor: cp28,
-            chain: vec![0, 9, 25],
+            chain: vec![0, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -481,7 +500,12 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    that lists it as `manifest-chain`-bound is asserting a key state the \
                    governance chain does not support. A verifier that accumulated manifest key \
                    arrays additively would accept this — and would then also accept a signature \
-                   made with the dropped key."
+                   made with the dropped key. This is `invalid` rather than the `unverifiable` \
+                   outcome I-D §7.4 gives a declared-mode receipt whose ENVELOPE depends on an \
+                   uncarried key transition: nothing here depends on one — entry 26 is signed \
+                   by `producer-1`, which version 2 lists — and §7.1 decides the `keys` listing \
+                   on its own terms, a `manifest-chain` binding naming an entry index that is \
+                   no manifest version at all."
                 .to_owned(),
         }
         .build(corpus, keys),
@@ -560,7 +584,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "record-ingested",
             subject_index: 34,
             anchor: cp35,
-            chain: vec![0, 9, 25],
+            chain: vec![0, 25],
             record_subject: customers(&r.c_e),
             competing: "not-checked",
             content_binding: "none",
@@ -1290,7 +1314,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         claim_type: "trigger-effective",
         subject_index: 23,
         anchor: cp25,
-        chain: vec![0, 9],
+        chain: vec![0],
         record_subject: customers(&r.c_f),
         competing: "enumerated",
         content_binding: "none",
@@ -1330,7 +1354,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "trigger-effective",
             subject_index: 22,
             anchor: cp25,
-            chain: vec![0, 9],
+            chain: vec![0],
             record_subject: customers(&r.c_f),
             competing: "enumerated",
             content_binding: "none",
@@ -1372,7 +1396,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "trigger-effective",
             subject_index: 29,
             anchor: cp34,
-            chain: vec![0, 9, 25, 28, 30, 31],
+            chain: vec![0, 25],
             record_subject: customers(&r.c_f),
             competing: "enumerated",
             content_binding: "none",
@@ -1429,7 +1453,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "trigger-effective",
             subject_index: 33,
             anchor: cp34,
-            chain: vec![0, 9, 25, 28, 30, 31],
+            chain: vec![0, 25],
             record_subject: customers(&r.c_f),
             competing: "enumerated",
             content_binding: "none",
@@ -1477,7 +1501,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "trigger-effective",
             subject_index: 29,
             anchor: cp30,
-            chain: vec![0, 9, 25, 28],
+            chain: vec![0, 25],
             record_subject: customers(&r.c_f),
             competing: "enumerated",
             content_binding: "none",
@@ -1517,7 +1541,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "trigger-effective",
             subject_index: 19,
             anchor: cp20,
-            chain: vec![0, 9],
+            chain: vec![0],
             record_subject: scores(&r.s1p),
             competing: "enumerated",
             content_binding: "none",
@@ -1630,9 +1654,9 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "disposition-effective",
             subject_index: 8,
             anchor: cp13,
-            // Enumerated currency over [0, 13) reveals the `key` statement at entry 9, so the
-            // presented chain must account for it (receipt format §4).
-            chain: vec![0, 9],
+            // The `key` statement at entry 9 is inside the enumerated range, which is how a
+            // verifier receives it (I-D §7.4); the chain carries manifests only.
+            chain: vec![0],
             record_subject: scores(&r.s1),
             competing: "not-checked",
             content_binding: "none",
@@ -1717,7 +1741,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         claim_type: "propagation-complete",
         subject_index: 8,
         anchor: cp13,
-        chain: vec![0, 9],
+        chain: vec![0],
         record_subject: None,
         competing: "not-checked",
         content_binding: "none",
@@ -1773,9 +1797,9 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         claim_type: "propagation-complete",
         subject_index: 8,
         anchor: cp29,
-        // Enumerated currency over [0, 29) reveals the `key` statement at entry 28, so the
-        // presented chain must account for it (I-D §7.4).
-        chain: vec![0, 9, 25, 28],
+        // The `key` statements at entries 9 and 28 are inside the enumerated range, which is
+        // how a verifier receives them (I-D §7.4); the chain carries manifest v2 and genesis.
+        chain: vec![0, 25],
         record_subject: None,
         competing: "not-checked",
         content_binding: "none",
@@ -1838,7 +1862,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "propagation-complete",
             subject_index: 8,
             anchor: cp28,
-            chain: vec![0, 9, 25],
+            chain: vec![0, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -1903,7 +1927,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "propagation-complete",
             subject_index: 24,
             anchor: cp25,
-            chain: vec![0, 9],
+            chain: vec![0],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -1950,7 +1974,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         claim_type: "governance-state",
         subject_index: 25,
         anchor: cp28,
-        chain: vec![0, 9, 25],
+        chain: vec![0, 25],
         record_subject: None,
         competing: "not-checked",
         content_binding: "none",
@@ -1986,7 +2010,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "governance-state",
             subject_index: 25,
             anchor: cp34,
-            chain: vec![0, 9, 25, 28, 30, 31],
+            chain: vec![0, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -1996,8 +2020,9 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             producer_keys: None,
             note: "MUST FAIL. The claim is the one `governance-state-valid.ahl` proves — \
                    manifest version 2 is the governance state active at entry index 26 — and \
-                   every governance-specific check still passes: the chain is complete, the \
-                   rotation proof verifies, and no manifest or key statement is anchored in \
+                   every governance-specific check still passes: the chain carries every \
+                   manifest the range reveals, the rotation proof verifies, and no manifest or \
+                   key statement is anchored in \
                    (25, 26]. The range is what fails. §4 fixes enumerated material at exactly \
                    [0, tree_size(C)), and at cp34 that prefix reaches entries 32 and 33, the \
                    two deliberately non-verifying retractions of record F. Neither is a \
@@ -2032,7 +2057,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "governance-state",
             subject_index: 25,
             anchor: cp32,
-            chain: vec![0, 9, 25, 28, 30, 31],
+            chain: vec![0, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -2109,7 +2134,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 claim_type: "governance-state",
                 subject_index: 0,
                 anchor: cp20,
-                chain: vec![0, 9],
+                chain: vec![0],
                 record_subject: None,
                 competing: "not-checked",
                 content_binding: "none",
@@ -2118,8 +2143,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 claim_material: json!({ "target_index": 15 }),
                 producer_keys: None,
                 note: "MUST FAIL. `governance.rotation_proofs` is present (as an empty array) \
-                       even though this chain — genesis plus the entry-9 `key` statement only \
-                       — rotates neither the log nor the witness key set. I-D §7.1: \"The \
+                       even though this chain — the genesis manifest alone — rotates neither \
+                       the log nor the witness key set. I-D §7.1: \"The \
                        member is ABSENT where the chain rotates neither set\"; a receipt \
                        carrying it regardless, even empty, is invalid."
                     .to_owned(),
@@ -2457,7 +2482,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "governance-state",
             subject_index: 0,
             anchor: cp20,
-            chain: vec![0, 9],
+            chain: vec![0],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -2498,7 +2523,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             anchor: cp28,
             // The chain presents every governance statement; what the short enumeration fails
             // to prove is that these are the ONLY ones.
-            chain: vec![0, 9, 25],
+            chain: vec![0, 25],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -2538,7 +2563,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_type: "governance-state",
             subject_index: 9,
             anchor: cp20,
-            chain: vec![0, 9],
+            chain: vec![0],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -2585,17 +2610,18 @@ fn rotation_proof_case(base: &Value, mutate: impl FnOnce(&mut Value), note: &str
     bad
 }
 
-/// Replace `base`'s entry-9 `key` statement hop (`governance.chain[1]`) with a FRESH envelope
-/// carrying `key_extra`, genuinely signed by `keys.producer_1` — the legitimate phase-1 signer
-/// at that entry index (I-D §7.5.1: phase 1 verifies "against K as established so far", and
-/// producer-1 is already in K by entry 9). This is deliberate: a mutation with no re-signing
-/// would fail phase 1 (`EnvelopeSignatureInvalid`) before phase 2's 4b(K) checks are ever
-/// reached, which is the wrong rule for these vectors to exercise.
+/// Replace corpus entry 9's `key` statement with a FRESH envelope carrying `key_extra`,
+/// genuinely signed by `keys.producer_1` — the legitimate phase-1 signer at that entry index
+/// (I-D §7.5.1: phase 1 verifies "against K as established so far", and producer-1 is already
+/// in K by entry 9). This is deliberate: a mutation with no re-signing would fail phase 1
+/// (`EnvelopeSignatureInvalid`) before phase 2's 4b(K) checks are ever reached, which is the
+/// wrong rule for these vectors to exercise.
 ///
-/// The replaced hop is then RE-ANCHORED ([`Corpus::reanchor`]): I-D §7.5 step 3 proves every
-/// carried governance element's inclusion path before step 4's induction reads any of them, so
-/// a substituted hop left at the corpus's own path would fail as an unanchored statement rather
-/// than by the 4b(K) rule the vector names.
+/// The substituted entry travels in the ENUMERATION material, which is where I-D §7.4 puts
+/// producer-key transitions, so the whole log tree is rebuilt around it ([`Corpus::reanchor`]):
+/// the range proof authenticates the enumerated entries against the checkpoint root before the
+/// induction walks them, so an entry left at the corpus's own root would fail as unauthenticated
+/// material rather than by the 4b(K) rule the vector names.
 fn key_statement_case(
     corpus: &Corpus,
     base: &Value,
@@ -2607,9 +2633,8 @@ fn key_statement_case(
     let mut bad = base.clone();
     let fresh =
         signed("key", manifest_id, json!({ "action": "add", "key": key_extra }), &keys.producer_1);
-    bad["governance"]["chain"][1]["envelope"] = fresh;
     bad["claim"]["note"] = json!(note);
-    corpus.reanchor(&mut bad, keys);
+    corpus.reanchor(&mut bad, &[(9, fresh)], keys);
     bad
 }
 
@@ -2643,9 +2668,8 @@ fn key_statement_common_field_case(
     );
     mutate(&mut raw_payload);
     let fresh = envelope(raw_payload, &keys.producer_1);
-    bad["governance"]["chain"][1]["envelope"] = fresh;
     bad["claim"]["note"] = json!(note);
-    corpus.reanchor(&mut bad, keys);
+    corpus.reanchor(&mut bad, &[(9, fresh)], keys);
     bad
 }
 
