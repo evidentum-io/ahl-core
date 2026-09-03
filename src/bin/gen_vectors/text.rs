@@ -147,6 +147,20 @@ unsupported version, which §7.5 step 1 follows with "no further processing", an
 verifier-local budget, which §7.8 requires to fail closed. A boundary is rendered only for
 `verified`, and no result is ever expressed by rewriting the receipt's own assurance fields.
 
+**Void entries and informative items.** Not every non-verifying envelope is a defect of the
+receipt that carries it. I-D §7.5.1 4d decides that by RELIANCE: the subject's envelope, an
+embedded receipt's subject and every `governance.chain[]` element are what a receipt rests on,
+and a failure there is `invalid`; every other carried envelope — a purported competing-trigger
+envelope, an entry of a propagation prefix, any entry an enumeration reveals — is VOID,
+"excluded before any authority comparison... never effective and never traversed", and does not
+affect the result. Each void entry the run inspected is reported as an informative item carrying
+its entry index and reason (`signature-invalid` or `key-not-active`); `index.json` records the
+COUNT as `informative` for the vectors that have any. Informative items are not findings: they
+belong to no assertion, carry no result value, never enter the reduction and never appear in
+`Report::dominating()`. The reason 4d gives is the log contract — a log anchors opaque bytes and
+validates none, so were a void entry a defect of every later receipt, any party able to anchor
+one envelope could disable every enumerated claim of that log from that index on.
+
 `verify_receipt` remains as the single-value form for callers that report one rejection: `Ok`
 if and only if the result is `verified`, and otherwise the rejection behind the finding that
 decided it. `ReceiptError::class` gives the §7.7 value of one rejection, exhaustive over the
@@ -265,7 +279,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 | Path | Contents |
 | --- | --- |
 | `adaptor/` | The test adaptor profile document, content-addressed and pinned in both manifest versions |
-| `vectors/statements/` | The 38-entry toy corpus, plus malformed statements naming the rule each violates |
+| `vectors/statements/` | The 41-entry toy corpus, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
 | `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 34, 35, 37 and 38, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
 | `vectors/closure/` | Six closure scenarios (see below) |
@@ -275,7 +289,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 ## The scenarios
 
-The corpus is 38 anchored entries carrying these interlocking scenarios:
+The corpus is 41 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -306,16 +320,16 @@ The corpus is 38 anchored entries carrying these interlocking scenarios:
    different `reason_code` values — otherwise they would be one statement anchored three times,
    of which only entry 29 would govern and the other two would be void.
 
-   The two non-verifying fixtures sit at the TAIL of the corpus on purpose. I-D §7.5.1 4d
-   requires every carried envelope to verify, enumerated material included, and enumerated
-   governance currency covers exactly `[0, tree_size(C))` (§7.4) — so a non-verifying envelope
-   anchored at index *i* makes every enumerated claim at a tree size greater than *i* invalid.
-   Placing the fixtures before the genuinely co-signed trigger would leave no checkpoint at
-   which that trigger's own effectiveness could be enumerated. Two negatives exercise the rule
-   from opposite ends: `trigger-effective-non-verifying-candidate-must-fail.ahl`, where the
-   defective envelopes ARE competing candidates for the subject record, and
-   `governance-state-non-verifying-entry-must-fail.ahl`, where no claim-specific rule looks at
-   them at all. Both are refused, which is what "every carried envelope" means.
+   What a non-verifying carried envelope MEANS is decided by reliance (I-D §7.5.1 4d). Neither
+   of these is an envelope a receipt over another subject rests on, so each is VOID: "excluded
+   before any authority comparison... never effective and never traversed", reported as an
+   informative item naming its entry index, and leaving the result alone.
+   `trigger-effective-void-candidate.ahl` carries them as competing candidates for the subject
+   record and `governance-state-void-entry.ahl` carries them where no claim-specific rule looks
+   at them at all; both VERIFY, each reporting two informative items. What is still `invalid` is
+   a receipt that rests on such an envelope:
+   `trigger-effective-unverified-authority-signature-must-fail.ahl` makes entry 33 its own
+   subject and is refused.
 7. **A `key` statement that retires its own signing key.** Entry 30 retires `producer-2` under
    `producer-2`'s own signature; entry 31 re-adds the key, so the fixture at entry 33 keeps a
    genuine signature from a key in force. Governance statements are verified by the induction of
@@ -365,7 +379,22 @@ ordinary artifact of a real log rather than something a producer must manufactur
    inclusion, real record — and needs a genuinely anchored statement rather than a mutated
    fixture, because mutating any already-anchored envelope invalidates its own inclusion path
    before the rule under test is ever reached.
-11. **Input-set trees take the §2.7 tree rules.** I-D §2.7 states one set of rules, "identical
+11. **Void governance material, and the reliance rule.** Entries 38 and 39 are a purported
+   `key` statement and a purported manifest version whose envelopes do not verify — a log
+   anchors opaque bytes and validates none, so both really can be anchored — and entry 40 is a
+   `key` statement that DOES verify while declaring `ahl_version: "0.5"`. I-D §7.5.1 4b selects
+   an enumeration-only entry for the induction by its purported `type` but admits it "only if
+   its envelope verifies in phase 1": 38 and 39 are void, not inducted, with no effect on the
+   key state and no type-specific validation at all (§7.5 step 1 exempts a non-verifying
+   enumeration-only entry from the version read too), while §7.4 adds that a void entry's
+   absence from `governance.chain[]` is not an omission. Entry 40 is the other case: verifying,
+   so K is unestablished from its index and the `governance` finding is `unverifiable`.
+   `governance-state-void-governance-entries.ahl` (over cp40) verifies with four informative
+   items; `governance-state-foreign-revision-key-must-fail.ahl` (over cp41) is `unverifiable`.
+   All three sit past every checkpoint the rest of the corpus anchors at, so no other vector's
+   range reaches them.
+
+12. **Input-set trees take the §2.7 tree rules.** I-D §2.7 states one set of rules, "identical
    for every AHL tree — outputs, input sets, and dispositions". Entry 37 is a batch whose three
    output leaves each commit an input-set tree breaking exactly one of them: leaves out of
    ascending `record` order, a record repeated under two roles, and a `record` that is not a
@@ -385,7 +414,7 @@ ordinary artifact of a real log rather than something a producer must manufactur
    asserted rather than assumed: `tests/vectors.rs` reassembles the defective material from
    the three receipt vectors that carry it and runs a traversal one entry PAST the conforming
    prefix, which must stop on the tree rule the material breaks.
-12. **Where governance material travels.** I-D §7.1 defines every `governance.chain[]` element
+13. **Where governance material travels.** I-D §7.1 defines every `governance.chain[]` element
    as "an anchored manifest statement's complete envelope", and §7.4 says the other governance
    type travels elsewhere: "`governance.chain[]` carries manifest statements; producer-key
    transitions are `key` statements, and those reach a verifier only through enumeration

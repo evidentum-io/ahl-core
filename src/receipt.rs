@@ -11,7 +11,18 @@
 //! [`Outcome::Invalid`], [`Outcome::Unverifiable`] — over the whole receipt, reduced from one
 //! [`Finding`] per required [`Assertion`]. Which assertion a rejection belongs to is the PHASE
 //! of the §7.5 algorithm that raised it; which assertions a capability gap reaches is
-//! [`prerequisites`], and the run carries on with the rest. A run that does NOT complete reaches none of them and
+//! [`prerequisites`], and the run carries on with the rest.
+//!
+//! Not every non-verifying envelope is a defect of the receipt that carries it. §7.5.1 4d
+//! decides that by RELIANCE: the subject's envelope, an embedded receipt's subject and every
+//! `governance.chain[]` element are what a receipt rests on, and a failure there is `invalid`;
+//! every other carried envelope — a purported competing-trigger envelope, an entry of a
+//! propagation prefix, any entry an enumeration reveals — is VOID instead, "excluded before any
+//! authority comparison... never effective and never traversed", reported as an
+//! [`InformativeItem`] and consequential nowhere. The reason is the log contract: a log anchors
+//! opaque bytes and validates none, so were a void entry a defect of every later receipt, any
+//! party able to anchor one envelope could disable every enumerated claim of that log from that
+//! index on. A run that does NOT complete reaches none of them and
 //! is reported as [`ExecutionError`] instead, which is a statement about the verifier rather
 //! than about the receipt. [`verify_receipt`] is the single-value form of the same run, for
 //! callers that report one rejection rather than a report.
@@ -3527,11 +3538,13 @@ fn check_merged_order(walked_index: u64, index: u64) -> Result<()> {
 
 /// Turn an envelope check into the outcome the receipt's governance MODE fixes for it.
 ///
-/// Every producer-key signature check in this module ends here, so the two conditions
-/// [`crate::EnvelopeCheck`] separates cannot be conflated at one call site and kept apart at
-/// another. A signature that does not verify under a key the presented state DOES hold is a
-/// demonstrated defect and is `invalid` in either mode (I-D §7.5.1 4d: "An envelope carrying a
-/// non-verifying entry... is invalid"), and [`crate::check_envelope`] gives it precedence over
+/// Every producer-key signature check over an envelope the receipt RESTS ON ends here — the
+/// subject's, an embedded receipt's subject, a `governance.chain[]` element — so the two
+/// conditions [`crate::EnvelopeCheck`] separates cannot be conflated at one call site and kept
+/// apart at another. For those three, I-D §7.5.1 4d makes a failure `invalid`; for every other
+/// carried envelope the same failure is VOID and goes through [`evaluate_envelope_at`] instead.
+/// A signature that does not verify under a key the presented state DOES hold is a demonstrated
+/// defect and is `invalid` in either mode, and [`crate::check_envelope`] gives it precedence over
 /// an unresolved key on the SAME envelope, so a multi-signature envelope carrying both defects
 /// arrives here as `SignatureInvalid` whatever order the producer wrote them in. A `key_id` the
 /// presented state holds no key for — every resolvable entry on that envelope having verified —
