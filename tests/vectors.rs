@@ -18,8 +18,8 @@ use ahl_core::bitemporal::{Scope, ValidTime};
 use ahl_core::closure::{affected_set, edges, RecordRef, TreeMaterial};
 use ahl_core::descriptor;
 use ahl_core::receipt::{
-    verify_receipt, AdaptorCapabilities, AdaptorProfile, Assertion, Limits, Outcome, ReceiptError,
-    TrustPolicy, TrustedWitnessKey,
+    verify_receipt, verify_receipt_report, AdaptorCapabilities, AdaptorProfile, Assertion, Limits,
+    Outcome, ReceiptError, TrustPolicy, TrustedWitnessKey,
 };
 use ahl_core::tree::ValidatedLeafSet;
 use ahl_core::{
@@ -1674,6 +1674,123 @@ fn adaptor_profile_hash_is_recomputed_from_the_held_document_not_trusted() {
     let policy = trust_policy();
     let profile = &policy.adaptor_profiles["ahl-test-log-v1"];
     assert_eq!(profile.hash(), sha256_hex(&profile.document));
+}
+
+/// I-D §7.7's own worked example, over the one capability gap this corpus can present without
+/// a fixture built for it: "A `record-ingested` receipt asserting a content binding the
+/// verifier cannot compute has result `unverifiable` — its content binding is a required
+/// assertion — and its report MUST show the anchoring and introduction findings as `verified`
+/// and the content-binding finding as `unverifiable`. Those are findings; the receipt still has
+/// exactly one result, and a verifier MUST NOT present a finding as though it were the result."
+///
+/// The gap is the dataset key: the receipt is the accepted `record-ingested` vector, verified
+/// under a policy holding no key for its dataset. What makes it the example is the shape — a
+/// verifier-local capability the receipt cannot supply, on the content binding alone — and not
+/// which capability it is.
+#[test]
+fn a_capability_gap_is_reported_beside_the_assertions_that_held() {
+    let mut policy = trust_policy();
+    policy.dataset_keys.clear();
+    let (_, receipt) = read_receipt("record-ingested-valid.ahl");
+
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+    assert!(report.verdict.is_none(), "only `verified` is rendered in words (I-D §7.7)");
+
+    let binding = report.finding(Assertion::ContentBinding).expect("content-binding finding");
+    assert_eq!(binding.outcome, Outcome::Unverifiable);
+    assert!(
+        binding.detail.as_ref().is_some_and(|detail| detail.contains("customers")),
+        "the finding must say what was missing: {binding:?}"
+    );
+
+    // Everything the run did establish is reported as established, the introduction the claim
+    // type is about included.
+    for assertion in [
+        Assertion::Versions,
+        Assertion::Structure,
+        Assertion::AdaptorProfile,
+        Assertion::Anchoring,
+        Assertion::Governance,
+        Assertion::CheckpointAuthentication,
+        Assertion::EnvelopeValidity,
+        Assertion::CrossField,
+        Assertion::ClaimMaterial,
+    ] {
+        let finding = report.finding(assertion).unwrap_or_else(|| panic!("{assertion} finding"));
+        assert_eq!(finding.outcome, Outcome::Verified, "{assertion} held and must be reported so");
+    }
+}
+
+/// The reduction of I-D §7.7 over a receipt with nothing missing: every required assertion is
+/// `verified`, the result is `verified`, and the boundary is rendered.
+#[test]
+fn a_verified_receipt_reports_every_required_assertion() {
+    let policy = trust_policy();
+    for name in ["statement-anchored-valid.ahl", "disposition-effective-valid.ahl"] {
+        let (_, receipt) = read_receipt(name);
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(report.result, Outcome::Verified, "{name}");
+        assert!(report.verdict.is_some(), "{name}: a verified result renders its boundary");
+        assert!(
+            report.findings.iter().all(|finding| finding.outcome == Outcome::Verified),
+            "{name}: a verified result reduces from verified findings alone"
+        );
+        // The content binding is required "if and only if its own `assurance.content_binding`
+        // is not `none`" (I-D §7.7), and neither of these asserts one.
+        assert!(report.finding(Assertion::ContentBinding).is_none(), "{name}");
+        for assertion in [Assertion::Versions, Assertion::Anchoring, Assertion::ClaimMaterial] {
+            assert!(report.finding(assertion).is_some(), "{name}: {assertion} is required");
+        }
+    }
+}
+
+/// An `invalid` finding decides the result where it is reached, and the report names the
+/// assertion that produced it. I-D §7.7: "`invalid` dominates `unverifiable` because a
+/// demonstrated defect in required material is a fact about the artifact."
+#[test]
+fn an_invalid_result_names_the_assertion_that_produced_it() {
+    let policy = trust_policy();
+    let (_, receipt) = read_receipt("record-ingested-content-mismatch-must-fail.ahl");
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    assert!(report.verdict.is_none());
+    let binding = report.finding(Assertion::ContentBinding).expect("content-binding finding");
+    assert_eq!(binding.outcome, Outcome::Invalid);
+    assert_eq!(
+        report.finding(Assertion::Anchoring).map(|finding| finding.outcome),
+        Some(Outcome::Verified),
+        "the assertions settled before the defect keep the outcome they reached"
+    );
+}
+
+/// I-D §7.4's `unverifiable` outcome ends nothing: the run carries on, and the assertions that
+/// rest on the material the mode does not carry say so rather than claiming to have held.
+#[test]
+fn an_uncarried_key_transition_is_reported_as_the_prerequisite_it_is() {
+    let policy = trust_policy();
+    let (_, receipt) = read_receipt("statement-anchored-uncarried-key-transition-must-fail.ahl");
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+
+    let envelope = report.finding(Assertion::EnvelopeValidity).expect("envelope-validity finding");
+    assert_eq!(envelope.outcome, Outcome::Unverifiable);
+
+    for assertion in [Assertion::Anchoring, Assertion::Governance] {
+        assert_eq!(
+            report.finding(assertion).map(|finding| finding.outcome),
+            Some(Outcome::Verified),
+            "{assertion} was settled before the gap and is unaffected"
+        );
+    }
+    for assertion in [Assertion::CrossField, Assertion::ClaimMaterial] {
+        let finding = report.finding(assertion).unwrap_or_else(|| panic!("{assertion} finding"));
+        assert_eq!(finding.outcome, Outcome::Unverifiable, "{assertion} rests on the gap");
+        assert!(
+            finding.detail.as_ref().is_some_and(|detail| detail.contains("envelope-validity")),
+            "an assertion resting on a prerequisite must name it: {finding:?}"
+        );
+    }
 }
 
 /// I-D §7.3: a `keyed-authorized` binding "whose evidence is present and well formed but for

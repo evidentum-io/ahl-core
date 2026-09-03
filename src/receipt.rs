@@ -410,6 +410,26 @@ pub struct Report {
     pub verdict: Option<Verdict>,
 }
 
+impl Report {
+    /// The finding for one assertion of the receipt itself.
+    #[must_use]
+    pub fn finding(&self, assertion: Assertion) -> Option<&Finding> {
+        self.finding_at(&[], assertion)
+    }
+
+    /// The finding for one assertion of the embedded receipt reached by `path` — the
+    /// `claim_material` member names leading to it, outermost first. An empty path is the
+    /// receipt itself.
+    #[must_use]
+    pub fn finding_at(&self, path: &[&str], assertion: Assertion) -> Option<&Finding> {
+        self.findings.iter().find(|finding| {
+            finding.assertion == assertion
+                && finding.receipt_path.len() == path.len()
+                && finding.receipt_path.iter().zip(path).all(|(held, want)| held == want)
+        })
+    }
+}
+
 /// A verification run that did not complete, and therefore produced no result at all
 /// (I-D §7.7).
 ///
@@ -1475,7 +1495,7 @@ fn common_payload_fields(payload: &Value) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Budget
+// Run
 // ---------------------------------------------------------------------------
 
 /// The verification-work budget, under the name I-D §7.8 requires a verifier to report it by.
@@ -1484,23 +1504,247 @@ const WORK_BUDGET: &str = "verification work units";
 /// The decoded-size budget, under the name I-D §7.8 requires a verifier to report it by.
 const DECODED_SIZE_BUDGET: &str = "decoded size in bytes";
 
-/// Tracks the §3.1 budgets across a whole receipt tree, including embedded receipts.
+/// One verification run over one receipt tree: the §7.8 budgets it shares, and the §7.7
+/// findings it produces.
+///
+/// Both live here because both are properties of the RUN rather than of any one receipt in the
+/// tree: the budgets are spent across every embedded receipt, and the findings of an embedded
+/// receipt are reported alongside the outer receipt's own (§7.7, "for each embedded receipt,
+/// every required assertion of THAT receipt").
 #[derive(Debug)]
-struct Budget {
+struct Run {
     limits: Limits,
     work: u64,
     embedded: usize,
-    /// Verdicts of embedded receipts already verified, keyed by the **JCS digest of the whole
-    /// embedded receipt object** (format §3.1). The entry id alone is unsound: two embedded
-    /// receipts can share a subject statement while carrying different — independently
+    /// Verdicts and findings of embedded receipts already verified, keyed by the **JCS digest
+    /// of the whole embedded receipt object** (format §3.1). The entry id alone is unsound: two
+    /// embedded receipts can share a subject statement while carrying different — independently
     /// forgeable — `claim_material`, and keying on the envelope would let the second reuse the
     /// first's verdict. Consulted before recursing, not merely recorded after.
-    verified: BTreeMap<String, Verdict>,
+    ///
+    /// The findings are cached with the verdict so that a receipt served from the cache still
+    /// reports its own assertions, at its own path, rather than disappearing from the report
+    /// because an identical receipt was verified elsewhere in the tree.
+    verified: BTreeMap<String, (Verdict, Vec<Finding>)>,
+    /// One finding per required assertion the run has settled, in the order it settled them.
+    findings: Vec<Finding>,
+    /// Where the run currently is: the `claim_material` member names of the embedded receipts
+    /// it has descended into, outermost first. Empty while the outermost receipt is being
+    /// verified.
+    ///
+    /// Pushed before descending and popped only when the descent SUCCEEDS: a rejection inside
+    /// an embedded receipt is recorded at that receipt's own path as the run unwinds, which is
+    /// where a reader has to look for it.
+    path: Vec<String>,
+    /// The assertion of the receipt currently being verified whose `unverifiable` outcome the
+    /// assertions after it rest on, if any (I-D §7.7; see [`Run::pass`]).
+    ///
+    /// Saved and restored around each embedded receipt, because the dependence is between the
+    /// assertions of ONE receipt: an embedded receipt short of material says nothing about the
+    /// assertions its parent settled before descending into it.
+    blocked: Option<Assertion>,
+    /// Rejections recorded as findings and not propagated ([`Run::tolerate`]), so that
+    /// [`verify_receipt`] can still return the one that decided the result.
+    deferred: Vec<Tolerated>,
 }
 
-impl Budget {
+/// One rejection [`Run::tolerate`] recorded and carried on from: the assertion and receipt path
+/// it was recorded under, so that whether it enters the reduction can be decided again later,
+/// and the rejection itself.
+type Tolerated = (Assertion, Vec<String>, ReceiptError);
+
+/// Whether a finding for `assertion` at `path` enters the reduction of the receipt the run is
+/// over — the free-standing form of [`Finding::counts_toward_result`], for deciding it before a
+/// [`Finding`] is in hand.
+const fn counts_toward_result(assertion: Assertion, path: &[String]) -> bool {
+    !matches!(assertion, Assertion::ContentBinding) || path.is_empty()
+}
+
+impl Run {
     const fn new(limits: Limits) -> Self {
-        Self { limits, work: 0, embedded: 0, verified: BTreeMap::new() }
+        Self {
+            limits,
+            work: 0,
+            embedded: 0,
+            verified: BTreeMap::new(),
+            findings: Vec::new(),
+            path: Vec::new(),
+            blocked: None,
+            deferred: Vec::new(),
+        }
+    }
+
+    /// Record the outcome of one assertion at the receipt currently being verified.
+    ///
+    /// One finding per assertion per receipt, and the DOMINATING outcome wins where the same
+    /// assertion is settled more than once — a version read that passes for the subject and
+    /// then fails for an enumerated statement is one `unverifiable` finding on `versions`, not
+    /// two contradictory ones.
+    fn record(&mut self, assertion: Assertion, outcome: Outcome, detail: Option<String>) {
+        if let Some(existing) = self
+            .findings
+            .iter_mut()
+            .find(|f| f.assertion == assertion && f.receipt_path == self.path)
+        {
+            if outcome > existing.outcome {
+                existing.outcome = outcome;
+                existing.detail = detail;
+            }
+            return;
+        }
+        self.findings.push(Finding { assertion, outcome, receipt_path: self.path.clone(), detail });
+    }
+
+    /// Record one required assertion the algorithm has just settled.
+    ///
+    /// I-D §7.7 makes a finding rest on the assertions it needs: where an earlier assertion of
+    /// THIS receipt was `unverifiable` and the run carried on, an assertion settled after it
+    /// rests on material the run never established, and is itself `unverifiable` naming that
+    /// prerequisite. Assertions settled BEFORE the prerequisite keep the outcome they reached —
+    /// which is what §7.7's own example requires: a receipt whose content binding is
+    /// `unverifiable` still reports its anchoring and introduction findings as `verified`.
+    fn pass(&mut self, assertion: Assertion) {
+        match self.blocked {
+            Some(prerequisite) if prerequisite < assertion => self.record(
+                assertion,
+                Outcome::Unverifiable,
+                Some(format!("rests on `{prerequisite}`, which is unverifiable (I-D §7.7)")),
+            ),
+            _ => self.record(assertion, Outcome::Verified, None),
+        }
+    }
+
+    /// Record a rejection as a finding and carry on, where the assertions the run has left do
+    /// not depend on it.
+    ///
+    /// I-D §7.7's reduction is over ALL required findings, so a capability gap must not end the
+    /// run: `invalid` dominates `unverifiable`, and a run that stopped at the first gap could
+    /// never reach the defect that dominates it. Only an `unverifiable` outcome is tolerated
+    /// here — an `invalid` one has already decided the result, and the run ends.
+    fn tolerate<T>(&mut self, result: Result<T>) -> Result<Option<T>> {
+        let error = match result {
+            Ok(value) => return Ok(Some(value)),
+            Err(error) => error,
+        };
+        if error.class() != Outcome::Unverifiable {
+            return Err(error);
+        }
+        // Two `unverifiable` conditions end the run even so, and both are ordering rules rather
+        // than reductions. I-D §7.5 step 1 puts the version read before every other check and
+        // gives an unsupported one "no further processing"; §7.8 requires a verifier to "fail
+        // closed — never degrading to a partial check — when either [budget] is exhausted", and
+        // continuing on a spent budget is exactly a partial check. Neither can hide an
+        // `invalid`: an `invalid` finding ends the run where it is reached, so none can have
+        // been recorded before this point and none can be reached after it.
+        if matches!(
+            error,
+            ReceiptError::UnsupportedVersion { .. } | ReceiptError::BudgetExhausted { .. }
+        ) {
+            return Err(error);
+        }
+        let settled = error.assertion();
+        self.record(settled, Outcome::Unverifiable, Some(error.to_string()));
+        self.deferred.push((settled, self.path.clone(), error));
+        // A content binding is a leaf: I-D §7.2 rests no other assertion on it, and §7.7's own
+        // example has the assertions around it reported `verified`. Every other assertion the
+        // algorithm settles later does rest on the material this one was short of.
+        if !matches!(settled, Assertion::ContentBinding) {
+            self.blocked = Some(settled);
+        }
+        Ok(None)
+    }
+
+    /// Turn the run into the report I-D §7.7 requires: the findings, and the scalar result
+    /// they reduce to.
+    ///
+    /// A rejection that ended the run is recorded here, at the path the run stopped at, so the
+    /// report names the assertion that produced the result. What happens to the assertions the
+    /// run never reached depends on which value stopped it:
+    ///
+    /// *   `invalid` — the result is decided, and the remaining assertions are simply not
+    ///     reported. Reporting them would mean asserting outcomes for checks that never ran.
+    /// *   `unverifiable` — every remaining required assertion of the outermost receipt rests
+    ///     on material the run was short of, so each is reported `unverifiable` naming that
+    ///     prerequisite. Embedded receipts the run never descended into are not enumerated:
+    ///     which receipts a claim embeds is itself read from claim material.
+    fn into_report(mut self, outcome: Result<Verdict>, receipt: &Value) -> Report {
+        let verdict = match outcome {
+            Ok(verdict) => Some(verdict),
+            Err(error) => {
+                let stopped_at = error.assertion();
+                let class = error.class();
+                self.record(stopped_at, class, Some(error.to_string()));
+                if class == Outcome::Unverifiable {
+                    self.fill_unreached(receipt, stopped_at);
+                }
+                None
+            }
+        };
+        // Report order is the reader's order, not the run's: the outermost receipt's own
+        // assertions first, in the order §7.5 settles them, then each embedded receipt's under
+        // its path. The run produces them innermost-first, because an embedded receipt is
+        // verified inside the outer receipt's claim-material step.
+        self.findings.sort_by(|a, b| {
+            a.receipt_path.cmp(&b.receipt_path).then_with(|| a.assertion.cmp(&b.assertion))
+        });
+        let result = reduce(&self.findings);
+        Report {
+            result,
+            findings: self.findings,
+            // I-D §7.7: only `verified` may be rendered in words that assert the property, so
+            // no boundary is carried for the other two values.
+            verdict: if result == Outcome::Verified { verdict } else { None },
+        }
+    }
+
+    /// Report every required assertion of the outermost receipt the run did not settle as
+    /// resting on the one that stopped it.
+    fn fill_unreached(&mut self, receipt: &Value, stopped_at: Assertion) {
+        // I-D §7.7: the content binding is a required assertion "if and only if its own
+        // `assurance.content_binding` is not `none`". Read from the receipt's own bytes, since
+        // the run may have stopped before the assurance block was parsed at all.
+        let binds_content = receipt
+            .get("claim")
+            .and_then(|claim| claim.get("assurance"))
+            .and_then(|assurance| assurance.get("content_binding"))
+            .and_then(Value::as_str)
+            .is_some_and(|binding| binding != "none");
+        self.path.clear();
+        for assertion in Assertion::ORDER {
+            if matches!(assertion, Assertion::ContentBinding) && !binds_content {
+                continue;
+            }
+            if self.findings.iter().any(|f| f.assertion == assertion && f.receipt_path.is_empty()) {
+                continue;
+            }
+            self.record(
+                assertion,
+                Outcome::Unverifiable,
+                Some(format!("rests on `{stopped_at}`, which is unverifiable (I-D §7.7)")),
+            );
+        }
+    }
+
+    /// The tolerated rejection that decided the result, for the callers that report one error
+    /// rather than a report.
+    ///
+    /// `invalid` first and `unverifiable` after it, which is the reduction's own order, and
+    /// only among findings that enter the reduction: an embedded receipt's content binding
+    /// never does (I-D §7.7).
+    fn dominating_deferred(self) -> Option<ReceiptError> {
+        let mut unverifiable = None;
+        for (assertion, path, error) in self.deferred {
+            if !counts_toward_result(assertion, &path) {
+                continue;
+            }
+            if error.class() == Outcome::Invalid {
+                return Some(error);
+            }
+            if unverifiable.is_none() {
+                unverifiable = Some(error);
+            }
+        }
+        unverifiable
     }
 
     const fn spend(&mut self, units: u64) -> Result<()> {
@@ -1526,6 +1770,21 @@ impl Budget {
         }
         Ok(())
     }
+}
+
+/// The reduction of I-D §7.7: "`invalid` if any required finding is `invalid`; otherwise
+/// `unverifiable` if any required finding is `unverifiable`; otherwise `verified`."
+///
+/// That is the maximum under [`Outcome`]'s own ordering, over the findings that ENTER the
+/// reduction: I-D §7.7 excludes an embedded receipt's content binding from the required
+/// assertions of the receipt that embeds it, and nothing else.
+fn reduce(findings: &[Finding]) -> Outcome {
+    findings
+        .iter()
+        .filter(|finding| finding.counts_toward_result())
+        .map(|finding| finding.outcome)
+        .max()
+        .unwrap_or(Outcome::Verified)
 }
 
 // ---------------------------------------------------------------------------
@@ -2622,7 +2881,7 @@ fn verify_rotation_proof(
     manifest_entry_index: u64,
     rotating_manifest: &Value,
     context: &RotationContext<'_>,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let RotationContext { receipt, policy, manifests, outgoing, profile, profile_id } = *context;
     let (outgoing_index, outgoing_manifest) = outgoing;
@@ -2672,7 +2931,7 @@ fn verify_rotation_proof(
             outgoing_log_attempted.get(checkpoint_key_id).copied().unwrap_or(outgoing_index);
         ReceiptError::KeyNotBound { key_id: checkpoint_key_id.to_owned(), entry_index }
     })?;
-    budget.spend(1)?;
+    run.spend(1)?;
     if !verify_signature(
         &decode_pubkey(&signer.pubkey)?,
         &checkpoint_signing_bytes_for(checkpoint, profile_id)?,
@@ -2692,7 +2951,7 @@ fn verify_rotation_proof(
         &path_strings(element, "inclusion_path")?,
         &root,
         "rotation-proof manifest inclusion",
-        budget,
+        run,
     )?;
 
     // I-D §7.1: `witnesses`, where PRESENT, is "an array in the shape of
@@ -2743,7 +3002,7 @@ fn verify_rotation_proof(
             // same public key. A `local-policy` entry is not such a listing however trusted it
             // is: it attests what this verifier accepts, not what the retiring authority did.
             require_listed_rotation_witness(receipt, outgoing_index, &witness_id, key_id, &pubkey)?;
-            budget.spend(1)?;
+            run.spend(1)?;
             if verify_signature(
                 &decode_pubkey(&pubkey)?,
                 &cosignature_bytes(checkpoint, &witness_id),
@@ -2823,10 +3082,10 @@ fn verify_governance_phase_1(
     events: &[KeyEvent],
     index: u64,
     mode: &str,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let k_so_far = producer_keys_at_in(manifests, events, index);
-    budget.spend(1)?;
+    run.spend(1)?;
     let check = crate::check_envelope(envelope, |key_id| {
         k_so_far.get(key_id).map(|bound| bound.pubkey.clone())
     })?;
@@ -2944,7 +3203,7 @@ fn read_chain<'a>(
     profile_id: &str,
     key_statements: &[(u64, &Value)],
     mode: &'a str,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<Governance<'a>> {
     let chain = array(obj(receipt, "governance")?, "chain")?;
     if chain.is_empty() {
@@ -3099,7 +3358,7 @@ fn read_chain<'a>(
             walked_index = index;
             let payload = payload_of(envelope)?;
             check_ahl_version(payload)?;
-            verify_governance_phase_1(envelope, &manifests, &events, index, mode, budget)?;
+            verify_governance_phase_1(envelope, &manifests, &events, index, mode, run)?;
             common_payload_fields(payload)?;
             // Phase 2 (4b(K)) and phase 3 (the producer-key effect), in that order.
             events.push(validate_key_statement(
@@ -3119,7 +3378,7 @@ fn read_chain<'a>(
         let payload = payload_of(envelope)?;
         check_ahl_version(payload)?;
 
-        verify_governance_phase_1(envelope, &manifests, &events, index, mode, budget)?;
+        verify_governance_phase_1(envelope, &manifests, &events, index, mode, run)?;
 
         // "A failure at phase 1 or phase 2 is invalid, and the induction does not continue past
         // it. No effect is ever applied to K by a statement that has not completed both
@@ -3216,7 +3475,7 @@ fn read_chain<'a>(
                             profile,
                             profile_id,
                         },
-                        budget,
+                        run,
                     )?;
                     rotation_cursor += 1;
                 }
@@ -3502,7 +3761,7 @@ fn check_key_independent_paths(
     subject_index: u64,
     tree_size: u64,
     root: &Hash,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     if subject_index >= tree_size {
         return Err(ReceiptError::EntryIndexBeyondCheckpoint {
@@ -3517,7 +3776,7 @@ fn check_key_independent_paths(
         &path_strings(obj(receipt, "anchoring")?, "inclusion_path")?,
         root,
         "subject",
-        budget,
+        run,
     )?;
 
     let mut previous: Option<u64> = None;
@@ -3549,7 +3808,7 @@ fn check_key_independent_paths(
             &path_strings(hop, "inclusion_path")?,
             root,
             "governance chain hop",
-            budget,
+            run,
         )?;
     }
     Ok(())
@@ -3920,7 +4179,7 @@ fn verify_checkpoint(
     profile: &AdaptorProfile,
     profile_id: &str,
     continued_history: bool,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<Anchoring> {
     let anchoring = obj(receipt, "anchoring")?;
     let checkpoint = checkpoint_object(obj(anchoring, "checkpoint")?)?;
@@ -3950,7 +4209,7 @@ fn verify_checkpoint(
         let entry_index = log_attempted.get(&key_id).copied().unwrap_or(active_index);
         ReceiptError::KeyNotBound { key_id, entry_index }
     })?;
-    budget.spend(1)?;
+    run.spend(1)?;
     if !verify_signature(
         &decode_pubkey(&signing_key.pubkey)?,
         &checkpoint_signing_bytes_for(checkpoint, profile_id)?,
@@ -3970,7 +4229,7 @@ fn verify_checkpoint(
         })?;
         check_witness_identity(resolved, key_id, &witness_id)?;
         check_witness_declared(active_manifest, &witness_id, tree_size)?;
-        budget.spend(1)?;
+        run.spend(1)?;
         if !verify_signature(
             &decode_pubkey(&resolved.pubkey)?,
             &cosignature_bytes(checkpoint, &witness_id),
@@ -3993,7 +4252,7 @@ fn verify_checkpoint(
     // is what makes both roots the log's.
     if continued_history {
         authenticate_continued_history(
-            receipt, policy, governance, anchoring, profile, profile_id, budget,
+            receipt, policy, governance, anchoring, profile, profile_id, run,
         )?;
     }
 
@@ -4029,7 +4288,7 @@ fn check_continued_history_paths(
     anchoring: &Value,
     from_size: u64,
     from_root: &Hash,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<bool> {
     match (anchoring.get("later_checkpoint"), anchoring.get("consistency_path")) {
         (None, None) => {
@@ -4078,7 +4337,7 @@ fn check_continued_history_paths(
     let to_root = parse_hash_hex(text(later, "root_hash")?)?;
     let path = path_strings(anchoring, "consistency_path")?;
     let proof = crate::consistency_from_hex(from_size, to_size, &path)?;
-    budget.spend(1)?;
+    run.spend(1)?;
     match crate::verify_consistency_proof(&proof, from_root, &to_root) {
         Ok(true) => Ok(true),
         // `Ok(false)` is a proof that does not open the pair; `Err` is a proof that could not
@@ -4110,11 +4369,11 @@ fn authenticate_continued_history(
     anchoring: &Value,
     profile: &AdaptorProfile,
     profile_id: &str,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let later = checkpoint_object(obj(anchoring, "later_checkpoint")?)?;
-    authenticate_checkpoint(receipt, policy, governance, later, profile, profile_id, budget)?;
-    verify_later_witnesses(receipt, policy, governance, anchoring, later, budget)
+    authenticate_checkpoint(receipt, policy, governance, later, profile, profile_id, run)?;
+    verify_later_witnesses(receipt, policy, governance, anchoring, later, run)
 }
 
 /// Verify an inclusion path carried bare (adaptor profile §2.3) against a root.
@@ -4125,9 +4384,9 @@ fn check_inclusion(
     path: &[String],
     root: &Hash,
     what: &'static str,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
-    budget.spend(1)?;
+    run.spend(1)?;
     let proof = proof_from_hex(leaf_index, tree_size, path)?;
     if crate::verify_inclusion_proof(leaf, &proof, root)? {
         Ok(())
@@ -4172,7 +4431,7 @@ fn decode_enumeration(
     root: &Hash,
     tree_size: u64,
     what: &'static str,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<Enumeration> {
     let range = obj(material, "range")?;
     let from_index = number(range, "from_index")?;
@@ -4230,7 +4489,7 @@ fn decode_enumeration(
             ),
         });
     }
-    budget.spend(u64::try_from(envelopes.len()).unwrap_or(u64::MAX).saturating_add(1))?;
+    run.spend(u64::try_from(envelopes.len()).unwrap_or(u64::MAX).saturating_add(1))?;
     let leaves: Vec<Vec<u8>> = envelopes.iter().map(jcs).collect();
     if !range_proof::verify_over_leaves(&proof, &leaves, root)? {
         return Err(ReceiptError::RangeProofInvalid {
@@ -4246,7 +4505,7 @@ fn decode_enumeration(
 fn verify_enumerated_envelopes(
     enumeration: &Enumeration,
     governance: &Governance<'_>,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     // I-D §7.5.1 4d: with K established, every carried envelope that is NOT part of the
     // induction is verified under the envelope signature rule of §2.1 at ITS OWN entry index —
@@ -4288,7 +4547,7 @@ fn verify_enumerated_envelopes(
             continue;
         }
         let index = enumeration.from_index + offset as u64;
-        verify_envelope_at(envelope, governance, index, budget)?;
+        verify_envelope_at(envelope, governance, index, run)?;
         // Phase 2 for a non-induction enumerated envelope, and strictly after 4d's signature:
         // I-D §7.5.1 4b states the three-phase order "for both types" of governance statement,
         // and the reason it gives is general — "Type-specific validation MUST NOT run on
@@ -4311,10 +4570,10 @@ fn verify_enumeration(
     root: &Hash,
     tree_size: u64,
     what: &'static str,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<Enumeration> {
-    let enumeration = decode_enumeration(material, root, tree_size, what, budget)?;
-    verify_enumerated_envelopes(&enumeration, governance, budget)?;
+    let enumeration = decode_enumeration(material, root, tree_size, what, run)?;
+    verify_enumerated_envelopes(&enumeration, governance, run)?;
     Ok(enumeration)
 }
 
@@ -4344,7 +4603,8 @@ fn check_receipt_versions(receipt: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Verify an Evidence Receipt against locally configured policy.
+/// Verify an Evidence Receipt against locally configured policy, and report the §7.7 result
+/// with the findings it reduces from.
 ///
 /// Implements I-D §7.5's algorithm in the order it fixes: step 1, versions before anything
 /// else, then parsing, the §7.8 limits and identifier recomputation; step 2, adaptor-profile
@@ -4352,12 +4612,69 @@ fn check_receipt_versions(receipt: &Value) -> Result<()> {
 /// document, no signature among them; step 4, the governance bootstrap of §7.5.1 as an
 /// induction from the configured genesis anchor, with the authenticated checkpoint validation
 /// of 4f; step 5, the claim-material requirements of §7.2; step 6, the cross-field rules of
-/// §7.6; and step 7, the rendered boundary, never stronger than what was proven.
+/// §7.6; and step 7, the result of §7.7 together with the boundary rendered from it, never
+/// stronger than what was proven.
+///
+/// # What the report contains
+///
+/// [`Report::result`] is the scalar value of §7.7 — one receipt, one value — and
+/// [`Report::findings`] is the per-assertion detail §7.7 requires a verifier to report
+/// alongside it, since "the result alone does not say which assertion produced it". A finding
+/// is never a result: a receipt whose content binding is `unverifiable` reports `unverifiable`
+/// as its result AND `verified` on the assertions that did hold.
+///
+/// How far the findings go depends on what stopped the run. An `invalid` finding decides the
+/// result, so the run ends there and the assertions after it are not reported at all. An
+/// `unverifiable` finding does not decide it — `invalid` still dominates — so the run carries
+/// on wherever the assertions left do not rest on the material it was short of, and where they
+/// do, each is reported `unverifiable` naming that prerequisite. Two conditions end the run
+/// even so: an unsupported version, which §7.5 step 1 follows with "no further processing", and
+/// an exhausted verifier-local budget, which §7.8 requires to fail closed.
+///
+/// [`Report::verdict`] is present if and only if the result is [`Outcome::Verified`]: §7.7
+/// permits only that value to be "rendered in words that assert the property", and no result is
+/// ever represented by rewriting the receipt's own assurance fields.
 ///
 /// # Errors
 ///
-/// Returns the [`ReceiptError`] variant naming the first rule that rejected the receipt.
+/// Returns [`ExecutionError`] for a run that did not COMPLETE, which is not a statement about
+/// the receipt and carries none of the three values (§7.7). This build reaches no such
+/// condition today: every rejection it can produce is a completed run reported through
+/// [`Report::result`].
+pub fn verify_receipt_report(
+    receipt: &Value,
+    policy: &TrustPolicy,
+) -> core::result::Result<Report, ExecutionError> {
+    let mut run = Run::new(policy.limits);
+    let outcome = verify_root(receipt, policy, &mut run);
+    Ok(run.into_report(outcome, receipt))
+}
+
+/// Verify an Evidence Receipt against locally configured policy.
+///
+/// The single-value form of [`verify_receipt_report`], for callers that report one rejection
+/// rather than a report: `Ok` if and only if the §7.7 result is [`Outcome::Verified`], and
+/// otherwise the rejection behind the finding that decided the result — the `invalid` one if
+/// there is one, since `invalid` dominates, and otherwise the first `unverifiable` one.
+///
+/// The findings themselves are not reachable through this signature, so a caller that must
+/// distinguish `invalid` from `unverifiable`, or show which assertion produced the result,
+/// wants [`verify_receipt_report`]. [`ReceiptError::class`] gives the value of a single
+/// rejection.
+///
+/// # Errors
+///
+/// Returns the [`ReceiptError`] variant naming the rule that decided the result.
 pub fn verify_receipt(receipt: &Value, policy: &TrustPolicy) -> Result<Verdict> {
+    let mut run = Run::new(policy.limits);
+    let verdict = verify_root(receipt, policy, &mut run)?;
+    // A rejection the run recorded and carried on from still decides the result, and this
+    // signature has exactly one way to report it.
+    run.dominating_deferred().map_or(Ok(verdict), Err)
+}
+
+/// The §7.5 algorithm over the outermost receipt, shared by both entry points.
+fn verify_root(receipt: &Value, policy: &TrustPolicy, run: &mut Run) -> Result<Verdict> {
     // I-D §7.5 step 1: "Read `ahl_receipt_version` and act on it BEFORE ANY OTHER CHECK,
     // including schema validation... THEN parse the receipt, enforce the resource limits of
     // Section 7.8." The order decides what the holder of a receipt is told. A version this
@@ -4380,9 +4697,8 @@ pub fn verify_receipt(receipt: &Value, policy: &TrustPolicy) -> Result<Verdict> 
             in_force: policy.limits.max_decoded_bytes as u64,
         });
     }
-    let mut budget = Budget::new(policy.limits);
-    let verdict = verify_nested(receipt, policy, &mut budget, 0)?;
-    Ok(Verdict { embedded_receipts: budget.embedded, ..verdict })
+    let verdict = verify_nested(receipt, policy, run, 0)?;
+    Ok(Verdict { embedded_receipts: run.embedded, ..verdict })
 }
 
 /// Verify a receipt at nesting `depth`, sharing the whole tree's resource budget.
@@ -4392,7 +4708,7 @@ pub fn verify_receipt(receipt: &Value, policy: &TrustPolicy) -> Result<Verdict> 
 fn verify_nested(
     receipt: &Value,
     policy: &TrustPolicy,
-    budget: &mut Budget,
+    run: &mut Run,
     depth: usize,
 ) -> Result<Verdict> {
     // --- §7.5 step 1: versions, identifiers -----------------------------------------
@@ -4400,7 +4716,7 @@ fn verify_nested(
     // function without passing through [`verify_receipt`], and §7.5 step 1's rule is about
     // every receipt, the embedded ones included (§7.1).
     //
-    // It runs BEFORE [`Budget::enter`], because §7.5 step 1 is explicit about the order — "Read
+    // It runs BEFORE [`Run::enter`], because §7.5 step 1 is explicit about the order — "Read
     // `ahl_receipt_version` and act on it before any other check, including schema validation.
     // THEN parse the receipt, enforce the resource limits of Section 7.8" — and the two
     // outcomes are not interchangeable at any depth. An unsupported version is a fixed property
@@ -4412,7 +4728,11 @@ fn verify_nested(
     // itself is two member lookups on an already-parsed object, so nothing is decoded, hashed
     // or recursed into ahead of the budget it precedes.
     check_receipt_versions(receipt)?;
-    budget.enter(depth)?;
+    run.enter(depth)?;
+    // The dependence I-D §7.7 draws between findings is between the assertions of ONE receipt,
+    // so each receipt starts with none and the enclosing receipt's state is put back before
+    // this one's verdict is returned.
+    let enclosing_block = run.blocked.take();
 
     let envelope = obj(receipt, "envelope")?;
     let subject = obj(receipt, "subject")?;
@@ -4432,6 +4752,11 @@ fn verify_nested(
     }
     let subject_index = number(subject, "entry_index")?;
     let subject_type = statement_type(payload)?.to_owned();
+    // Step 1 is settled for this receipt. Both assertions stay open to a later rejection —
+    // an enumerated statement's own `ahl_version`, or a budget exhausted deeper in the run —
+    // and [`Run::record`] keeps the dominating outcome where one arrives.
+    run.pass(Assertion::Versions);
+    run.pass(Assertion::ResourceLimits);
 
     // --- §7.5 step 2: adaptor profile ---------------------------------------------
     // I-D §3.2, §7.5 step 2: "MUST recompute the digest over the artifact rather than trusting
@@ -4489,18 +4814,20 @@ fn verify_nested(
     // with profile resolution — decided before step 3 reads a path and long before any
     // signature is checked.
     reconcile_anchoring_raw(anchoring_block, adaptor_id)?;
+    run.pass(Assertion::AdaptorProfile);
 
     // --- §7.5 step 3: key-independent structural and path checks --------------------
     // "No signature and no cosignature is verified in this step." The checkpoint's own members
     // are read here only as the structural commitment the carried material is bound to; that
     // the log issued this root is established at 4f and nowhere earlier.
     check_container_shapes(receipt)?;
+    run.pass(Assertion::Structure);
     let checkpoint = checkpoint_object(obj(anchoring_block, "checkpoint")?)?;
     let tree_size = number(checkpoint, "tree_size")?;
     let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
-    check_key_independent_paths(receipt, envelope, subject_index, tree_size, &root, budget)?;
-    let continued_history =
-        check_continued_history_paths(anchoring_block, tree_size, &root, budget)?;
+    check_key_independent_paths(receipt, envelope, subject_index, tree_size, &root, run)?;
+    let continued_history = check_continued_history_paths(anchoring_block, tree_size, &root, run)?;
+    run.pass(Assertion::Anchoring);
 
     // Still step 3, and the last of it: the governance currency mode, and — under `enumerated`
     // — the currency material itself, decoded and recomputed against `root`.
@@ -4546,7 +4873,7 @@ fn verify_nested(
         });
     }
     let currency_enumeration = match mode {
-        "enumerated" => Some(decode_governance_enumeration(currency, &root, tree_size, budget)?),
+        "enumerated" => Some(decode_governance_enumeration(currency, &root, tree_size, run)?),
         // I-D §7.4: "`governance.chain[]` carries manifest statements; producer-key transitions
         // are `key` statements, and those reach a verifier only through enumeration material."
         // Declared mode carries none, so the induction's second stream is empty and the key
@@ -4557,12 +4884,12 @@ fn verify_nested(
         currency_enumeration.as_ref().map_or_else(Vec::new, enumerated_key_statements);
 
     // --- §7.5 step 4: the governance bootstrap, as an induction (4a-4c) -------------
-    let governance =
-        read_chain(receipt, policy, profile, adaptor_id, &key_statements, mode, budget)?;
+    let governance = read_chain(receipt, policy, profile, adaptor_id, &key_statements, mode, run)?;
     // 4c under enumerated governance: what the induction walked is everything the range holds.
     if let Some(enumeration) = &currency_enumeration {
         check_manifest_completeness(enumeration, &governance)?;
     }
+    run.pass(Assertion::Governance);
 
     // --- §7.5.1 4f: authenticated checkpoint validation -----------------------------
     // Only on passing this do step 3's path results become claims about the log's state
@@ -4574,14 +4901,21 @@ fn verify_nested(
         profile,
         adaptor_id,
         continued_history,
-        budget,
+        run,
     )?;
+    run.pass(Assertion::CheckpointAuthentication);
 
     // --- §7.5.1 4d: the remaining carried envelopes ---------------------------------
     // The subject's own envelope is verified separately, against K FINAL at ITS OWN entry
     // index (I-D §7.5.1 4d "remaining carried envelopes") — a later, distinct step from the
     // induction above, not a repetition of it.
-    verify_envelope_at(envelope, &governance, subject_index, budget)?;
+    // I-D §7.4 makes one rejection here `unverifiable` rather than `invalid`: a declared-mode
+    // envelope naming a producer key that mode does not carry. §7.7's reduction is over every
+    // required finding, and `invalid` dominates `unverifiable`, so the run records that finding
+    // and carries on — the assertions after it rest on the same unresolved key and are reported
+    // as resting on it, while a defect reached later still decides the result.
+    let envelope_outcome = verify_envelope_at(envelope, &governance, subject_index, run);
+    let envelope_valid = run.tolerate(envelope_outcome)?;
     // I-D §2.2's common payload fields, checked only now that the subject's own signature has
     // verified — the same rule chain hops get, applied to the one carried envelope that is
     // never itself a chain hop.
@@ -4589,6 +4923,9 @@ fn verify_nested(
     // Every producer key the receipt lists must be in force at the subject's entry index under
     // the §7.2 snapshot rule, bound to the governance statement that put it there (§2.2).
     bind_producer_keys(receipt, &governance, subject_index)?;
+    if envelope_valid.is_some() {
+        run.pass(Assertion::EnvelopeValidity);
+    }
 
     // --- §2.1 / §4: governance currency ---------------------------------------------
     let claim = obj(receipt, "claim")?;
@@ -4616,7 +4953,7 @@ fn verify_nested(
             None
         }
         Some(enumeration) => {
-            verify_enumerated_envelopes(enumeration, &governance, budget)?;
+            verify_enumerated_envelopes(enumeration, &governance, run)?;
             Some(enumeration)
         }
     };
@@ -4676,6 +5013,9 @@ fn verify_nested(
         }
     }
     let record_subject = check_record_subject(claim, payload, &claim_type, &subject_type)?;
+    // The §7.6 rules decidable from the container alone are settled; the ones over embedded
+    // material are reached inside step 5 and, where one of them fires, replace this finding.
+    run.pass(Assertion::CrossField);
 
     // --- §7.5 step 5: the §7.2 claim-material requirements --------------------------
     let ctx = ClaimCtx {
@@ -4693,7 +5033,15 @@ fn verify_nested(
         enumeration,
         depth,
     };
-    verify_claim_material(&ctx, budget)?;
+    verify_claim_material(&ctx, run)?;
+    run.pass(Assertion::ClaimMaterial);
+    // I-D §7.7: the content binding is a required assertion "if and only if its own
+    // `assurance.content_binding` is not `none`". Where it is required and the run reached the
+    // end of claim material without recording it, it held.
+    if assurance.content_binding != "none" {
+        run.pass(Assertion::ContentBinding);
+    }
+    run.blocked = enclosing_block;
 
     Ok(Verdict {
         boundary: render(&claim_type, &assurance),
@@ -4701,7 +5049,7 @@ fn verify_nested(
         subject_entry_index: subject_index,
         subject_statement_id: text(subject, "statement_id")?.to_owned(),
         assurance,
-        embedded_receipts: budget.embedded,
+        embedded_receipts: run.embedded,
     })
 }
 
@@ -4859,10 +5207,10 @@ fn verify_envelope_at(
     envelope: &Value,
     governance: &Governance<'_>,
     index: u64,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let keys = governance.producer_pubkeys_at(index);
-    budget.spend(1)?;
+    run.spend(1)?;
     let check = crate::check_envelope(envelope, |key_id| keys.get(key_id).cloned())?;
     envelope_outcome(&check, governance.mode, index)
 }
@@ -4884,10 +5232,10 @@ fn decode_governance_enumeration(
     currency: &Value,
     root: &Hash,
     tree_size: u64,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<Enumeration> {
     let material = obj(currency, "material")?;
-    let enumeration = decode_enumeration(material, root, tree_size, "governance", budget)?;
+    let enumeration = decode_enumeration(material, root, tree_size, "governance", run)?;
     if enumeration.from_index != 0 || enumeration.to_index != tree_size {
         return Err(ReceiptError::GovernanceRangeNotComplete {
             got_from: enumeration.from_index,
@@ -5032,16 +5380,16 @@ impl ClaimCtx<'_> {
     }
 }
 
-fn verify_claim_material(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
+fn verify_claim_material(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     match ctx.claim_type {
         "statement-anchored" => Ok(()),
-        "record-ingested" => verify_record_ingested(ctx),
-        "record-derived" => verify_record_derived(ctx, budget),
-        "trigger-declared" => verify_trigger(ctx, budget, "trigger-declared"),
-        "trigger-effective" => verify_trigger(ctx, budget, "trigger-effective"),
-        "disposition-declared" => verify_disposition(ctx, budget, "trigger-declared"),
-        "disposition-effective" => verify_disposition(ctx, budget, "trigger-effective"),
-        "propagation-complete" => verify_propagation_complete(ctx, budget),
+        "record-ingested" => verify_record_ingested(ctx, run),
+        "record-derived" => verify_record_derived(ctx, run),
+        "trigger-declared" => verify_trigger(ctx, run, "trigger-declared"),
+        "trigger-effective" => verify_trigger(ctx, run, "trigger-effective"),
+        "disposition-declared" => verify_disposition(ctx, run, "trigger-declared"),
+        "disposition-effective" => verify_disposition(ctx, run, "trigger-effective"),
+        "propagation-complete" => verify_propagation_complete(ctx, run),
         "governance-state" => verify_governance_state(ctx),
         other => Err(ReceiptError::Malformed(format!("`{other}` is not a registry claim type"))),
     }
@@ -5049,14 +5397,23 @@ fn verify_claim_material(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
 
 /// `record-ingested` (§3): the subject ingestion introduces the record; optional content
 /// binding recomputes the commitment from carried canonical bytes.
-fn verify_record_ingested(ctx: &ClaimCtx<'_>) -> Result<()> {
+fn verify_record_ingested(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     ctx.require_subject_type("ingestion")?;
     let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
-    verify_content_binding(ctx, dataset, record, "record_bytes")
+    let binding = verify_content_binding(ctx, dataset, record, "record_bytes");
+    run.tolerate(binding).map(|_| ())
 }
 
 /// Recompute a commitment from carried canonical bytes per the dataset's declared mode
 /// (§2.1, spec §2.4). `content_binding: "none"` requires the evidence fields to be absent.
+///
+/// The callers pass the outcome through [`Run::tolerate`], because a content binding is the one
+/// assertion I-D §7.7 has other assertions reported around rather than behind: "A
+/// `record-ingested` receipt asserting a content binding the verifier cannot compute has result
+/// `unverifiable`... and its report MUST show the anchoring and introduction findings as
+/// `verified` and the content-binding finding as `unverifiable`." A capability gap here
+/// therefore records its finding and lets the claim-material step finish; a defect still ends
+/// the run, since `invalid` has already decided the result.
 ///
 /// Everything past the `"none"` case is I-D revision 0.4, §2.6 and §6.3:
 ///
@@ -5264,7 +5621,7 @@ fn describe_descriptor(descriptor: &CanonicalizationDescriptor) -> String {
 }
 
 /// `record-derived` (§3): one output record's derivation, unbatched or through the batch tree.
-fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
+fn verify_record_derived(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     ctx.require_subject_type("derivation")?;
     let material = ctx.material()?;
     let output = obj(material, "output")?;
@@ -5302,9 +5659,9 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
             &path_strings(material, "leaf_path")?,
             &parse_hash_hex(root)?,
             "batch output leaf",
-            budget,
+            run,
         )?;
-        verify_input_members(ctx, leaf, budget)?;
+        verify_input_members(ctx, leaf, run)?;
     } else {
         let listed = array(ctx.payload, "outputs")?.iter().any(|entry| {
             entry.get("dataset").and_then(Value::as_str) == Some(claimed.0.as_str())
@@ -5315,7 +5672,8 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
         }
     }
 
-    verify_content_binding(ctx, &claimed.0, &claimed.1, "output_bytes")
+    let binding = verify_content_binding(ctx, &claimed.0, &claimed.1, "output_bytes");
+    run.tolerate(binding).map(|_| ())
 }
 
 /// `input_members` (I-D §7.2): each proves one input's membership in the leaf's input set.
@@ -5345,7 +5703,7 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> 
 /// §2.1, and no duplicates. Membership paths do not reach any of that, so the assembled set is
 /// validated through [`ValidatedLeafSet::open`] — the same gate every other tree in this crate
 /// passes through.
-fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -> Result<()> {
+fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, run: &mut Run) -> Result<()> {
     let material = ctx.material()?;
     // Where present, the member is an array; a wrong type is `invalid` and is never read as
     // absent, which would silently skip every input-membership proof the receipt carries.
@@ -5387,7 +5745,7 @@ fn verify_input_members(ctx: &ClaimCtx<'_>, leaf: &Value, budget: &mut Budget) -
                     &path_strings(member, "input_path")?,
                     &parse_hash_hex(root)?,
                     "input-set member",
-                    budget,
+                    run,
                 )?;
                 if opened.insert(index, input.clone()).is_some() {
                     return Err(ReceiptError::TreeMaterialInvalid {
@@ -5466,7 +5824,7 @@ fn verify_embedded(
     slot: &'static str,
     expected: &'static str,
     permitted: &[&str],
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<Embedded> {
     let embedded =
         ctx.material()?.get(slot).filter(|v| v.is_object()).ok_or_else(|| ctx.missing(slot))?;
@@ -5475,13 +5833,26 @@ fn verify_embedded(
     // cache entry; two receipts about the same statement with different claim material are
     // each verified in full.
     let key = sha256_hex(&jcs(embedded));
-    let verdict = if let Some(cached) = budget.verified.get(&key) {
-        cached.clone()
+    // The path this embedded receipt's findings are recorded under. Pushed before descending
+    // and popped only on success: a rejection inside the embedded receipt is recorded at the
+    // embedded receipt's own path as the run unwinds.
+    run.path.push(slot.to_owned());
+    let verdict = if let Some((verdict, findings)) = run.verified.get(&key).cloned() {
+        // Served from the cache, and still reported: I-D §7.7 gives the embedding receipt a
+        // finding for every required assertion of the receipt it embeds, and a second
+        // occurrence of one receipt is a second place a reader looks for them.
+        for finding in findings {
+            run.record(finding.assertion, finding.outcome, finding.detail);
+        }
+        verdict
     } else {
-        let verdict = verify_nested(embedded, ctx.policy, budget, ctx.depth + 1)?;
-        budget.verified.insert(key, verdict.clone());
+        let before = run.findings.len();
+        let verdict = verify_nested(embedded, ctx.policy, run, ctx.depth + 1)?;
+        let findings = run.findings[before..].to_vec();
+        run.verified.insert(key, (verdict.clone(), findings));
         verdict
     };
+    run.path.pop();
 
     if !permitted.contains(&verdict.claim_type.as_str()) {
         return Err(ReceiptError::EmbeddedClaimTypeMismatch {
@@ -5500,7 +5871,7 @@ fn verify_embedded(
 }
 
 /// `trigger-declared` / `trigger-effective` (§3).
-fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result<()> {
+fn verify_trigger(ctx: &ClaimCtx<'_>, run: &mut Run, kind: &str) -> Result<()> {
     let subject_type = statement_type(ctx.payload)?;
     if !matches!(subject_type, "retraction" | "correction") {
         return Err(ReceiptError::Malformed(format!(
@@ -5520,7 +5891,7 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
 
     // The introduction proof establishes who may retract (§3 authority note).
     let introduction =
-        verify_embedded(ctx, "introduction", "introduction", &INTRODUCTION_TYPES, budget)?;
+        verify_embedded(ctx, "introduction", "introduction", &INTRODUCTION_TYPES, run)?;
     // Spec §2.3.3: a trigger anchored at a smaller entry index than the record's introduction
     // is never effective — authority cannot predate the introduction that creates it.
     if introduction.entry_index >= ctx.subject_index {
@@ -5551,7 +5922,7 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
             "replacement_introduction",
             "introduction",
             &INTRODUCTION_TYPES,
-            budget,
+            run,
         )?;
         // Spec §2.3.3: a correction's replacement must be introduced at an entry index no
         // greater than the correction's.
@@ -5577,8 +5948,8 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, budget: &mut Budget, kind: &str) -> Result
     if kind == "trigger-effective" {
         // "Effective" is exactly the authority claim: an unauthorized trigger is a challenge
         // (spec §2.3.3) and can never be effective, however well anchored it is.
-        verify_trigger_authority(ctx, &introduction, budget)?;
-        verify_competing_triggers(ctx, &introduction, budget)?;
+        verify_trigger_authority(ctx, &introduction, run)?;
+        verify_competing_triggers(ctx, &introduction, run)?;
     } else if ctx.assurance.competing_triggers != "not-checked" {
         return Err(ReceiptError::AssuranceMismatch { field: "competing_triggers" });
     }
@@ -5709,11 +6080,11 @@ fn is_authorized_trigger(
     dataset: &str,
     by_ingestion: bool,
     index: u64,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<bool> {
     // The §7.8 budget is charged per candidate examined: resolving the authority key set walks
     // the governance state at `index`, which is per-candidate work whatever it concludes.
-    budget.spend(1)?;
+    run.spend(1)?;
     let authority = authority_at(ctx, dataset, by_ingestion, index)?;
     let signers: BTreeSet<String> = array(envelope, "signatures")?
         .iter()
@@ -5735,12 +6106,12 @@ fn is_authorized_trigger(
 fn verify_trigger_authority(
     ctx: &ClaimCtx<'_>,
     introduction: &Embedded,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
     let envelope = obj(ctx.receipt, "envelope")?;
     let by_ingestion = introduced_by_ingestion(introduction);
-    if !is_authorized_trigger(ctx, envelope, dataset, by_ingestion, ctx.subject_index, budget)? {
+    if !is_authorized_trigger(ctx, envelope, dataset, by_ingestion, ctx.subject_index, run)? {
         let signers: BTreeSet<String> = array(envelope, "signatures")?
             .iter()
             .map(|signature| Ok(text(signature, "key_id")?.to_owned()))
@@ -5764,7 +6135,7 @@ fn verify_trigger_authority(
 fn verify_competing_triggers(
     ctx: &ClaimCtx<'_>,
     introduction: &Embedded,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let introduction_index = introduction.entry_index;
     if ctx.assurance.competing_triggers != "enumerated" || ctx.assurance.governance != "enumerated"
@@ -5785,7 +6156,7 @@ fn verify_competing_triggers(
         &root,
         tree_size,
         "competing triggers",
-        budget,
+        run,
     )?;
 
     // The range must be the complete corpus prefix, or the prefix from the record's
@@ -5823,7 +6194,7 @@ fn verify_competing_triggers(
         {
             continue;
         }
-        if is_authorized_trigger(ctx, envelope, dataset, by_ingestion, index, budget)? {
+        if is_authorized_trigger(ctx, envelope, dataset, by_ingestion, index, run)? {
             governing = Some(index);
         } else {
             challenges.push(index);
@@ -5831,7 +6202,7 @@ fn verify_competing_triggers(
     }
     if !challenges.is_empty() {
         // Surfaced, as §2.3.3 requires — but not traversed, and not permitted to govern.
-        budget.spend(challenges.len() as u64)?;
+        run.spend(challenges.len() as u64)?;
     }
     if governing != Some(ctx.subject_index) {
         return Err(ReceiptError::ClosureMismatch(format!(
@@ -5845,14 +6216,10 @@ fn verify_competing_triggers(
 }
 
 /// `disposition-declared` / `disposition-effective` (§3).
-fn verify_disposition(
-    ctx: &ClaimCtx<'_>,
-    budget: &mut Budget,
-    trigger_kind: &'static str,
-) -> Result<()> {
+fn verify_disposition(ctx: &ClaimCtx<'_>, run: &mut Run, trigger_kind: &'static str) -> Result<()> {
     ctx.require_subject_type("propagation")?;
     let material = ctx.material()?;
-    let trigger = verify_embedded(ctx, "trigger", trigger_kind, &[trigger_kind], budget)?;
+    let trigger = verify_embedded(ctx, "trigger", trigger_kind, &[trigger_kind], run)?;
 
     // The propagation must name the trigger the embedded receipt proves (spec §2.3.4).
     if text(ctx.payload, "trigger")? != trigger.verdict.subject_statement_id {
@@ -5896,7 +6263,7 @@ fn verify_disposition(
         &path_strings(material, "leaf_path")?,
         &parse_hash_hex(text(ctx.payload, "affected_root")?)?,
         "disposition leaf",
-        budget,
+        run,
     )
 }
 
@@ -5916,7 +6283,7 @@ fn authenticate_checkpoint(
     declared: &Value,
     profile: &AdaptorProfile,
     profile_id: &str,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let key_id = text(declared, "key_id")?;
     let tree_size = number(declared, "tree_size")?;
@@ -5959,7 +6326,7 @@ fn authenticate_checkpoint(
         ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
     })?;
 
-    budget.spend(1)?;
+    run.spend(1)?;
     if !verify_signature(
         &decode_pubkey(&signing_key.pubkey)?,
         &checkpoint_signing_bytes_for(declared, profile_id)?,
@@ -5998,7 +6365,7 @@ fn verify_later_witnesses(
     governance: &Governance<'_>,
     anchoring: &Value,
     later_checkpoint: &Value,
-    budget: &mut Budget,
+    run: &mut Run,
 ) -> Result<()> {
     let tree_size = number(later_checkpoint, "tree_size")?;
     let (active_index, active_manifest) = governance.active_for(tree_size)?;
@@ -6017,7 +6384,7 @@ fn verify_later_witnesses(
         })?;
         check_witness_identity(resolved, key_id, &witness_id)?;
         check_witness_declared(active_manifest, &witness_id, tree_size)?;
-        budget.spend(1)?;
+        run.spend(1)?;
         if !verify_signature(
             &decode_pubkey(&resolved.pubkey)?,
             &cosignature_bytes(later_checkpoint, &witness_id),
@@ -6038,7 +6405,7 @@ fn verify_later_witnesses(
 // binding, prefix enumeration, tree material, trigger effectiveness, closure — and each step
 // consumes the previous one's output; splitting it would only scatter that chain.
 #[allow(clippy::too_many_lines)]
-fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Result<()> {
+fn verify_propagation_complete(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     ctx.require_subject_type("propagation")?;
     if ctx.assurance.governance != "enumerated" {
         return Err(ReceiptError::AssuranceMismatch { field: "governance" });
@@ -6079,7 +6446,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
         carried_d,
         ctx.profile,
         ctx.profile_id,
-        budget,
+        run,
     )?;
 
     // The prefix is `[0, tree_size(D))`, and its range proof is checked against **A's** root:
@@ -6095,7 +6462,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
         &root,
         anchor_size,
         "corpus prefix",
-        budget,
+        run,
     )?;
     if prefix.from_index != 0 || prefix.to_index != tree_size {
         return Err(ReceiptError::RangeProofInvalid {
@@ -6147,7 +6514,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
     // competing-trigger checks establishes that this trigger governs.
     let trigger_statement = text(ctx.payload, "trigger")?.to_owned();
     let trigger =
-        verify_embedded(ctx, "trigger", "trigger-effective", &["trigger-effective"], budget)?;
+        verify_embedded(ctx, "trigger", "trigger-effective", &["trigger-effective"], run)?;
     if trigger.verdict.subject_statement_id != trigger_statement {
         return Err(ReceiptError::EmbeddedSubjectMismatch {
             what: "trigger",
@@ -6181,7 +6548,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
         ));
     }
 
-    budget.spend(u64::try_from(prefix.entries.len()).unwrap_or(u64::MAX))?;
+    run.spend(u64::try_from(prefix.entries.len()).unwrap_or(u64::MAX))?;
     let closure = affected_set(&prefix.entries, &trees, trigger_index, prefix.entries.len())
         .map_err(|source| match source {
             AhlError::MissingTreeMaterial(root) => ReceiptError::TreeMaterialInvalid {
@@ -6342,7 +6709,7 @@ mod tests {
 
     use super::{
         log_key_set, verify_rotation_proof, witness_key_set, AdaptorCapabilities, AdaptorProfile,
-        Budget, Limits, ReceiptError, RotationContext, TrustPolicy, TEST_ADAPTOR_PROFILE_ID,
+        Limits, ReceiptError, RotationContext, Run, TrustPolicy, TEST_ADAPTOR_PROFILE_ID,
     };
     use crate::{
         checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, sha256_hex, tree_root,
@@ -6506,7 +6873,7 @@ mod tests {
         });
 
         let profile = AdaptorProfile { document, capabilities: AdaptorCapabilities::default() };
-        let mut budget = Budget::new(Limits::default());
+        let mut run = Run::new(Limits::default());
         // The element's checkpoint-signing key is resolved through the receipt's own `keys`
         // block (I-D §7.1), bound to the outgoing manifest version, so the surrounding receipt
         // carries that one entry; the witness shape check under test comes after it.
@@ -6537,7 +6904,7 @@ mod tests {
                 profile: &profile,
                 profile_id: TEST_ADAPTOR_PROFILE_ID,
             },
-            &mut budget,
+            &mut run,
         );
         assert!(
             matches!(&result, Err(ReceiptError::Malformed(detail)) if detail.contains("cosigned_at")),
