@@ -1977,6 +1977,30 @@ impl Run {
         self.void_indexes.contains(&entry_index)
     }
 
+    /// Record a rejection the run is REQUIRED to carry on past, and carry on.
+    ///
+    /// [`Self::tolerate`] ends the run for an unsupported version, because §7.5 step 1 gives the
+    /// receipt's own version read "no further processing". A governance entry an enumeration
+    /// reveals is the case I-D §7.5.1 4b settles the other way: such an entry "is not inducted,
+    /// K is unestablished at and after its index, the governance finding is `unverifiable`
+    /// (Section 2.2), every K-dependent check at or after that index rests on it, and the scalar
+    /// result is reduced under Section 7.7 — a later required `invalid` still dominates." Ending
+    /// the run there would make that last sentence unreachable: nothing later could be reached,
+    /// so nothing later could dominate.
+    ///
+    /// The finding is recorded under the phase that raised it and the rejection is deferred, so
+    /// [`verify_receipt`] still has one to return. What the CALLER must do is install the stop
+    /// ([`Governance::unestablished_from`]), so that every K-dependent check at or after that
+    /// index is skipped rather than run against the state the walk had reached.
+    fn record_gap(&mut self, error: ReceiptError) {
+        let settled = self.attribute(&error);
+        self.record(settled, error.class(), Some(error.to_string()), None);
+        if !self.blocked.contains(&settled) {
+            self.blocked.push(settled);
+        }
+        self.deferred.push((settled, self.path.clone(), error));
+    }
+
     fn tolerate<T>(&mut self, result: Result<T>) -> Result<Option<T>> {
         let error = match result {
             Ok(value) => return Ok(Some(value)),
@@ -3950,7 +3974,7 @@ fn read_chain<'a>(
             // stops here exactly as it does at a rotation it could not authenticate.
             if let Err(error @ ReceiptError::UnsupportedVersion { .. }) = check_ahl_version(payload)
             {
-                run.tolerate::<()>(Err(error))?;
+                run.record_gap(error);
                 unestablished_from = Some(index);
                 break;
             }
@@ -5783,14 +5807,24 @@ fn verify_nested(
         currency_enumeration.as_ref().map_or_else(Vec::new, enumerated_key_statements);
 
     // --- §7.5 step 4: the governance bootstrap, as an induction (4a-4c) -------------
-    let governance = read_chain(receipt, policy, profile, adaptor_id, &key_statements, mode, run)?;
+    let mut governance =
+        read_chain(receipt, policy, profile, adaptor_id, &key_statements, mode, run)?;
     // 4c under enumerated governance: what the induction walked is everything the range holds.
     // 4c compares the manifests the induction WALKED against the manifests the range reveals,
     // so it says nothing where the induction stopped short: the omission it would report is the
     // verifier's own stopping point, not the receipt's.
     if let Some(enumeration) = &currency_enumeration {
         if governance.unestablished_from.is_none() {
-            check_manifest_completeness(enumeration, &governance, run)?;
+            // The second way the walk can stop, and the SAME state transition as the first: a
+            // VERIFYING governance statement of a revision this document does not define leaves
+            // K "unestablished at and after its index" (I-D §7.5.1 4b), and every K-dependent
+            // check from there on rests on `governance`. The induction reaches such a statement
+            // itself when it is a `key` statement; a manifest is not one of its two streams, so
+            // 4c is where one is met — and the stop it installs is `Governance`'s own, so both
+            // paths leave the run in one state rather than two.
+            if let Some(stopped_at) = check_manifest_completeness(enumeration, &governance, run)? {
+                governance.unestablished_from = Some(stopped_at);
+            }
         }
     }
     run.pass(Assertion::Governance);
@@ -6371,7 +6405,7 @@ fn check_manifest_completeness(
             if let Err(error @ ReceiptError::UnsupportedVersion { .. }) =
                 check_ahl_version(payload_of(envelope)?)
             {
-                run.tolerate::<()>(Err(error))?;
+                run.record_gap(error);
                 return Ok(Some(index));
             }
             return Err(ReceiptError::GovernanceChainInvalid(format!(

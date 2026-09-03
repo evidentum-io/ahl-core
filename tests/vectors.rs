@@ -2411,6 +2411,53 @@ fn a_verifying_foreign_revision_governance_entry_is_unverifiable_either_way() {
             "{name}: {:#?}",
             report.findings
         );
+        // "K is unestablished at and after its index… every K-dependent check at or after that
+        // index rests on it" (I-D §7.5.1 4b). Both receipts anchor at a checkpoint whose tree
+        // size is past the stop, and their subjects' envelopes are resolved under K, so none of
+        // these may be evaluated against the state the walk had reached before it stopped.
+        for assertion in
+            [Assertion::CheckpointAuthentication, Assertion::Witnesses, Assertion::EnvelopeValidity]
+        {
+            let finding =
+                report.finding(assertion).unwrap_or_else(|| panic!("{name}: {assertion} finding"));
+            assert_eq!(finding.outcome, Outcome::Unverifiable, "{name}: {assertion}");
+            assert_eq!(
+                finding.rests_on,
+                Some(Assertion::Governance),
+                "{name}: {assertion} must rest on the stop, not be checked against the pre-stop \
+                 key state"
+            );
+        }
+        // And the checks themselves did not RUN against the pre-stop key state, which is what
+        // the findings above would not by themselves show. The 4d sweep over the enumerated
+        // range is the observable one: it reports every void entry it inspects, and this range
+        // reaches the two non-verifying retractions at entries 32 and 33. Where the walk stopped,
+        // it is not performed at all, so those two are never inspected — the only void entries
+        // reported are the ones the stopped walk itself met.
+        let inspected: Vec<u64> = report.informative.iter().map(|item| item.entry_index).collect();
+        assert!(
+            !inspected.contains(&32) && !inspected.contains(&33),
+            "{name}: the enumerated sweep must not run past the stop, got {inspected:?}"
+        );
+
+        // And the run CARRIES ON past the stop, which is the other half of 4b's sentence: "the
+        // scalar result is reduced under Section 7.7 — a later required `invalid` still
+        // dominates". A §7.6 disagreement the receipt's own bytes settle is reached and decides
+        // the result, where a run that ended at the version read could never have found it.
+        let mut defective = receipt.clone();
+        defective["claim"]["assurance"]["governance"] = json!("declared");
+        let later = verify_receipt_report(&defective, &policy).expect("the run completes");
+        assert_eq!(later.result, Outcome::Invalid, "{name}: a later invalid dominates the gap");
+        assert_eq!(
+            later.dominating().map(|finding| finding.assertion),
+            Some(Assertion::CrossField),
+            "{name}"
+        );
+        assert_eq!(
+            later.finding(Assertion::Governance).map(|finding| finding.outcome),
+            Some(Outcome::Unverifiable),
+            "{name}: the gap is still reported beside the defect that dominates it"
+        );
         // The statement really is at that index, and really does verify.
         let statements = statement_vectors();
         let keys = key_set(&statements);
