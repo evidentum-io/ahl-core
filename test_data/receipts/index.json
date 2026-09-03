@@ -1,5 +1,5 @@
 {
-  "description": "Every Evidence Receipt vector in this directory, with the outcome a conformant verifier must reach. Negative vectors name the normative rule that must fire. The `policy` block is the locally configured trust policy the outcomes assume (receipt format §1 design rule 1); it is deliberately NOT derived from any receipt.",
+  "description": "Every Evidence Receipt vector in this directory, with the I-D §7.7 result a conformant verifier must reach — `verified`, `invalid` or `unverifiable`. A non-verified vector also names the required assertion whose finding produced that result, and the normative rule that must fire. The `policy` block is the locally configured trust policy the outcomes assume (receipt format §1 design rule 1); it is deliberately NOT derived from any receipt.",
   "policy": {
     "adaptor_profiles": {
       "ahl-test-log-v1": {
@@ -29,13 +29,14 @@
       "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "statement-anchored",
       "embedded_receipts": 0,
-      "expect": "accept",
+      "expect": "verified",
       "file": "statement-anchored-valid.ahl"
     },
     {
       "claim_type": "statement-anchored",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "overclaim-must-fail.ahl",
+      "finding": "cross-field",
       "reason": "assurance field `governance` overstates what the receipt proves",
       "rule": "receipt §2.3 — assurance.governance must equal governance.currency.mode"
     },
@@ -43,41 +44,46 @@
       "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; the log's history continued to be append-only through the later checkpoint carried, which is not evidence that every checkpoint the cadence required was published; record content not verified",
       "claim_type": "statement-anchored",
       "embedded_receipts": 0,
-      "expect": "accept",
+      "expect": "verified",
       "file": "statement-anchored-continued-history.ahl"
     },
     {
       "claim_type": "statement-anchored",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "statement-anchored-continued-history-wrong-pair-must-fail.ahl",
+      "finding": "anchoring",
       "reason": "consistency path did not verify",
       "rule": "receipt §2.1 / adaptor §9.2 — the consistency path must open the pair the receipt's own two checkpoints name"
     },
     {
       "claim_type": "statement-anchored",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "statement-anchored-dropped-producer-key-must-fail.ahl",
+      "finding": "governance",
       "reason": "key `sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827` is not bound to a manifest key object at entry index 9",
       "rule": "spec §7.2 — a manifest's producer key array is a snapshot that discards the prior one"
     },
     {
       "claim_type": "statement-anchored",
-      "expect": "reject",
+      "expect": "unverifiable",
       "file": "statement-anchored-uncarried-key-transition-must-fail.ahl",
+      "finding": "envelope-validity",
       "reason": "the envelope at entry index 19 is signed by producer key `sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827`, which the presented declared-mode governance material does not carry a transition for (I-D §7.4: unverifiable, not invalid)",
       "rule": "I-D §7.4 — a declared-mode envelope naming a key the mode does not carry is unverifiable, not invalid"
     },
     {
       "claim_type": "statement-anchored",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "statement-anchored-non-verifying-envelope-must-fail.ahl",
+      "finding": "envelope-validity",
       "reason": "envelope signature at entry index 32 did not verify",
       "rule": "I-D §7.5.1 4d — a resolvable key whose signature does not verify is invalid in either governance mode"
     },
     {
       "claim_type": "statement-anchored",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "statement-anchored-uncarried-key-with-bad-signature-must-fail.ahl",
+      "finding": "envelope-validity",
       "reason": "envelope signature at entry index 33 did not verify",
       "rule": "I-D §2.1 / §7.7 — a resolvable non-verifying entry is invalid however the envelope orders its signatures"
     },
@@ -85,48 +91,54 @@
       "boundary": "the subject ingestion introduced the named record into the corpus; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content verified against the commitment by an authorized key holder",
       "claim_type": "record-ingested",
       "embedded_receipts": 0,
-      "expect": "accept",
+      "expect": "verified",
       "file": "record-ingested-valid.ahl"
     },
     {
       "claim_type": "record-ingested",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-ingested-content-mismatch-must-fail.ahl",
+      "finding": "content-binding",
       "reason": "content binding `keyed-authorized` failed: carried bytes commit to `hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad`, not `hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9`",
       "rule": "receipt §2.1 — carried record bytes must recompute to the anchored commitment"
     },
     {
       "claim_type": "record-ingested",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-ingested-stale-manifest-must-fail.ahl",
+      "finding": "cross-field",
       "reason": "`subject.manifest` binding is invalid: `subject.manifest` (`sha256:437053c55efe84c0b4c774140206689576bea846e08ec1381b3df0dfc12ba588`) is not the manifest version ACTIVE at subject.entry_index 34 (`sha256:6dedcc481094b4f3cb3eb1e13bf4bad4c4c91fc0f7f3f5c17ec5945e3d4e4740`) (I-D §2.2, §7.6)",
       "rule": "I-D §2.2 / §7.6 — subject.manifest must be the manifest ACTIVE at subject.entry_index, not merely an earlier one"
     },
     {
       "claim_type": "record-ingested",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-ingested-none-with-canonicalization-must-fail.ahl",
+      "finding": "cross-field",
       "reason": "assurance field `content_binding` overstates what the receipt proves",
       "rule": "I-D §7.2 — `canonicalization` is present iff `content_binding` is not `none`"
     },
     {
       "claim_type": "record-ingested",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-ingested-none-with-media-type-must-fail.ahl",
+      "finding": "cross-field",
       "reason": "assurance field `content_binding` overstates what the receipt proves",
       "rule": "I-D §7.2 — `media_type` accompanies a carried descriptor, and `none` carries none"
     },
     {
       "claim_type": "record-ingested",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-ingested-bytes-without-canonicalization-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "claim material for `record-ingested` is missing `canonicalization`",
       "rule": "I-D §7.2 — the bytes and `canonicalization` are carried together or not at all"
     },
     {
       "claim_type": "record-ingested",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-ingested-canonicalization-without-bytes-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "claim material for `record-ingested` is missing `record_bytes`",
       "rule": "I-D §7.2 — a carried descriptor without the bytes proves no content binding"
     },
@@ -134,27 +146,30 @@
       "boundary": "the subject derivation committed the named output record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "record-derived",
       "embedded_receipts": 0,
-      "expect": "accept",
+      "expect": "verified",
       "file": "record-derived-valid.ahl"
     },
     {
       "claim_type": "record-derived",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-derived-wrong-path-must-fail.ahl",
+      "finding": "anchoring",
       "reason": "inclusion path for batch output leaf did not verify against the anchored root",
       "rule": "receipt §3 — `leaf_path` must open `outputs_root`"
     },
     {
       "claim_type": "record-derived",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-derived-partial-input-members-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "tree material for `sha256:617e00fdd320f027066b55fc2a792c24033405d22d995eb313c7c1a2cbc35d21` is invalid: commits 3 input(s), 1 proven by `input_members` — I-D §7.2 requires \"the listed inputs and no others\"",
       "rule": "I-D §7.2 — `input_members` proves the listed inputs and no others"
     },
     {
       "claim_type": "record-derived",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-derived-missing-input-members-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "claim material for `record-derived` is missing `input_members`",
       "rule": "I-D §7.2 — `input_members` is REQUIRED where `batch_leaf.inputs` is the input-set form"
     },
@@ -162,34 +177,38 @@
       "boundary": "the subject derivation committed the named output record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "record-derived",
       "embedded_receipts": 0,
-      "expect": "accept",
+      "expect": "verified",
       "file": "record-derived-full-input-array.ahl"
     },
     {
       "claim_type": "record-derived",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-derived-input-members-on-full-array-must-fail.ahl",
+      "finding": "structure",
       "reason": "malformed receipt: `claim_material.input_members` is carried ONLY where `batch_leaf.inputs` is the input-set form; the full-array form of I-D §2.7 lists its inputs in the leaf and commits no `input_set_root` for a member to open (I-D §7.2)",
       "rule": "I-D §7.2 / §2.7 — `input_members` is carried only with the input-set form"
     },
     {
       "claim_type": "record-derived",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-derived-input-set-unsorted-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "tree material for `sha256:ee2d2a003c2349bc311ba5048e862f4862cfd7b9ea14891cf4334d86174b94d0` is invalid: tree `sha256:ee2d2a003c2349bc311ba5048e862f4862cfd7b9ea14891cf4334d86174b94d0`: leaf 1 (`hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad`) does not follow its predecessor in ascending UTF-8 byte order (spec §2.5)",
       "rule": "I-D §2.7 — input-set leaves are sorted by `record` in ascending byte order"
     },
     {
       "claim_type": "record-derived",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-derived-input-set-duplicate-record-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "tree material for `sha256:db39af54b83944c12e6f9fa0281af053ecf3298438665576dc5eb25a35170ee2` is invalid: tree `sha256:db39af54b83944c12e6f9fa0281af053ecf3298438665576dc5eb25a35170ee2`: leaf 1 (`hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad`) does not follow its predecessor in ascending UTF-8 byte order (spec §2.5)",
       "rule": "I-D §2.7 — duplicate leaves are prohibited in every AHL tree"
     },
     {
       "claim_type": "record-derived",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "record-derived-input-set-non-canonical-record-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "tree material for `sha256:e14a6f06851935a86b5d88fc0fcf60c93a7eb2327527feadc3975d4d0599de3b` is invalid: `not-a-commitment` is not a canonical record commitment (`sha256:`/`hmac-sha256:` + lowercase hex)",
       "rule": "I-D §2.7 / §2.1 — an input-set leaf's `record` is a canonical family string"
     },
@@ -197,27 +216,30 @@
       "boundary": "a trigger naming the record is anchored and signed under the declared chain by the declared issuer; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-declared",
       "embedded_receipts": 2,
-      "expect": "accept",
+      "expect": "verified",
       "file": "trigger-declared-valid.ahl"
     },
     {
       "claim_type": "trigger-declared",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "trigger-declared-replacement-ordering-must-fail.ahl",
+      "finding": "cross-field",
       "reason": "ordering violation: replacement introduction at entry index 11 is not permitted relative to entry index 6",
       "rule": "spec §2.3.3 / receipt §2.3 — replacement introduction index <= trigger index"
     },
     {
       "claim_type": "trigger-declared",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "trigger-declared-cross-dataset-introduction-must-fail.ahl",
+      "finding": "cross-field",
       "reason": "embedded introduction receipt is about `customers/hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9`, the referencing material names `scores/hmac-sha256:31bfb2a84c511407fe867673d0fba30a87615dc78a0d6ef6041f8aa598cabde9`",
       "rule": "I-D §2.4.2 / §7.6 — the embedded introduction must match the trigger on BOTH dataset and record"
     },
     {
       "claim_type": "trigger-declared",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "trigger-declared-cross-dataset-replacement-must-fail.ahl",
+      "finding": "cross-field",
       "reason": "embedded replacement introduction receipt is about `scores/sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3`, the referencing material names `customers/sha256:6824fd2fddfc88cea7320793e819912f630e21d6936d7a1a0c056779c715b1f3`",
       "rule": "I-D §2.4.3 / §7.6 — the replacement introduction must match the correction's dataset as well as its replacement commitment"
     },
@@ -225,27 +247,30 @@
       "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-effective",
       "embedded_receipts": 2,
-      "expect": "accept",
+      "expect": "verified",
       "file": "trigger-effective-valid.ahl"
     },
     {
       "claim_type": "trigger-effective",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "trigger-effective-short-range-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "competing-trigger range [3, 8) is not the required [0, 8) or [1, 8)",
       "rule": "receipt §3 — competing.corpus_range must be [0, tree_size(C)) or [introduction_index, tree_size(C))"
     },
     {
       "claim_type": "trigger-effective",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl",
+      "finding": "cross-field",
       "reason": "enumerated governance currency together with `anchoring.later_checkpoint` cannot be evidenced under this format revision: receipt format §2.1 requires governance material covering through `later_checkpoint.tree_size`, while §4 fixes enumerated material at exactly [0, tree_size(anchoring.checkpoint)); no range satisfies both, so the coverage §2.1 mandates is absent and the receipt is refused rather than accepted on unproven governance",
       "rule": "receipt §2.1 vs §4 — enumerated currency cannot cover a later checkpoint, so the combination is refused rather than accepted on unproven governance"
     },
     {
       "claim_type": "trigger-effective",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "trigger-effective-non-authority-issuer-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:07f75f98ef1ea9112dcb04f392c062bc7344306c755c3c192656a0a521e1ed17`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "spec §2.3.3 — a trigger not signed by the record's authority is a challenge"
     },
@@ -253,20 +278,22 @@
       "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-effective",
       "embedded_receipts": 1,
-      "expect": "accept",
+      "expect": "verified",
       "file": "trigger-effective-later-challenge-ignored.ahl"
     },
     {
       "claim_type": "trigger-effective",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "trigger-effective-non-verifying-candidate-must-fail.ahl",
+      "finding": "envelope-validity",
       "reason": "envelope signature at entry index 32 did not verify",
       "rule": "I-D §7.2 / §7.5.1 4d — every competing candidate's envelope must verify before authority is compared"
     },
     {
       "claim_type": "trigger-effective",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "trigger-effective-unverified-authority-signature-must-fail.ahl",
+      "finding": "envelope-validity",
       "reason": "envelope signature at entry index 33 did not verify",
       "rule": "I-D §7.5.1 4d — every subject envelope signature entry must verify"
     },
@@ -274,27 +301,28 @@
       "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-effective",
       "embedded_receipts": 1,
-      "expect": "accept",
+      "expect": "verified",
       "file": "trigger-effective-co-signed-by-authority.ahl"
     },
     {
       "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-effective",
       "embedded_receipts": 1,
-      "expect": "accept",
+      "expect": "verified",
       "file": "trigger-effective-derived-rotated-key.ahl"
     },
     {
       "boundary": "the subject propagation statement dispositions the named record; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "disposition-declared",
       "embedded_receipts": 3,
-      "expect": "accept",
+      "expect": "verified",
       "file": "disposition-declared-valid.ahl"
     },
     {
       "claim_type": "disposition-declared",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "disposition-declared-wrong-path-must-fail.ahl",
+      "finding": "anchoring",
       "reason": "inclusion path for disposition leaf did not verify against the anchored root",
       "rule": "receipt §3 — `leaf_path` must open the propagation's `affected_root`"
     },
@@ -302,13 +330,14 @@
       "boundary": "the subject propagation statement dispositions the named record under a trigger proven effective at the stated checkpoint; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "disposition-effective",
       "embedded_receipts": 3,
-      "expect": "accept",
+      "expect": "verified",
       "file": "disposition-effective-valid.ahl"
     },
     {
       "claim_type": "disposition-effective",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "disposition-effective-declared-trigger-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "embedded receipt in `trigger` must be `trigger-effective`, got `trigger-declared`",
       "rule": "receipt §3 — disposition-effective must embed a trigger-effective receipt"
     },
@@ -316,34 +345,37 @@
       "boundary": "the propagation statement's affected set equals the closure recomputable from the enumerated corpus prefix — complete relative to the declared corpus only; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "propagation-complete",
       "embedded_receipts": 3,
-      "expect": "accept",
+      "expect": "verified",
       "file": "propagation-complete-valid.ahl"
     },
     {
       "boundary": "the propagation statement's affected set equals the closure recomputable from the enumerated corpus prefix — complete relative to the declared corpus only; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "propagation-complete",
       "embedded_receipts": 3,
-      "expect": "accept",
+      "expect": "verified",
       "file": "propagation-complete-valid-across-manifest-rotation.ahl"
     },
     {
       "claim_type": "propagation-complete",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "propagation-complete-missing-leaf-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "tree material for `sha256:5e6104bf68d3f6f90132b9578bffb5bdd3707422dffa7db2472dfb0f6f9d2ae7` is invalid: commits 3 leaves, 2 carried",
       "rule": "spec §2.5/§3.5 — committed tree material must open its anchored root and count"
     },
     {
       "claim_type": "propagation-complete",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "propagation-complete-past-declared-checkpoint-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "`claim_material.corpus_checkpoint` does not match the checkpoint this claim must rest on: `tree_size` differs",
       "rule": "spec §2.3.4 / receipt §3 — completeness is defined at the propagation's declared checkpoint D, never at a later one"
     },
     {
       "claim_type": "propagation-complete",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "propagation-complete-challenge-trigger-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "trigger at entry index 23 is signed by sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827, which is not the authority for `hmac-sha256:07f75f98ef1ea9112dcb04f392c062bc7344306c755c3c192656a0a521e1ed17`; spec §2.3.3 anchors it as a challenge, never traversed",
       "rule": "receipt §3 / spec §2.3.3 — propagation-complete must embed a trigger-effective receipt; challenges are never traversed"
     },
@@ -351,13 +383,14 @@
       "boundary": "the manifest and key state active at the target index is exactly the presented chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "governance-state",
       "embedded_receipts": 0,
-      "expect": "accept",
+      "expect": "verified",
       "file": "governance-state-valid.ahl"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-state-non-verifying-entry-must-fail.ahl",
+      "finding": "envelope-validity",
       "reason": "envelope signature at entry index 32 did not verify",
       "rule": "I-D §7.5.1 4d — every enumerated envelope must verify, not only the ones a claim type inspects"
     },
@@ -365,160 +398,182 @@
       "boundary": "the manifest and key state active at the target index is exactly the presented chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "governance-state",
       "embedded_receipts": 0,
-      "expect": "accept",
+      "expect": "verified",
       "file": "governance-state-self-retiring-key.ahl"
     },
     {
       "claim_type": "statement-anchored",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-chain-key-statement-element-must-fail.ahl",
+      "finding": "governance",
       "reason": "governance chain invalid: `governance.chain[]` carries a `key` statement at entry index 9; each element is an anchored MANIFEST statement's envelope (I-D §7.1), and producer-key transitions reach a verifier only through enumeration material (I-D §7.4)",
       "rule": "I-D §7.1 / §7.4 — every governance.chain[] element is a manifest statement"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-enumerated-manifest-omitted-must-fail.ahl",
+      "finding": "governance",
       "reason": "governance chain invalid: enumeration reveals a `manifest` statement at entry index 25 that the presented chain omits",
       "rule": "I-D §7.5.1 4c — the chain carries every manifest the enumerated range reveals"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-missing-must-fail.ahl",
+      "finding": "governance",
       "reason": "rotation proof for manifest entry index 25 is invalid: the chain rotates the log or witness key set here, but `governance.rotation_proofs[]` carries no (further) element for it (I-D §7.1)",
       "rule": "I-D §7.1 — a detected rotation requires the next unconsumed rotation_proofs[] element"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-wrong-index-must-fail.ahl",
+      "finding": "governance",
       "reason": "rotation proof for manifest entry index 25 is invalid: the next unconsumed `governance.rotation_proofs[]` element carries `manifest_entry_index` 24, not 25 — one element per rotation, in ascending `manifest_entry_index` order (I-D §7.1)",
       "rule": "I-D §7.1 — the next unconsumed rotation_proofs[] element must carry this hop's own manifest_entry_index"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-empty-on-non-rotating-must-fail.ahl",
+      "finding": "governance",
       "reason": "governance chain invalid: `governance.rotation_proofs` is present, but the carried chain rotates neither the log nor the witness key set — I-D §7.1 requires the member to be ABSENT in that case",
       "rule": "I-D §7.1 — rotation_proofs is ABSENT where the chain rotates neither set"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-duplicate-must-fail.ahl",
+      "finding": "governance",
       "reason": "governance chain invalid: `governance.rotation_proofs[]` carries 2 element(s) beyond the 1 the chain walk actually consumed — I-D §7.1: one element per rotation, no extras",
       "rule": "I-D §7.1 — one element per rotation, no duplicates left unconsumed"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-extra-must-fail.ahl",
+      "finding": "governance",
       "reason": "governance chain invalid: `governance.rotation_proofs[]` carries 2 element(s) beyond the 1 the chain walk actually consumed — I-D §7.1: one element per rotation, no extras",
       "rule": "I-D §7.1 — no extra elements for manifests that do not rotate"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-incoming-key-must-fail.ahl",
+      "finding": "governance",
       "reason": "rotation proof for manifest entry index 25 is invalid: the element's checkpoint `key_id` (`sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79`) is not a log key of the OUTGOING state at manifest entry index 25 — a checkpoint signed by the INCOMING key does not attest the transition (I-D §7.1)",
       "rule": "I-D §7.1 — the rotation-proof checkpoint must verify under a log key of the OUTGOING state"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-missing-witness-must-fail.ahl",
+      "finding": "governance",
       "reason": "rotation proof for manifest entry index 25 is invalid: AT L3, at least one `witnesses[]` cosignature must verify under a witness key of the OUTGOING state (I-D §7.1) — none did",
       "rule": "I-D §7.1 — AT L3, a rotation-proof element needs a cosignature under the OUTGOING witness set"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-checkpoint-missing-log-id-must-fail.ahl",
+      "finding": "structure",
       "reason": "malformed receipt: checkpoint log_id: REQUIRED, a `sha256:` family string in lowercase hex",
       "rule": "I-D §7.1 — the rotation-proof checkpoint takes the receipt-borne shape, log_id included"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-malformed-witness-entry-must-fail.ahl",
+      "finding": "structure",
       "reason": "malformed receipt: witness cosignature cosigned_at: REQUIRED",
       "rule": "I-D §7.1 — every rotation-proof witnesses[] entry takes the anchoring.witnesses[] shape, cosigned_at included"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-witness-key-unlisted-must-fail.ahl",
+      "finding": "governance",
       "reason": "key `sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79` is not bound to a manifest key object at entry index 0",
       "rule": "I-D §7.1 — a rotation proof's outgoing witness key is listed in keys.witness[]"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-rotation-proof-key-bound-to-incoming-must-fail.ahl",
+      "finding": "governance",
       "reason": "key `sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79` is not bound to a manifest key object at entry index 25",
       "rule": "I-D §7.1 — a rotation proof's keys bind to the OUTGOING manifest version"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-statement-wrong-key-id-must-fail.ahl",
+      "finding": "governance",
       "reason": "governance chain invalid: key statement at entry index 9 carries `key.key_id` (`sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e`) that does not equal `sha256:`-of-`key.pubkey` (`sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827`) (I-D §7.5.1 4b(K))",
       "rule": "I-D §7.5.1 4b(K) — key.key_id must be sha256:-of-key.pubkey"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-statement-missing-valid-from-must-fail.ahl",
+      "finding": "governance",
       "reason": "governance chain invalid: key statement at entry index 9 carries no `key.valid_from` — the member is REQUIRED (I-D §7.5.1 4b(K))",
       "rule": "I-D §7.5.1 4b(K) — key.valid_from is REQUIRED"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-statement-short-pubkey-must-fail.ahl",
+      "finding": "governance",
       "reason": "governance chain invalid: key statement at entry index 9 carries `key.pubkey` that does not decode to exactly 32 octets (I-D §7.5.1 4b(K))",
       "rule": "I-D §7.5.1 4b(K) — key.pubkey must decode to exactly 32 octets"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-statement-missing-issued-at-must-fail.ahl",
+      "finding": "structure",
       "reason": "malformed receipt: payload issued_at: the member is REQUIRED and MUST be a string (I-D §2.2)",
       "rule": "I-D §2.2 / §7.5.1 4b(K) — issued_at is a REQUIRED common payload field"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-statement-malformed-valid-time-must-fail.ahl",
+      "finding": "structure",
       "reason": "malformed receipt: payload valid_time: `not a timestamp` is not a valid RFC 3339 timestamp in field `valid_time`: the 'year' component could not be parsed",
       "rule": "I-D §2.2 / §7.5.1 4b(K) — valid_time must be RFC 3339 or a {from,to} object"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-key-statement-unsigned-common-field-must-fail.ahl",
+      "finding": "envelope-validity",
       "reason": "envelope signature at entry index 9 did not verify",
       "rule": "I-D §7.5.1 4b — phase 1 (signature) precedes phase 2 (type-specific validation) on enumerated key statements"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-state-not-current-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "governance state is not current at index 10: a `key` statement is anchored at entry index 9",
       "rule": "receipt §3 — governance-state must prove absence of governance statements in (subject.entry_index, target_index]"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-state-short-range-must-fail.ahl",
+      "finding": "governance",
       "reason": "enumerated governance covers [0, 6) but §4 requires exactly [0, 28) — a narrower range can hide a later governance statement",
       "rule": "receipt §4 — enumerated governance must cover exactly [0, tree_size(C))"
     },
     {
       "claim_type": "governance-state",
-      "expect": "reject",
+      "expect": "invalid",
       "file": "governance-state-key-subject-must-fail.ahl",
+      "finding": "claim-material",
       "reason": "`governance-state` subject must be a manifest statement, got `key` (key state is composed from the manifest plus later key statements)",
       "rule": "receipt §3 — governance-state subjects are manifest statements only"
     }

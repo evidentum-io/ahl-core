@@ -5,9 +5,11 @@
 //! inclusion proofs and range proofs (through `atl-core`), the three revocation closures, the
 //! witness refusal evidence, and every Evidence Receipt.
 //!
-//! Receipts are checked by running them through [`ahl_core::receipt::verify_receipt`], not by
-//! comparing fields by hand: the verifier is the thing under test. Every negative vector must
-//! be rejected by the specific rule its `test_data/receipts/index.json` entry names.
+//! Receipts are checked by running them through [`ahl_core::receipt::verify_receipt_report`],
+//! not by comparing fields by hand: the verifier is the thing under test. Every vector must
+//! reach the I-D §7.7 result its `test_data/receipts/index.json` entry records — `verified`,
+//! `invalid` or `unverifiable` — a non-verified one on the required assertion the entry names,
+//! and by the specific rule it names.
 //!
 //! Regenerate the corpus with `cargo run --bin gen_vectors` before running these.
 
@@ -1206,13 +1208,22 @@ fn every_positive_receipt_verifies_and_renders_its_boundary() {
     let policy = trust_policy();
     let mut accepted = 0;
     for entry in receipt_index()["vectors"].as_array().expect("vectors") {
-        if field_str(entry, "expect").expect("expect") != "accept" {
+        if field_str(entry, "expect").expect("expect") != "verified" {
             continue;
         }
         let name = field_str(entry, "file").expect("file");
         let (_, receipt) = read_receipt(name);
         let verdict = verify_receipt(&receipt, &policy)
             .unwrap_or_else(|e| panic!("{name}: must verify, but was rejected: {e}"));
+
+        // I-D §7.7: `verified` is the reduction of findings that are themselves all `verified`,
+        // and it is the only result that renders a boundary.
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(report.result, Outcome::Verified, "{name}");
+        assert_eq!(report.verdict.as_ref(), Some(&verdict), "{name}");
+        for finding in &report.findings {
+            assert_eq!(finding.outcome, Outcome::Verified, "{name}: {finding:?}");
+        }
 
         assert_eq!(verdict.claim_type, field_str(entry, "claim_type").expect("claim_type"));
         assert_eq!(verdict.boundary, field_str(entry, "boundary").expect("boundary"));
@@ -1498,11 +1509,13 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
 }
 
 #[test]
-fn every_negative_receipt_is_rejected_by_the_rule_it_names() {
+fn every_negative_receipt_reaches_its_result_on_the_finding_it_names() {
     let policy = trust_policy();
     let mut rejected = 0;
+    let mut unverifiable = 0;
     for entry in receipt_index()["vectors"].as_array().expect("vectors") {
-        if field_str(entry, "expect").expect("expect") != "reject" {
+        let expect = field_str(entry, "expect").expect("expect");
+        if expect == "verified" {
             continue;
         }
         let name = field_str(entry, "file").expect("file");
@@ -1513,9 +1526,50 @@ fn every_negative_receipt_is_rejected_by_the_rule_it_names() {
             .unwrap_or_else(|| panic!("{name}: must be rejected, but verified"));
         assert_specific_rule(name, rule, &error);
         assert_eq!(error.to_string(), field_str(entry, "reason").expect("reason"));
+
+        // The scalar result, and the assertion whose finding produced it.
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(report.result.name(), expect, "{name}: the §7.7 result");
+        assert_eq!(report.result, error.class(), "{name}");
+        assert!(report.verdict.is_none(), "{name}: no boundary is rendered for {expect}");
+        let named = field_str(entry, "finding").expect("finding");
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.assertion.name() == named)
+            .unwrap_or_else(|| panic!("{name}: no finding for `{named}`"));
+        assert_eq!(finding.outcome, report.result, "{name}: `{named}` produced the result");
+        assert!(finding.detail.is_some(), "{name}: a non-verified finding says what produced it");
+
+        // I-D §7.7: "A verifier MUST report the findings alongside it... and a verifier MUST NOT
+        // present a finding as though it were the result." For an `unverifiable` vector the run
+        // carries on, so the assertions that DID hold are reported as `verified` beside the one
+        // that did not — that is what makes the result actionable.
+        if expect == "unverifiable" {
+            unverifiable += 1;
+            let verified = report
+                .findings
+                .iter()
+                .filter(|finding| finding.outcome == Outcome::Verified)
+                .count();
+            assert!(
+                verified >= 4,
+                "{name}: an unverifiable result must report the assertions that held, got \
+                 {:#?}",
+                report.findings
+            );
+            for assertion in [Assertion::Anchoring, Assertion::Governance] {
+                assert_eq!(
+                    report.finding(assertion).map(|finding| finding.outcome),
+                    Some(Outcome::Verified),
+                    "{name}: {assertion} held and must be reported so"
+                );
+            }
+        }
         rejected += 1;
     }
     assert!(rejected >= 15, "every registry claim type needs a negative vector, got {rejected}");
+    assert!(unverifiable >= 1, "the corpus must carry an `unverifiable` vector");
 }
 
 /// I-D §7.1: every `governance.chain[]` element is "an anchored manifest statement's complete
@@ -1530,7 +1584,7 @@ fn every_negative_receipt_is_rejected_by_the_rule_it_names() {
 fn every_accepted_receipt_carries_manifests_only_in_its_governance_chain() {
     let mut checked = 0;
     for entry in receipt_index()["vectors"].as_array().expect("vectors") {
-        if field_str(entry, "expect").expect("expect") != "accept" {
+        if field_str(entry, "expect").expect("expect") != "verified" {
             continue;
         }
         let name = field_str(entry, "file").expect("file");
@@ -1793,6 +1847,66 @@ fn an_uncarried_key_transition_is_reported_as_the_prerequisite_it_is() {
             "an assertion resting on a prerequisite must name it: {finding:?}"
         );
     }
+}
+
+/// A capability gap the run cannot continue past still reports the assertions it had settled,
+/// and reports the rest as resting on it rather than as having held.
+///
+/// I-D §7.5 step 2: "If the verifier possesses NO profile under that id, it lacks a capability
+/// and the result is `unverifiable`." Nothing after step 2 can be settled without the profile —
+/// every path and every signature is read through it — so the run ends there, and §7.7's
+/// requirement to report the findings is met by saying which assertions were reached and which
+/// were not.
+#[test]
+fn an_unreached_assertion_is_reported_as_resting_on_the_gap() {
+    let mut policy = trust_policy();
+    policy.adaptor_profiles.clear();
+    let (_, receipt) = read_receipt("record-ingested-valid.ahl");
+
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable);
+    assert_eq!(
+        report.finding(Assertion::AdaptorProfile).map(|finding| finding.outcome),
+        Some(Outcome::Unverifiable)
+    );
+    // Settled before step 2, and unaffected by it.
+    assert_eq!(
+        report.finding(Assertion::Versions).map(|finding| finding.outcome),
+        Some(Outcome::Verified)
+    );
+    // Never reached, and reported as such rather than left out or claimed.
+    for assertion in [
+        Assertion::Anchoring,
+        Assertion::Governance,
+        Assertion::CheckpointAuthentication,
+        Assertion::EnvelopeValidity,
+        Assertion::CrossField,
+        Assertion::ClaimMaterial,
+        // Required here because this vector's own `assurance.content_binding` is not `none`.
+        Assertion::ContentBinding,
+    ] {
+        let finding = report.finding(assertion).unwrap_or_else(|| panic!("{assertion} finding"));
+        assert_eq!(finding.outcome, Outcome::Unverifiable);
+        assert!(
+            finding.detail.as_ref().is_some_and(|detail| detail.contains("adaptor-profile")),
+            "{assertion} must name the prerequisite it rests on: {finding:?}"
+        );
+    }
+
+    // An `invalid` result is the opposite case: it decides the result where it is reached, so
+    // the assertions after it are not reported at all rather than reported as unverifiable.
+    let (_, defective) = read_receipt("record-ingested-content-mismatch-must-fail.ahl");
+    let report = verify_receipt_report(&defective, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Unverifiable, "no profile is held for this one either");
+    let (_, defective) =
+        read_receipt("statement-anchored-continued-history-wrong-pair-must-fail.ahl");
+    let report = verify_receipt_report(&defective, &trust_policy()).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    assert!(
+        report.finding(Assertion::ClaimMaterial).is_none(),
+        "an assertion the run never reached under an `invalid` result is not reported: {:#?}",
+        report.findings
+    );
 }
 
 /// I-D §7.7's exception, and the two consequences it draws from it.

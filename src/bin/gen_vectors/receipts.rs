@@ -1,15 +1,22 @@
 //! Evidence Receipt vectors: one positive and one negative per claim-type registry entry.
 //!
 //! Every receipt produced here is immediately run through
-//! [`ahl_core::receipt::verify_receipt`] with the same trust policy the conformance tests use.
-//! A positive vector that does not accept, or a negative vector that does not reject with the
-//! rule it claims to violate, aborts the generator.
+//! [`ahl_core::receipt::verify_receipt_report`] with the same trust policy the conformance
+//! tests use. A positive vector whose result is not `verified`, or a negative vector that does
+//! not reject with the rule it claims to violate, aborts the generator.
+//!
+//! The index records each vector's I-D §7.7 result — `verified`, `invalid` or `unverifiable` —
+//! and, for the two non-verified values, the assertion whose finding produced it. Neither is
+//! declared here: both are read from the report the verifier actually produces, while the
+//! `rule` a negative vector names, and the predicate over the rejection behind it, are what the
+//! generator asserts.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use ahl_core::receipt::{
-    verify_receipt, AdaptorCapabilities, AdaptorProfile, ReceiptError, TrustPolicy,
+    verify_receipt, verify_receipt_report, AdaptorCapabilities, AdaptorProfile, Outcome,
+    ReceiptError, TrustPolicy,
 };
 use ahl_core::{checkpoint_signing_bytes, entry_id, envelope, field_str, statement_id, TestKey};
 use base64::Engine as _;
@@ -23,9 +30,11 @@ use crate::scenario::{
 
 /// What a receipt vector asserts about its own verification outcome.
 enum Expect {
-    /// `verify_receipt` must accept.
+    /// The §7.7 result must be `verified`.
     Accept,
-    /// `verify_receipt` must reject, and the rejection must satisfy this predicate.
+    /// The §7.7 result must not be `verified`, and the rejection behind the finding that
+    /// produced it must satisfy this predicate. Which of the two non-verified values it is
+    /// comes from [`ahl_core::receipt::ReceiptError::class`] rather than from the vector.
     Reject { rule: &'static str, matches: fn(&ReceiptError) -> bool },
 }
 
@@ -73,17 +82,20 @@ pub fn write_all(corpus: &Corpus, keys: &Keys, root: &Path, dataset_key: &[u8]) 
     let dir = root.join("receipts");
     let mut index = Vec::new();
     for vector in &vectors {
+        let report = verify_receipt_report(&vector.receipt, &policy)
+            .unwrap_or_else(|error| panic!("{}: the run must complete: {error}", vector.file));
         let outcome = verify_receipt(&vector.receipt, &policy);
         match &vector.expect {
             Expect::Accept => {
                 let verdict = outcome.unwrap_or_else(|error| {
                     panic!("{}: must verify, but was rejected: {error}", vector.file)
                 });
-                println!("  [ok] {} accepted: {}", vector.file, verdict.claim_type);
+                assert_eq!(report.result, Outcome::Verified, "{}", vector.file);
+                println!("  [ok] {} verified: {}", vector.file, verdict.claim_type);
                 index.push(json!({
                     "file": vector.file,
                     "claim_type": verdict.claim_type,
-                    "expect": "accept",
+                    "expect": Outcome::Verified.name(),
                     "boundary": verdict.boundary,
                     "embedded_receipts": verdict.embedded_receipts,
                 }));
@@ -97,11 +109,30 @@ pub fn write_all(corpus: &Corpus, keys: &Keys, root: &Path, dataset_key: &[u8]) 
                     "{}: rejected by the wrong rule — expected {rule}, got: {error}",
                     vector.file
                 );
-                println!("  [ok] {} rejected by {rule}: {error}", vector.file);
+                assert_eq!(
+                    report.result,
+                    error.class(),
+                    "{}: the result must be the class of the rejection that produced it",
+                    vector.file
+                );
+                // The finding the result reduces from: the one whose outcome IS the result, at
+                // the receipt it was reached in. A negative vector names exactly one.
+                let finding = report
+                    .findings
+                    .iter()
+                    .find(|finding| {
+                        finding.counts_toward_result() && finding.outcome == report.result
+                    })
+                    .unwrap_or_else(|| panic!("{}: a result comes from a finding", vector.file));
+                println!(
+                    "  [ok] {} {} on {} by {rule}: {error}",
+                    vector.file, report.result, finding.assertion
+                );
                 index.push(json!({
                     "file": vector.file,
                     "claim_type": vector.receipt["claim"]["type"],
-                    "expect": "reject",
+                    "expect": report.result.name(),
+                    "finding": finding.assertion.name(),
                     "rule": rule,
                     "reason": error.to_string(),
                 }));
@@ -113,11 +144,13 @@ pub fn write_all(corpus: &Corpus, keys: &Keys, root: &Path, dataset_key: &[u8]) 
     write_json(
         &dir.join("index.json"),
         &json!({
-            "description": "Every Evidence Receipt vector in this directory, with the outcome a \
-                            conformant verifier must reach. Negative vectors name the normative \
-                            rule that must fire. The `policy` block is the locally configured \
-                            trust policy the outcomes assume (receipt format §1 design rule 1); \
-                            it is deliberately NOT derived from any receipt.",
+            "description": "Every Evidence Receipt vector in this directory, with the I-D §7.7 \
+                            result a conformant verifier must reach — `verified`, `invalid` or \
+                            `unverifiable`. A non-verified vector also names the required \
+                            assertion whose finding produced that result, and the normative rule \
+                            that must fire. The `policy` block is the locally configured trust \
+                            policy the outcomes assume (receipt format §1 design rule 1); it is \
+                            deliberately NOT derived from any receipt.",
             "policy": {
                 "genesis_entry_id": entry_id(&corpus.envelopes[0]),
                 "genesis_key_ids": [ keys.producer_1.key_id() ],
