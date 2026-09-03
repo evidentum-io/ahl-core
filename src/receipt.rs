@@ -6571,7 +6571,7 @@ fn verify_claim_material(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
         "disposition-declared" => verify_disposition(ctx, run, "trigger-declared"),
         "disposition-effective" => verify_disposition(ctx, run, "trigger-effective"),
         "propagation-complete" => verify_propagation_complete(ctx, run),
-        "governance-state" => verify_governance_state(ctx),
+        "governance-state" => verify_governance_state(ctx, run),
         other => Err(ReceiptError::Malformed(format!("`{other}` is not a registry claim type"))),
     }
 }
@@ -7823,7 +7823,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> 
 /// must be committed by C, i.e. `target_index < tree_size(C)`. Otherwise a receipt could
 /// enumerate a short prefix and assert a governance state at an index that prefix never
 /// covered.
-fn verify_governance_state(ctx: &ClaimCtx<'_>) -> Result<()> {
+fn verify_governance_state(ctx: &ClaimCtx<'_>, run: &Run) -> Result<()> {
     let subject_type = statement_type(ctx.payload)?;
     if subject_type != "manifest" {
         return Err(ReceiptError::GovernanceSubjectNotManifest {
@@ -7852,8 +7852,27 @@ fn verify_governance_state(ctx: &ClaimCtx<'_>) -> Result<()> {
         });
     }
     // Absence of any governance statement in `(subject.entry_index, target_index]`.
+    //
+    // What the rule asks is whether anything CHANGED the governance state between the subject
+    // and the target, so the two kinds of entry that change nothing are passed over. A void
+    // entry applies no effect and takes no type-specific validation at all (I-D §7.5.1 4b, and
+    // §7.5 step 1 for the version read), and a later duplicate of a governing statement is void
+    // for the same purpose: §2.1's "the envelope with the smallest entry index governs and later
+    // ones are void". Counting either would report a state that is current as stale — one
+    // manifest version anchored twice would make every `governance-state` claim past it
+    // `invalid`, which is the opposite of what first-wins says.
     for index in (ctx.subject_index + 1)..=target_index {
         let Some(envelope) = enumeration.at(index) else { continue };
+        if run.is_void(index) {
+            continue;
+        }
+        // `chain_index` is first-wins over the raw chain (§7.5 step 3 proved each element's
+        // entry index), so a statement id it resolves to a SMALLER index is a later duplicate
+        // whatever this index carries.
+        let governing = ctx.governance.chain_index.get(&statement_id(envelope)?).copied();
+        if governing.is_some_and(|first| first < index) {
+            continue;
+        }
         let kind = statement_type(payload_of(envelope)?)?;
         if matches!(kind, "manifest" | "key") {
             return Err(ReceiptError::GovernanceStateNotCurrent {

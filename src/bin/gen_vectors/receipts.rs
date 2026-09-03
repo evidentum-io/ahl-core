@@ -418,6 +418,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp37 = corpus.anchor("cp37");
     let cp40 = corpus.anchor("cp40");
     let cp43 = corpus.anchor("cp43");
+    let cp50 = corpus.anchor("cp50");
     let cp51 = corpus.anchor("cp51");
     let cp52 = corpus.anchor("cp52");
     let cp53 = corpus.anchor("cp53");
@@ -2275,6 +2276,117 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    as a duplicate, leave `producer-2` retired, and reject this receipt's subject \
                    envelope. Five void entries are reported as informative items — 32, 33, \
                    37, 38 and 39 — and none of them changes the result."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    // I-D §2.1's own case, end to end: ONE manifest version under three signature sets, so one
+    // statement id over three entry ids. The chain carries the governing copy at entry 46 and
+    // the verifying duplicate at 47; the duplicate governs nothing and is still verified, since
+    // §7.5 step 4 says "verify EVERY CARRIED ENVELOPE".
+    let duplicate_manifest_keys = || Some(vec![key_entry(&keys.producer_1, None, 46)]);
+    out.push(Vector {
+        file: "statement-anchored-duplicate-manifest.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 49,
+            anchor: cp50,
+            chain: vec![0, 25, 46, 47],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: duplicate_manifest_keys(),
+            note: "Manifest version 3 is anchored THREE times — entries 46, 47 and 48 — because \
+                   the statement id digests the payload alone while the entry id digests the \
+                   envelope, so one payload under three signature sets is one statement with \
+                   three entry ids. Entry 46 carries `producer-1`'s signature, entry 47 that \
+                   signature and `producer-2`'s beside it. I-D §2.1: \"the envelope with the \
+                   smallest entry index governs and later ones are void\", so entry 46 is the \
+                   version this receipt's subject resolves through and entry 47 applies no \
+                   effect, consumes no rotation proof and never becomes the version a \
+                   `subject.manifest` reference names. It is still a `governance.chain[]` \
+                   element, which I-D §7.5.1 4d counts among the envelopes a receipt RESTS ON, \
+                   so it is verified at its own entry index under the completed key state — and \
+                   because it VERIFIES, it produces no finding and no informative item: an \
+                   informative item reports a void entry the run inspected and found wanting, \
+                   which this is not. The subject at entry 49 is an ordinary ingestion bound to \
+                   version 3."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    out.push(Vector {
+        file: "statement-anchored-duplicate-manifest-unsigned-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 49,
+            anchor: cp50,
+            chain: vec![0, 25, 46, 48],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: duplicate_manifest_keys(),
+            note: "MUST FAIL. The same chain as `statement-anchored-duplicate-manifest.ahl` with \
+                   the third envelope of manifest version 3 in place of the second: entry 48 \
+                   carries the identical payload with a `sig` no key produced. Being void under \
+                   §2.1 does not exempt it — §7.5 step 4 requires every carried envelope to \
+                   verify, and §7.5.1 4d puts a `governance.chain[]` element among the three \
+                   kinds of envelope a receipt rests on, so a failure there is `invalid` rather \
+                   than the informative item a non-relied void entry earns. The governing copy \
+                   at entry 46 is present and verifies, and that is deliberately not enough: a \
+                   verifier that skipped a duplicate WHOLE, instead of skipping only its effect, \
+                   would accept an unsigned envelope the receipt itself presents as its lineage."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5 step 4 / §7.5.1 4d — a void duplicate chain hop is still a carried \
+                   envelope the receipt rests on",
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 48 }),
+        },
+    });
+
+    // The same duplicate under ENUMERATED currency, where §7.5.1 4c asks a different question:
+    // not which copy governs, but whether the chain shows every manifest the range reveals.
+    out.push(Vector {
+        file: "governance-state-duplicate-manifest.ahl",
+        receipt: Spec {
+            claim_type: "governance-state",
+            subject_index: 46,
+            anchor: cp50,
+            chain: vec![0, 25, 46, 47],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 50, cp50),
+            claim_material: json!({ "target_index": 46 }),
+            producer_keys: Some(vec![
+                key_entry(&keys.producer_1, None, 25),
+                key_entry(&keys.producer_2, None, 41),
+            ]),
+            note: "Manifest version 3 is the governance state at its own entry index, proven \
+                   over a range that carries the version TWICE. The two questions §7.5.1 asks \
+                   about a duplicate are answered differently on purpose. The induction (4b) \
+                   claims the statement id once, at the smallest entry index, so entry 47 \
+                   applies no effect. Completeness (4c) asks whether `governance.chain[]` shows \
+                   every manifest the range reveals, and both envelopes ARE manifests the range \
+                   reveals and both verify, so both must be carried — a chain that showed only \
+                   the governing copy would be short of an entry the enumeration proves is \
+                   there. The third envelope at entry 48 does not verify, so §7.4's rule that \
+                   \"a void entry is not a governance statement and its absence from the chain \
+                   is not an omission\" exempts it, and it is reported as an informative item \
+                   with the five other void entries the range reaches."
                 .to_owned(),
         }
         .build(corpus, keys),

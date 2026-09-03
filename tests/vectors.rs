@@ -1581,6 +1581,11 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             matches!(error, ReceiptError::GovernanceChainInvalid(detail)
                 if detail.contains("`manifest` statement at entry index 25"))
         }
+        // I-D §2.1's duplicate rule reaches EFFECT, never verification: a void duplicate chain
+        // hop is one of the three kinds of envelope §7.5.1 4d says a receipt rests on.
+        "statement-anchored-duplicate-manifest-unsigned-must-fail.ahl" => {
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 48 })
+        }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };
     assert!(fired, "{name}: expected rejection by {rule}, got: {error}");
@@ -6033,4 +6038,100 @@ fn subject_manifest_must_equal_the_payloads_own_copy() {
     // The "entry_index strictly smaller" half of `SubjectManifestBindingInvalid` is therefore
     // exercised by code inspection and by the equality half's sibling branch, not by a vector
     // here.
+}
+
+/// I-D §2.1, end to end: one manifest version anchored three times.
+///
+/// "A producer MUST NOT anchor two envelopes bearing the same statement id. If duplicates
+/// nevertheless occur, the envelope with the smallest entry index governs and later ones are
+/// void." The statement id digests the PAYLOAD and the entry id the ENVELOPE, so one payload
+/// under three signature sets really is one statement over three anchored entries — reachable
+/// by a producer, and reachable by this corpus, which is what separates this from a unit test
+/// over a synthesized chain.
+#[test]
+fn one_manifest_version_anchored_three_times_is_governed_by_its_smallest_index() {
+    let statements = statement_vectors();
+    let ids: Vec<&str> = [46usize, 47, 48]
+        .iter()
+        .map(|index| field_str(&statements[*index], "statement_id").expect("statement_id"))
+        .collect();
+    assert_eq!(ids[0], ids[1], "one payload, one statement id");
+    assert_eq!(ids[0], ids[2], "one payload, one statement id");
+    let entry_ids: BTreeSet<&str> = [46usize, 47, 48]
+        .iter()
+        .map(|index| field_str(&statements[*index], "entry_id").expect("entry_id"))
+        .collect();
+    assert_eq!(entry_ids.len(), 3, "three envelopes, three entry ids");
+
+    // Two of the three verify; the third is the fixture the negative vector hangs off.
+    let keys = key_set(&statements);
+    for (index, verifies) in [(46usize, true), (47, true), (48, false)] {
+        assert_eq!(
+            verify_envelope(&statements[index]["envelope"], |key_id| keys.get(key_id).cloned())
+                .expect("well-formed envelope"),
+            verifies,
+            "entry {index}"
+        );
+    }
+
+    let policy = trust_policy();
+
+    // The governing copy plus the VERIFYING duplicate: `verified`, and — the question the
+    // duplicate exists to answer — with NO informative item. An informative item reports a void
+    // entry the run inspected and found wanting; a void duplicate that verifies is neither.
+    let (_, carried) = read_receipt("statement-anchored-duplicate-manifest.ahl");
+    let report = verify_receipt_report(&carried, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    assert!(
+        report.informative.is_empty(),
+        "a void duplicate that verifies is not an informative item: {:#?}",
+        report.informative
+    );
+    assert_eq!(
+        report.finding(Assertion::EnvelopeValidity).map(|finding| finding.outcome),
+        Some(Outcome::Verified)
+    );
+
+    // The governing copy plus the NON-VERIFYING duplicate: `invalid` at the duplicate's own
+    // index, on envelope validity, however good the copy that governs is.
+    let (_, unsigned) =
+        read_receipt("statement-anchored-duplicate-manifest-unsigned-must-fail.ahl");
+    let report = verify_receipt_report(&unsigned, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid, "{:#?}", report.findings);
+    assert_eq!(
+        report.dominating().map(|finding| finding.assertion),
+        Some(Assertion::EnvelopeValidity),
+        "{:#?}",
+        report.findings
+    );
+    assert!(matches!(
+        verify_receipt(&unsigned, &policy),
+        Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: 48 })
+    ));
+
+    // Enumerated currency reaches all three. 4c counts what the chain CARRIES, so both
+    // verifying copies must be present; the non-verifying one is not an omission and is
+    // reported as an informative item instead.
+    let (_, enumerated) = read_receipt("governance-state-duplicate-manifest.ahl");
+    let report = verify_receipt_report(&enumerated, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    let void: BTreeSet<u64> = report.informative.iter().map(|item| item.entry_index).collect();
+    assert!(void.contains(&48), "the third envelope is void: {void:?}");
+    assert!(!void.contains(&47), "the second envelope verifies: {void:?}");
+
+    // Dropping the verifying duplicate from the chain is an omission under 4c: the range
+    // reveals a manifest the chain does not show.
+    let mut short = enumerated;
+    short["governance"]["chain"]
+        .as_array_mut()
+        .expect("chain")
+        .retain(|hop| hop["entry_index"].as_u64() != Some(47));
+    let report = verify_receipt_report(&short, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid, "{:#?}", report.findings);
+    assert_eq!(
+        report.dominating().map(|finding| finding.assertion),
+        Some(Assertion::Governance),
+        "{:#?}",
+        report.findings
+    );
 }

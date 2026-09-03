@@ -479,6 +479,33 @@ ordinary artifact of a real log rather than something a producer must manufactur
    verifiable in declared mode MUST anchor a manifest version snapshotting the current producer
    key set before issuing them." Every declared-mode vector in this corpus satisfies that: its
    subject resolves against the manifest snapshot in force at its own entry index.
+14. **One statement id, three anchored entries.** I-D §2.1's duplicate rule is reachable
+   without any fabrication, because the statement id digests the PAYLOAD while the entry id
+   digests the ENVELOPE: one payload under three signature sets is one statement anchored three
+   times. Manifest version 3 is that payload — predecessor v2, the same log and witness key
+   objects so it rotates no governance key, a producer snapshot restating the key entry 41 put
+   back in force — and entries 46, 47 and 48 are its three envelopes: `producer-1` alone,
+   `producer-1` and `producer-2` together, and a `sig` no key produced. Entry 49 is an
+   ordinary ingestion bound to version 3.
+
+   The two questions §7.5.1 asks about a duplicate get different answers, and the vectors keep
+   them apart. The induction (4b) claims the statement id once, at the smallest entry index, so
+   entry 46 governs and 47 applies no effect, consumes no rotation proof and never becomes the
+   version a `subject.manifest` reference resolves to
+   (`statement-anchored-duplicate-manifest.ahl`, `verified`). Verification is not waived with
+   effect: §7.5 step 4 verifies every carried envelope and 4d puts a `governance.chain[]`
+   element among the three kinds a receipt RESTS ON, so the third envelope in that chain
+   position is `invalid` on `envelope-validity` at its own index
+   (`statement-anchored-duplicate-manifest-unsigned-must-fail.ahl`). A void duplicate that
+   VERIFIES produces no informative item — an informative item reports a void entry the run
+   inspected and found wanting, which a verifying one is not. Completeness (4c) asks what the
+   CHAIN CARRIES, so under enumerated currency both verifying copies must be present and the
+   non-verifying one is not an omission (`governance-state-duplicate-manifest.ahl`, `verified`).
+
+   One rule elsewhere had to follow. `governance-state`'s absence check — no governance
+   statement in `(subject.entry_index, target_index]` — asks what CHANGED the state, so it
+   passes over a void entry and over a later duplicate of a governing statement. Counting
+   either would report a current state as stale, which is the opposite of what first-wins says.
 
 ## Regenerating
 
