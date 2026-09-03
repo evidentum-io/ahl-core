@@ -32,12 +32,13 @@ use serde_json::{json, Value};
 
 /// The statement vectors, in entry-index order. Entry 28 re-adds `producer-2` to the producer
 /// snapshot and entry 29 is a trigger genuinely CO-SIGNED by both the authority and
-/// `producer-2`. Entry 30 is an intentional non-verifying-signature fixture: well-formed shape,
-/// real authority `key_id`, garbage `sig`. Entry 31 adds a second, genuinely valid signature
+/// `producer-2`. Entry 30 retires `producer-2` under `producer-2`'s own signature and entry 31
+/// re-adds it. Entry 32 is an intentional non-verifying-signature fixture: well-formed shape,
+/// real authority `key_id`, garbage `sig`. Entry 33 adds a second, genuinely valid signature
 /// entry from a non-authority key alongside a non-verifying authority-named one. The two
 /// non-verifying fixtures sit at the tail so that enumerated material below them stays
 /// verifiable (I-D §7.5.1 4d).
-const STATEMENT_FILES: [&str; 35] = [
+const STATEMENT_FILES: [&str; 37] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -68,11 +69,13 @@ const STATEMENT_FILES: [&str; 35] = [
     "27-derivation-z-from-affected-descendant.json",
     "28-key-readd-producer-2.json",
     "29-retraction-f-co-signed-authority-and-producer-2.json",
-    "30-invalid-signature-trigger-f.json",
-    "31-unverified-authority-signature-trigger-f.json",
-    "32-ingestion-customers-e-stale-manifest.json",
-    "33-correction-a-to-cross-dataset-replacement.json",
-    "34-retraction-cross-dataset-record.json",
+    "30-key-retire-producer-2-self-signed.json",
+    "31-key-readd-producer-2-after-self-retire.json",
+    "32-invalid-signature-trigger-f.json",
+    "33-unverified-authority-signature-trigger-f.json",
+    "34-ingestion-customers-e-stale-manifest.json",
+    "35-correction-a-to-cross-dataset-replacement.json",
+    "36-retraction-cross-dataset-record.json",
 ];
 
 /// The four published closure scenarios.
@@ -207,11 +210,11 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
         if index == 0 || index == 25 {
             continue;
         }
-        // Entry 32 is the ONE deliberate exception: I-D §2.2 §7.6's negative vector
+        // Entry 34 is the ONE deliberate exception: I-D §2.2 §7.6's negative vector
         // (`record-ingested-stale-manifest-must-fail.ahl`) needs a statement that is
         // genuinely signed and genuinely anchored, yet wrongly bound — see `corpus.rs`'s own
-        // entry 32 and the assertion right after this loop.
-        if index == 32 {
+        // entry 34 and the assertion right after this loop.
+        if index == 34 {
             continue;
         }
         // The manifest version id is the manifest statement's *statement id* (spec §2.3.5).
@@ -225,22 +228,22 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
         );
     }
 
-    // The exception, made explicit: entry 32 wrongly names v1 (`m1`) even though v2 (`m2`) is
+    // The exception, made explicit: entry 34 wrongly names v1 (`m1`) even though v2 (`m2`) is
     // active at its entry index — I-D §2.2's "greatest entry index smaller than the
     // statement's own" resolves to v2 there, not v1. This is what
     // `record-ingested-stale-manifest-must-fail.ahl` proves the verifier catches.
     assert_eq!(
-        field_str(&vectors[32]["envelope"]["payload"], "manifest")
+        field_str(&vectors[34]["envelope"]["payload"], "manifest")
             .expect("payload carries manifest"),
         m1,
-        "entry 32 must wrongly name v1 — that is the defect the stale-manifest vector proves \
+        "entry 34 must wrongly name v1 — that is the defect the stale-manifest vector proves \
          is caught"
     );
     assert_ne!(
-        field_str(&vectors[32]["envelope"]["payload"], "manifest")
+        field_str(&vectors[34]["envelope"]["payload"], "manifest")
             .expect("payload carries manifest"),
         m2,
-        "entry 32's wrong binding must not accidentally be correct"
+        "entry 34's wrong binding must not accidentally be correct"
     );
 }
 
@@ -340,7 +343,7 @@ fn no_two_anchored_envelopes_share_a_statement_id() {
     // The three retractions of record F that exist to exercise signature handling — the
     // genuinely co-signed one, the non-verifying one, and the one whose authority-named entry
     // does not verify — are distinct statements, not one statement anchored three times.
-    let f_triggers: Vec<&Value> = [29usize, 30, 31].iter().map(|i| &vectors[*i]).collect();
+    let f_triggers: Vec<&Value> = [29usize, 32, 33].iter().map(|i| &vectors[*i]).collect();
     let records: BTreeSet<&str> = f_triggers
         .iter()
         .map(|v| field_str(&v["envelope"]["payload"], "record").expect("record"))
@@ -357,7 +360,7 @@ fn no_two_anchored_envelopes_share_a_statement_id() {
 /// I-D §2.4.2 makes identity the `(dataset, record)` pair, and §2.6 puts `dsid` in the
 /// commitment preimage — so the same bytes in two datasets commit differently, and a pair like
 /// this is unreachable through content. It is reachable by a producer NAMING one, which is
-/// what entries 33 and 34 do: each references a commitment computed for `customers` beside a
+/// what entries 35 and 36 do: each references a commitment computed for `customers` beside a
 /// `scores`-side claim. If a future corpus change made these entries name distinct
 /// commitments, both negatives would still fail — on the commitment rather than the dataset —
 /// and would silently stop testing the rule they exist for.
@@ -365,11 +368,11 @@ fn no_two_anchored_envelopes_share_a_statement_id() {
 fn the_cross_dataset_fixtures_reuse_one_commitment_under_two_datasets() {
     let vectors = statement_vectors();
     let ingestion = &vectors[1]["envelope"]["payload"];
-    let correction = &vectors[33]["envelope"]["payload"];
-    let retraction = &vectors[34]["envelope"]["payload"];
+    let correction = &vectors[35]["envelope"]["payload"];
+    let retraction = &vectors[36]["envelope"]["payload"];
     let derivation_output = &vectors[3]["envelope"]["payload"]["outputs"][0];
 
-    // Entry 34 retracts `scores`/A using record A's own `customers` commitment.
+    // Entry 36 retracts `scores`/A using record A's own `customers` commitment.
     assert_eq!(field_str(retraction, "dataset").expect("dataset"), "scores");
     assert_eq!(
         field_str(retraction, "record").expect("record"),
@@ -378,7 +381,7 @@ fn the_cross_dataset_fixtures_reuse_one_commitment_under_two_datasets() {
     );
     assert_eq!(field_str(ingestion, "dataset").expect("dataset"), "customers");
 
-    // Entry 33 corrects `customers`/A to S1, which exists only as a `scores` output.
+    // Entry 35 corrects `customers`/A to S1, which exists only as a `scores` output.
     assert_eq!(field_str(correction, "dataset").expect("dataset"), "customers");
     assert_eq!(
         field_str(correction, "replacement").expect("replacement"),
@@ -425,11 +428,11 @@ fn the_manifest_chain_links_by_entry_id_and_rotates_the_witness_set() {
 
 #[test]
 fn every_statement_signature_verifies() {
-    // Entries 30 and 31 are intentional non-verifying-signature fixtures: well-formed shape,
-    // real authority `key_id`, garbage `sig` (entry 31 also carries a second, genuinely valid
+    // Entries 32 and 33 are intentional non-verifying-signature fixtures: well-formed shape,
+    // real authority `key_id`, garbage `sig` (entry 33 also carries a second, genuinely valid
     // entry from a non-authority key). Every other entry must genuinely verify; these two must
     // not.
-    const NON_VERIFYING: [usize; 2] = [30, 31];
+    const NON_VERIFYING: [usize; 2] = [32, 33];
     let vectors = statement_vectors();
     let keys = key_set(&vectors);
     for (index, vector) in vectors.iter().enumerate() {
@@ -445,6 +448,45 @@ fn every_statement_signature_verifies() {
             assert!(ok, "{}: signature did not verify", STATEMENT_FILES[index]);
         }
     }
+}
+
+/// The self-retirement fixture must really retire the key that signs it, or the vector built
+/// on it proves nothing about the induction's two key states.
+///
+/// I-D §7.5.1 4b verifies a governance statement "against K AS ESTABLISHED SO FAR — the
+/// governance state in force immediately before this statement's own entry index" and applies
+/// its effect only afterwards, which is what makes a self-retirement conforming; 4d then scopes
+/// the remaining-envelope check to "every carried envelope that is NOT part of the induction".
+/// `governance-state-self-retiring-key.ahl` enumerates a range covering entry 30 and must be
+/// accepted. If a future corpus change made entry 30 retire some OTHER key, or signed it with
+/// one, the vector would keep passing while testing nothing.
+#[test]
+fn the_self_retiring_key_statement_is_signed_by_the_key_it_retires() {
+    let vectors = statement_vectors();
+    let envelope = &vectors[30]["envelope"];
+    let payload = &envelope["payload"];
+    assert_eq!(field_str(payload, "type").expect("type"), "key");
+    assert_eq!(field_str(payload, "action").expect("action"), "retire");
+    let retired = field_str(&payload["key"], "key_id").expect("key_id");
+    let signers: BTreeSet<&str> = envelope["signatures"]
+        .as_array()
+        .expect("signatures")
+        .iter()
+        .map(|signature| field_str(signature, "key_id").expect("key_id"))
+        .collect();
+    assert_eq!(
+        signers,
+        BTreeSet::from([retired]),
+        "entry 30 must be signed by exactly the key it retires — that pairing is the whole \
+         fixture"
+    );
+
+    // Entry 31 puts the key back, which is what keeps entry 33's genuine `producer-2`
+    // signature resolving to a key in force.
+    let readd = &vectors[31]["envelope"]["payload"];
+    assert_eq!(field_str(readd, "type").expect("type"), "key");
+    assert_eq!(field_str(readd, "action").expect("action"), "add");
+    assert_eq!(field_str(&readd["key"], "key_id").expect("key_id"), retired);
 }
 
 #[test]
@@ -1225,7 +1267,7 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             matches!(error, ReceiptError::TriggerNotAuthorized { entry_index: 23, .. })
         }
         "trigger-effective-unverified-authority-signature-must-fail.ahl" => {
-            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 31 })
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 33 })
         }
         "propagation-complete-past-declared-checkpoint-must-fail.ahl" => matches!(
             error,
@@ -1368,7 +1410,7 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         // entry index of the first non-verifying envelope in range, never a later one.
         "trigger-effective-non-verifying-candidate-must-fail.ahl"
         | "governance-state-non-verifying-entry-must-fail.ahl" => {
-            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 30 })
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 32 })
         }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };

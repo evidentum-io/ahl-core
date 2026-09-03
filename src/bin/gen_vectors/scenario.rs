@@ -31,6 +31,16 @@ pub const T_PAST_TO: &str = "2026-07-01T00:00:00Z";
 /// `effective_from` of the non-retroactive retraction at entry 17.
 pub const T_RETRACTION: &str = "2026-08-01T00:00:00Z";
 
+/// `key.valid_from` of the producer-key re-add at entry 31.
+///
+/// Spec §2.1 forbids two envelopes sharing a statement id, and a statement id digests the
+/// payload alone, so the re-add cannot repeat the payload of the `add` at entry 28 verbatim.
+/// `valid_from` is the member that carries no verification weight — I-D §7.5.1 4b(K) requires
+/// it to be present and well formed but says it "never orders anything and never gates a key's
+/// activity, both of which are decided by entry index alone" — so it is the honest place to
+/// make the two statements distinct.
+pub const T_REKEY: &str = "2026-08-16T13:00:00Z";
+
 /// `log.cadence_epoch` — the single start of the checkpoint-series obligation (spec §7.3).
 ///
 /// Spec §7.3 pins the epoch to the corpus's opening interval: the earliest checkpoint

@@ -3529,21 +3529,44 @@ fn verify_enumeration(
         });
     }
 
-    // I-D §7.5.1 4d: with K established, EVERY carried envelope is verified under the envelope
-    // signature rule of §2.1 at ITS OWN entry index — enumerated material included, and no
-    // subset of it. "An envelope carrying a non-verifying entry, or an entry naming a key not
-    // active at that index, is invalid however many other entries verify... Failure is
-    // `invalid`." So a non-verifying envelope anywhere in an enumerated range invalidates the
-    // run; it is never skipped as uninteresting and never downgraded to a challenge. §8.4 puts
-    // it as two tests in order — "Validity and authorization are separate tests, applied in
-    // that order" — so only a VALID envelope is ever tested for authority, and a challenge is
-    // a valid envelope whose signers hold no authority, never an unreadable one.
+    // I-D §7.5.1 4d: with K established, every carried envelope that is NOT part of the
+    // induction is verified under the envelope signature rule of §2.1 at ITS OWN entry index —
+    // enumerated material included, and no subset of it. "An envelope carrying a non-verifying
+    // entry, or an entry naming a key not active at that index, is invalid however many other
+    // entries verify... Failure is `invalid`." So a non-verifying envelope anywhere in an
+    // enumerated range invalidates the run; it is never skipped as uninteresting and never
+    // downgraded to a challenge. §8.4 puts it as two tests in order — "Validity and
+    // authorization are separate tests, applied in that order" — so only a VALID envelope is
+    // ever tested for authority, and a challenge is a valid envelope whose signers hold no
+    // authority, never an unreadable one.
     //
     // This runs after the range proof, so every envelope verified here has already been shown
     // to be the entry the log committed at that index, rather than carried bytes claiming to
     // be. It is the one choke point all three enumerated forms pass through — governance
     // currency, competing-trigger candidates, and the propagation-completeness prefix.
     for (offset, envelope) in envelopes.iter().enumerate() {
+        // 4d's scope is "every carried envelope that is NOT part of the induction", and the
+        // exclusion is load-bearing rather than a convenience. A `manifest` or `key` statement
+        // was already verified by [`read_chain`] under 4b phase 1, "against K AS ESTABLISHED SO
+        // FAR — the governance state in force immediately before this statement's own entry
+        // index", and its effect applied only afterwards (phase 3). Verifying it a second time
+        // under COMPLETED K at its own index applies a different state to the same envelope: a
+        // `key` statement retiring the very key that signed it is conforming — it is signed
+        // under the pre-effect state — yet post-effect that key is no longer resolvable at that
+        // index, so the second check would reject a statement the induction accepted. Deciding
+        // 4d by the state that already includes a statement's own effect is not what 4b/4d
+        // ask for.
+        //
+        // Membership is decided by statement TYPE, not by position in the range: 4b walks
+        // exactly the `manifest` and `key` statements, whatever indexes they occupy, and
+        // [`verify_governance_enumeration`] separately requires every enumerated statement of
+        // those two types to appear in the chain the induction actually walked — under
+        // enumerated mode that check spans `[0, tree_size(C))`, a superset of every other
+        // enumerated range, and it runs before any claim-specific material is read. Nothing is
+        // exempted here that the induction has not already verified.
+        if matches!(statement_type(payload_of(envelope)?)?, "manifest" | "key") {
+            continue;
+        }
         verify_envelope_at(envelope, governance, from_index + offset as u64, budget)?;
     }
 

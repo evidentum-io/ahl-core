@@ -345,8 +345,9 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp29 = corpus.anchor("cp29");
     let cp30 = corpus.anchor("cp30");
     let cp32 = corpus.anchor("cp32");
-    let cp33 = corpus.anchor("cp33");
+    let cp34 = corpus.anchor("cp34");
     let cp35 = corpus.anchor("cp35");
+    let cp37 = corpus.anchor("cp37");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -544,10 +545,10 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         },
     });
 
-    // I-D §2.2 / §7.6: entry 32 is a genuine, fully anchored ingestion of record E into
+    // I-D §2.2 / §7.6: entry 34 is a genuine, fully anchored ingestion of record E into
     // `customers`, signed by the `customers` authority — but its payload names manifest v1
     // (genesis) as governing it, even though it is anchored well after manifest v2 (entry 25)
-    // became active. This is a real corpus statement (see `corpus.rs`'s entry 32), not a
+    // became active. This is a real corpus statement (see `corpus.rs`'s entry 34), not a
     // mutated fixture: the "structural wall" earlier rounds hit — mutating an anchored
     // envelope invalidates its own inclusion path before the rule under test is ever reached —
     // does not apply here, because the defect was baked in before the statement was ever
@@ -556,8 +557,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "record-ingested-stale-manifest-must-fail.ahl",
         receipt: Spec {
             claim_type: "record-ingested",
-            subject_index: 32,
-            anchor: cp33,
+            subject_index: 34,
+            anchor: cp35,
             chain: vec![0, 9, 25],
             record_subject: customers(&r.c_e),
             competing: "not-checked",
@@ -567,7 +568,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_material: json!({}),
             producer_keys: None,
             note: format!(
-                "MUST FAIL. Entry 32's payload names manifest `{}` (v1, genesis), but I-D §2.2 \
+                "MUST FAIL. Entry 34's payload names manifest `{}` (v1, genesis), but I-D §2.2 \
                  resolves \"the manifest version active at the statement's entry index\" as \
                  the manifest with the greatest entry index smaller than the statement's own — \
                  here manifest `{}` (v2, entry 25), not v1. A receipt is invalid however genuine \
@@ -973,14 +974,14 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     // introduction whose COMMITMENT matches the trigger exactly and whose DATASET does not, so
     // a verifier comparing the commitment alone accepts them and one comparing the pair does
     // not. Neither is a mutated fixture: the two subject statements are genuinely signed and
-    // genuinely anchored, at entries 33 and 34, because a producer naming a commitment beside
+    // genuinely anchored, at entries 35 and 36, because a producer naming a commitment beside
     // the wrong dataset is exactly what nothing else in the format prevents.
     out.push(Vector {
         file: "trigger-declared-cross-dataset-introduction-must-fail.ahl",
         receipt: Spec {
             claim_type: "trigger-declared",
-            subject_index: 34,
-            anchor: cp35,
+            subject_index: 36,
+            anchor: cp37,
             chain: vec![0, 25],
             record_subject: scores(&r.c_a),
             competing: "not-checked",
@@ -988,10 +989,10 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             currency_mode: "declared",
             currency_material: json!({}),
             claim_material: json!({
-                "introduction": introduction(1, &r.c_a, cp35),
+                "introduction": introduction(1, &r.c_a, cp37),
             }),
             producer_keys: None,
-            note: "MUST FAIL. The retraction at entry 34 names the `scores` dataset with record \
+            note: "MUST FAIL. The retraction at entry 36 names the `scores` dataset with record \
                    A's `customers` commitment, so its `record_subject` is `scores`/A. The \
                    embedded introduction is the genuine ingestion at entry 1, which introduces \
                    `customers`/A: same commitment string, different dataset. Every other check \
@@ -1017,8 +1018,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "trigger-declared-cross-dataset-replacement-must-fail.ahl",
         receipt: Spec {
             claim_type: "trigger-declared",
-            subject_index: 33,
-            anchor: cp35,
+            subject_index: 35,
+            anchor: cp37,
             chain: vec![0, 25],
             record_subject: customers(&r.c_a),
             competing: "not-checked",
@@ -1026,12 +1027,12 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             currency_mode: "declared",
             currency_material: json!({}),
             claim_material: json!({
-                "introduction": introduction(1, &r.c_a, cp35),
+                "introduction": introduction(1, &r.c_a, cp37),
                 // S1 is introduced by the unbatched derivation at entry 3, in `scores`.
                 "replacement_introduction": Spec {
                     claim_type: "record-derived",
                     subject_index: 3,
-                    anchor: cp35,
+                    anchor: cp37,
                     chain: vec![0, 25],
                     record_subject: scores(&r.s1),
                     competing: "not-checked",
@@ -1049,7 +1050,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 .build(corpus, keys),
             }),
             producer_keys: None,
-            note: "MUST FAIL. The correction at entry 33 corrects `customers`/A to S1. A \
+            note: "MUST FAIL. The correction at entry 35 corrects `customers`/A to S1. A \
                    correction carries ONE `dataset` (I-D §2.4.3), covering both members, so it \
                    is claiming `customers`/S1 as the replacement. The embedded \
                    `replacement_introduction` proves `scores`/S1 — the same commitment string \
@@ -1253,9 +1254,9 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Accept,
     });
 
-    // Two NON-VERIFYING triggers on F, at entries 30 and 31: entry 30's `signatures[0].key_id`
+    // Two NON-VERIFYING triggers on F, at entries 32 and 33: entry 32's `signatures[0].key_id`
     // names `producer-1`'s real key — the genuine `customers` authority — but `sig` is garbage,
-    // and entry 31 pairs a genuine `producer-2` signature with a second entry naming the
+    // and entry 33 pairs a genuine `producer-2` signature with a second entry naming the
     // authority whose `sig` is likewise garbage. Both are competing candidates for record F,
     // and I-D §7.2 requires every competing candidate's envelope to be verified under §2.1
     // BEFORE authority is compared, with §7.5.1 4d making failure `invalid` for the run.
@@ -1264,17 +1265,17 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "trigger-effective",
             subject_index: 29,
-            anchor: cp32,
-            chain: vec![0, 9, 25, 28],
+            anchor: cp34,
+            chain: vec![0, 9, 25, 28, 30, 31],
             record_subject: customers(&r.c_f),
             competing: "enumerated",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 32, cp32),
+            currency_material: corpus.enumeration(0, 34, cp34),
             claim_material: json!({
-                "introduction": introduction(20, &r.c_f, cp32),
-                "checkpoint_C": cp32.checkpoint,
-                "competing": { "corpus_range": corpus.enumeration(20, 32, cp32) },
+                "introduction": introduction(20, &r.c_f, cp34),
+                "checkpoint_C": cp34.checkpoint,
+                "competing": { "corpus_range": corpus.enumeration(20, 34, cp34) },
             }),
             producer_keys: Some(vec![
                 key_entry(&keys.producer_1, None, 25),
@@ -1282,12 +1283,12 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             ]),
             note: "MUST FAIL. The subject — the genuinely co-signed retraction at entry 29 — is \
                    itself impeccable, and so is every proof in this receipt: the enumeration is \
-                   complete over [0, 32), the competing range is the introduction-fixed \
-                   [20, 32), and the range proofs open cp32's root. What it cannot survive is \
-                   its own competing-candidate set. Entries 30 and 31 also retract F, and \
-                   neither envelope verifies: entry 30's sole signature names `producer-1`'s \
+                   complete over [0, 34), the competing range is the introduction-fixed \
+                   [20, 34), and the range proofs open cp34's root. What it cannot survive is \
+                   its own competing-candidate set. Entries 32 and 33 also retract F, and \
+                   neither envelope verifies: entry 32's sole signature names `producer-1`'s \
                    real key_id — the `customers` authority — with `sig` bytes that key never \
-                   produced, and entry 31 pairs a genuine `producer-2` signature with a second \
+                   produced, and entry 33 pairs a genuine `producer-2` signature with a second \
                    entry naming the authority whose `sig` likewise does not verify. I-D §7.2 \
                    requires every competing candidate's envelope to be verified under §2.1 \
                    before authority is compared, and §7.5.1 4d makes a non-verifying entry \
@@ -1303,11 +1304,11 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Reject {
             rule: "I-D §7.2 / §7.5.1 4d — every competing candidate's envelope must verify \
                    before authority is compared",
-            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 30 }),
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 32 }),
         },
     });
 
-    // Entry 31: the SUBJECT of its own `trigger-effective` claim carries two signature
+    // Entry 33: the SUBJECT of its own `trigger-effective` claim carries two signature
     // entries — one genuinely valid, cryptographically-signed entry from `producer-2` (not the
     // `customers` authority) and one naming `producer-1`'s real key_id — the genuine
     // `customers` authority — whose `sig` does not verify. A verifier that name-matched the
@@ -1320,26 +1321,26 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "trigger-effective-unverified-authority-signature-must-fail.ahl",
         receipt: Spec {
             claim_type: "trigger-effective",
-            subject_index: 31,
-            anchor: cp32,
-            chain: vec![0, 9, 25, 28],
+            subject_index: 33,
+            anchor: cp34,
+            chain: vec![0, 9, 25, 28, 30, 31],
             record_subject: customers(&r.c_f),
             competing: "enumerated",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 32, cp32),
+            currency_material: corpus.enumeration(0, 34, cp34),
             claim_material: json!({
-                "introduction": introduction(20, &r.c_f, cp32),
-                "checkpoint_C": cp32.checkpoint,
-                "competing": { "corpus_range": corpus.enumeration(20, 32, cp32) },
+                "introduction": introduction(20, &r.c_f, cp34),
+                "checkpoint_C": cp34.checkpoint,
+                "competing": { "corpus_range": corpus.enumeration(20, 34, cp34) },
             }),
             producer_keys: Some(vec![
                 key_entry(&keys.producer_1, None, 25),
-                key_entry(&keys.producer_2, None, 28),
+                key_entry(&keys.producer_2, None, 31),
             ]),
-            note: "MUST FAIL. Entry 31's own envelope carries two signature entries: \
+            note: "MUST FAIL. Entry 33's own envelope carries two signature entries: \
                    `signatures[0]` is a genuine, cryptographically valid signature from \
-                   `producer-2`, who is an active producer key from entry 28 onward but is not \
+                   `producer-2`, who is an active producer key from entry 31 onward but is not \
                    the `customers` dataset authority; `signatures[1].key_id` correctly names \
                    `producer-1`'s real key_id — the genuine authority — but `signatures[1].sig` \
                    does not verify against that key's actual public key. I-D §7.5.1 4d requires \
@@ -1352,7 +1353,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         .build(corpus, keys),
         expect: Expect::Reject {
             rule: "I-D §7.5.1 4d — every subject envelope signature entry must verify",
-            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 31 }),
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 33 }),
         },
     });
 
@@ -1395,7 +1396,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    `producer-2` does not disqualify it: core spec §2.3.3 requires a trigger to \
                    be signed BY the authority, never signed EXCLUSIVELY by authority keys. The \
                    checkpoint stops at tree size 30 because the two deliberately non-verifying \
-                   fixtures sit at entries 30 and 31, and I-D §7.5.1 4d refuses any enumeration \
+                   fixtures sit at entries 32 and 33, and I-D §7.5.1 4d refuses any enumeration \
                    that reaches them."
                 .to_owned(),
         }
@@ -1878,13 +1879,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
-            anchor: cp32,
-            chain: vec![0, 9, 25, 28],
+            anchor: cp34,
+            chain: vec![0, 9, 25, 28, 30, 31],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 32, cp32),
+            currency_material: corpus.enumeration(0, 34, cp34),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
             note: "MUST FAIL. The claim is the one `governance-state-valid.ahl` proves — \
@@ -1892,7 +1893,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    every governance-specific check still passes: the chain is complete, the \
                    rotation proof verifies, and no manifest or key statement is anchored in \
                    (25, 26]. The range is what fails. §4 fixes enumerated material at exactly \
-                   [0, tree_size(C)), and at cp32 that prefix reaches entries 30 and 31, the \
+                   [0, tree_size(C)), and at cp34 that prefix reaches entries 32 and 33, the \
                    two deliberately non-verifying retractions of record F. Neither is a \
                    competing candidate — `governance-state` compares no authority and filters \
                    for no record — and neither is a manifest or a `key` statement, so no \
@@ -1907,8 +1908,48 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Reject {
             rule: "I-D §7.5.1 4d — every enumerated envelope must verify, not only the ones a \
                    claim type inspects",
-            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 30 }),
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 32 }),
         },
+    });
+
+    // The other side of the same rule: an enumerated range that reaches a `key` statement
+    // RETIRING ITS OWN SIGNING KEY must still be accepted. I-D §7.5.1 4d scopes the
+    // remaining-envelope check to "every carried envelope that is NOT part of the induction",
+    // and 4b verifies a governance statement "against K AS ESTABLISHED SO FAR — the governance
+    // state in force immediately before this statement's own entry index" before applying its
+    // effect. Entry 30 retires `producer-2` under `producer-2`'s own signature, which is
+    // conforming on those terms; a verifier that re-checked it under the COMPLETED key state at
+    // its own index would resolve the key after its own retirement and reject it.
+    out.push(Vector {
+        file: "governance-state-self-retiring-key.ahl",
+        receipt: Spec {
+            claim_type: "governance-state",
+            subject_index: 25,
+            anchor: cp32,
+            chain: vec![0, 9, 25, 28, 30, 31],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 32, cp32),
+            claim_material: json!({ "target_index": 26 }),
+            producer_keys: None,
+            note: "Proves that manifest version 2 is the governance state active at entry index \
+                   26 over an enumerated prefix that REACHES a self-retiring `key` statement. \
+                   The §4 material enumerates exactly [0, 32) — the whole prefix of cp32 — and \
+                   entry 30 in it retires `producer-2` under `producer-2`'s own signature, with \
+                   entry 31 re-adding the key afterwards. Both are induction members: I-D \
+                   §7.5.1 4b verifies each against the key state in force immediately BEFORE \
+                   its own entry index and applies its effect only afterwards, and 4d's \
+                   remaining-envelope check covers \"every carried envelope that is NOT part of \
+                   the induction\". A verifier that re-verified entry 30 under the completed \
+                   key state at index 30 would resolve `producer-2` after its own retirement \
+                   had taken effect and reject a statement the induction accepted, so this \
+                   receipt separates the two key states 4b keeps apart."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
     });
 
     // --- governance-key rotation proofs (I-D §7.1, §7.5.1 4b(M)): four ways an element can

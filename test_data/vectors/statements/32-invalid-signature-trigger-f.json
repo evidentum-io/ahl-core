@@ -1,6 +1,6 @@
 {
   "entry_id": "sha256:7c5ff0d0c7e88ccdaa5f7b32debeb44244ae4b4cd547ebbfd04240faf2e0a407",
-  "entry_index": 30,
+  "entry_index": 32,
   "envelope": {
     "payload": {
       "ahl_version": "0.4",
@@ -24,6 +24,5 @@
       }
     ]
   },
-  "note": "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against `signatures[0].key_id`'s real public key. See trigger-effective-non-verifying-candidate-must-fail.ahl.",
   "statement_id": "sha256:1d0b563abcb784b23544b9b9d53bb94fdd2cb0b41dec8a3b59d9d86428087986"
 }

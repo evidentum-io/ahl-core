@@ -122,9 +122,9 @@ two different bindings, which is the case receipt key binding is tolerant for.
 | Path | Contents |
 | --- | --- |
 | `adaptor/` | The test adaptor profile document, content-addressed and pinned in both manifest versions |
-| `vectors/statements/` | The 35-entry toy corpus, plus malformed statements naming the rule each violates |
+| `vectors/statements/` | The 37-entry toy corpus, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
-| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 33 and 35, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
+| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 34, 35 and 37, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
 | `vectors/closure/` | Six closure scenarios (see below) |
 | `vectors/witness/` | Signed witness refusal evidence carrying two conflicting checkpoints (spec §3.3 step 3) |
 | `receipts/` | One positive and at least one negative receipt per claim-type registry entry, plus `index.json` naming the expected outcome, the rule each negative must trip, and the trust policy those outcomes assume |
@@ -132,7 +132,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 ## The scenarios
 
-The corpus is 35 anchored entries carrying these interlocking scenarios:
+The corpus is 37 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -154,10 +154,10 @@ The corpus is 35 anchored entries carrying these interlocking scenarios:
 5. **Challenge.** Entry 23 retracts a record under a key that is *not* the dataset authority, so
    it anchors as a challenge (spec §2.3.3); entry 24 propagates over it anyway. No
    `propagation-complete` receipt over that propagation can verify, which is the point.
-6. **Signature handling on competing triggers.** Entries 29, 30 and 31 all retract record F.
+6. **Signature handling on competing triggers.** Entries 29, 32 and 33 all retract record F.
    Entry 29 is genuinely co-signed by the authority and a second active producer key (entry 28
-   re-adds it after manifest v2 dropped it); entry 30 names the real authority's `key_id` with a
-   signature that does not verify; entry 31 carries a genuine signature from a non-authority key
+   re-adds it after manifest v2 dropped it); entry 32 names the real authority's `key_id` with a
+   signature that does not verify; entry 33 carries a genuine signature from a non-authority key
    alongside a non-verifying one that names the authority. Spec §2.1 forbids two envelopes
    sharing a statement id, and the statement id digests the payload alone, so the three carry
    different `reason_code` values — otherwise they would be one statement anchored three times,
@@ -173,9 +173,19 @@ The corpus is 35 anchored entries carrying these interlocking scenarios:
    defective envelopes ARE competing candidates for the subject record, and
    `governance-state-non-verifying-entry-must-fail.ahl`, where no claim-specific rule looks at
    them at all. Both are refused, which is what "every carried envelope" means.
-7. **Record identity is a pair.** Entries 33 and 34 name a commitment beside the wrong
-   dataset: entry 33 corrects `customers`/A to S1, a record that exists only in `scores`, and
-   entry 34 retracts `scores`/A using record A's `customers` commitment. Neither is a mutated
+7. **A `key` statement that retires its own signing key.** Entry 30 retires `producer-2` under
+   `producer-2`'s own signature; entry 31 re-adds the key, so the fixture at entry 33 keeps a
+   genuine signature from a key in force. Governance statements are verified by the induction of
+   I-D §7.5.1 4b — "against K AS ESTABLISHED SO FAR, the governance state in force immediately
+   before this statement's own entry index" — and their effect applied only afterwards, which is
+   why a self-retirement is conforming. 4d's remaining-envelope check is scoped to "every
+   carried envelope that is NOT part of the induction" for the same reason: re-checking entry 30
+   under the completed key state at its own index would resolve `producer-2` after its own
+   retirement had taken effect. `governance-state-self-retiring-key.ahl` enumerates `[0, 32)`,
+   which reaches both statements, and must be accepted.
+8. **Record identity is a pair.** Entries 35 and 36 name a commitment beside the wrong
+   dataset: entry 35 corrects `customers`/A to S1, a record that exists only in `scores`, and
+   entry 36 retracts `scores`/A using record A's `customers` commitment. Neither is a mutated
    fixture — both are genuinely signed and genuinely anchored — because §2.6's domain
    separation makes such a pair impossible to reach through CONTENT while leaving a producer
    free to NAME one, and a verifier recomputes a commitment only where content evidence is
@@ -183,7 +193,7 @@ The corpus is 35 anchored entries carrying these interlocking scenarios:
    `trigger-declared-cross-dataset-replacement-must-fail.ahl` embed introduction proofs whose
    commitment matches exactly and whose dataset does not; both must be refused (I-D §2.4.2,
    §2.4.3, §7.6).
-8. **Continued history.** A consistency proof from cp20 to cp24 backs
+9. **Continued history.** A consistency proof from cp20 to cp24 backs
    `assurance.continued_history` on a receipt, and a proof generated for a different pair of
    sizes — genuine, correctly built, about the wrong fact — is rejected. `anchoring.checkpoint`
    and `anchoring.later_checkpoint` each carry their OWN witness cosignatures — the primary
@@ -205,9 +215,9 @@ own checkpoint, deliberately cosigned by witness-1 even though it postdates entr
 the "operator kept signing under the outgoing key until cutover" case I-D §7.1 describes as an
 ordinary artifact of a real log rather than something a producer must manufacture.
 
-9. **Stale manifest binding.** Entry 32 is a genuine, fully anchored, genuinely signed ingestion
+10. **Stale manifest binding.** Entry 34 is a genuine, fully anchored, genuinely signed ingestion
    whose payload nonetheless names manifest v1 (genesis) as governing it, even though v2 (entry
-   25) is the manifest ACTIVE at entry 32 (I-D §2.2). `record-ingested-stale-manifest-must-fail.ahl`
+   25) is the manifest ACTIVE at entry 34 (I-D §2.2). `record-ingested-stale-manifest-must-fail.ahl`
    proves this is `invalid` however genuine the rest of the statement is — real signature, real
    inclusion, real record — and needs a genuinely anchored statement rather than a mutated
    fixture, because mutating any already-anchored envelope invalidates its own inclusion path

@@ -19,11 +19,11 @@ use serde_json::{json, Value};
 use crate::scenario::{
     leaf_bytes, manifest, payload, signed, transform, write_json, Keys, ADAPTOR_ID,
     CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, LEAF_FORMAT, LOG_OPERATOR, LOG_SEED, PIPELINE, T0,
-    T_EARLY, T_OPEN_FROM, T_PAST_FROM, T_PAST_TO, T_RETRACTION, WITNESS_1, WITNESS_2,
+    T_EARLY, T_OPEN_FROM, T_PAST_FROM, T_PAST_TO, T_REKEY, T_RETRACTION, WITNESS_1, WITNESS_2,
 };
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 35] = [
+pub const NAMES: [&str; 37] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -54,11 +54,13 @@ pub const NAMES: [&str; 35] = [
     "27-derivation-z-from-affected-descendant",
     "28-key-readd-producer-2",
     "29-retraction-f-co-signed-authority-and-producer-2",
-    "30-invalid-signature-trigger-f",
-    "31-unverified-authority-signature-trigger-f",
-    "32-ingestion-customers-e-stale-manifest",
-    "33-correction-a-to-cross-dataset-replacement",
-    "34-retraction-cross-dataset-record",
+    "30-key-retire-producer-2-self-signed",
+    "31-key-readd-producer-2-after-self-retire",
+    "32-invalid-signature-trigger-f",
+    "33-unverified-authority-signature-trigger-f",
+    "34-ingestion-customers-e-stale-manifest",
+    "35-correction-a-to-cross-dataset-replacement",
+    "36-retraction-cross-dataset-record",
 ];
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
@@ -630,7 +632,7 @@ impl Corpus {
         // non-verifying fixtures before this one could carry no enumerated receipt about it at
         // all. The fixtures sit at the tail for that reason.
         //
-        // The three retractions of F at entries 29, 30 and 31 carry DIFFERENT `reason_code`
+        // The three retractions of F at entries 29, 32 and 33 carry DIFFERENT `reason_code`
         // values for one reason: spec §2.1 forbids anchoring two envelopes with the same
         // statement id, and the statement id is the digest of the payload alone. Identical
         // payloads under different signature sets would be one statement anchored three times,
@@ -662,7 +664,51 @@ impl Corpus {
         );
         let env_29 = Value::Object(env_29_map);
 
-        // --- entry 30: a NON-VERIFYING trigger on F, claiming the real authority's key_id ---
+        // --- entry 30: a `key` statement that RETIRES ITS OWN SIGNING KEY -----------
+        // `producer-2` retires `producer-2`, signed by `producer-2`. This is conforming, and
+        // it is the shape that separates the two key states I-D §7.5.1 4b keeps apart. Phase 1
+        // verifies the envelope "against K AS ESTABLISHED SO FAR — the governance state in
+        // force immediately before this statement's own entry index", where `producer-2` is
+        // still active (entry 28 re-added it); phase 3 applies the effect only afterwards, and
+        // from this index onward the key is gone. A verifier that re-verified this envelope
+        // under the COMPLETED key state at its own index would resolve `producer-2` after its
+        // own retirement had taken effect and reject a statement 4b accepted — which is why 4d
+        // is written as "every carried envelope that is NOT part of the induction".
+        let env_30 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "retire",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": T0,
+                },
+            }),
+            &keys.producer_2,
+        );
+
+        // --- entry 31: re-add producer-2, so the fixtures below keep their properties -------
+        // Entry 30's retirement is what the self-retirement vector needs; entry 33 below needs
+        // `producer-2` ACTIVE, so that its genuine `producer-2` signature entry resolves to a
+        // key in force and its only defect is the non-verifying entry naming the authority.
+        // Without this re-add that fixture would fail on an unresolvable key instead, and
+        // would stop isolating the rule it exists for.
+        let env_31 = signed(
+            "key",
+            &m2,
+            json!({
+                "action": "add",
+                "key": {
+                    "key_id": keys.producer_2.key_id(),
+                    "pubkey": keys.producer_2.pubkey(),
+                    "valid_from": T_REKEY,
+                },
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entry 32: a NON-VERIFYING trigger on F, claiming the real authority's key_id ---
         // Structurally this is a well-formed retraction of F, naming `producer-1`'s real
         // `key_id` — the genuine `customers` dataset authority — so `key_id`-only matching would
         // accept it. Its `sig` is garbage, not a signature `producer-1` ever produced. The log
@@ -672,7 +718,7 @@ impl Corpus {
         // catch it. Anchored after entry 22's genuine, authorized retraction and after the
         // genuinely co-signed one at entry 29, it is what an enumeration reaching it must
         // refuse outright (I-D §7.5.1 4d).
-        let mut env_30 = signed(
+        let mut env_32 = signed(
             "retraction",
             &m2,
             json!({
@@ -683,14 +729,15 @@ impl Corpus {
             }),
             &keys.producer_1,
         );
-        env_30["signatures"][0]["sig"] = json!(format!(
+        env_32["signatures"][0]["sig"] = json!(format!(
             "base64:{}",
             base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
         ));
 
-        // --- entry 31: a trigger on F whose OWN envelope carries two signature entries ---
+        // --- entry 33: a trigger on F whose OWN envelope carries two signature entries ---
         // One entry is a genuinely valid signature from `producer-2` — a real, in-force
-        // producer key (entry 28 re-added it) that is NOT the `customers` dataset authority.
+        // producer key (entry 31 re-added it after the self-retirement at entry 30) that is
+        // NOT the `customers` dataset authority.
         // The other names `producer-1`'s real `key_id` — the genuine authority — but its `sig`
         // is garbage, not a signature `producer-1` ever produced. Anchored as its own subject
         // (not merely as a competing candidate), this entry exists to exercise the subject
@@ -698,7 +745,7 @@ impl Corpus {
         // is not enough — that specific signature entry must itself cryptographically verify,
         // and one non-verifying entry invalidates the envelope however many others verify
         // (I-D §7.5.1 4d, §8.4).
-        let f_retraction_31 = payload(
+        let f_retraction_33 = payload(
             "retraction",
             &m2,
             json!(T0),
@@ -709,13 +756,13 @@ impl Corpus {
                 "reason_code": "error",
             }),
         );
-        let producer_2_sig_31 = keys.producer_2.sign(&jcs(&f_retraction_31));
-        let mut env_31_map = serde_json::Map::new();
-        env_31_map.insert("payload".to_owned(), f_retraction_31);
-        env_31_map.insert(
+        let producer_2_sig_33 = keys.producer_2.sign(&jcs(&f_retraction_33));
+        let mut env_33_map = serde_json::Map::new();
+        env_33_map.insert("payload".to_owned(), f_retraction_33);
+        env_33_map.insert(
             "signatures".to_owned(),
             json!([
-                { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig_31 },
+                { "key_id": keys.producer_2.key_id(), "sig": producer_2_sig_33 },
                 {
                     "key_id": keys.producer_1.key_id(),
                     "sig": format!(
@@ -725,9 +772,9 @@ impl Corpus {
                 },
             ]),
         );
-        let env_31 = Value::Object(env_31_map);
+        let env_33 = Value::Object(env_33_map);
 
-        // --- entry 32: an otherwise-ordinary ingestion, genuinely signed and genuinely
+        // --- entry 34: an otherwise-ordinary ingestion, genuinely signed and genuinely
         // anchored — B2's own requirement is that this be real, not a standalone "malformed"
         // fixture, so the "structural wall" earlier rounds hit (mutating an anchored envelope
         // invalidates its own inclusion path) does not apply here: this envelope's payload
@@ -737,7 +784,7 @@ impl Corpus {
         // greatest entry index smaller than it — here, v2). Every other member is genuine: a
         // real signature by the `customers` authority, over a real new record, real inclusion
         // in the rebuilt log tree.
-        let env_32 = signed(
+        let env_34 = signed(
             "ingestion",
             &m1,
             json!({
@@ -748,7 +795,7 @@ impl Corpus {
             &keys.producer_1,
         );
 
-        // --- entries 33, 34: cross-dataset record-identity fixtures -----------------
+        // --- entries 35, 36: cross-dataset record-identity fixtures -----------------
         // I-D §2.4.2 and §7.6 make record identity the PAIR `(dataset, record)`: "Closure
         // traversal uses the `(dataset, record)` pair only", and every embedded receipt's
         // `record_subject` must match the referencing material. A commitment string alone is
@@ -762,11 +809,11 @@ impl Corpus {
         // verifier comparing the commitment alone accepts both of these; one comparing the
         // pair rejects both.
         //
-        // Entry 33 is a correction whose REPLACEMENT is the collision: `dataset` is
+        // Entry 35 is a correction whose REPLACEMENT is the collision: `dataset` is
         // `customers` for both members (§2.4.3 carries one dataset per correction), so it
         // claims the replacement is `customers`/S1 while S1 exists only as a `scores` record
         // produced by the derivation at entry 3.
-        let env_33 = signed(
+        let env_35 = signed(
             "correction",
             &m2,
             json!({
@@ -779,11 +826,11 @@ impl Corpus {
             &keys.producer_1,
         );
 
-        // Entry 34 is a retraction whose own subject is the collision: it names the `scores`
+        // Entry 36 is a retraction whose own subject is the collision: it names the `scores`
         // dataset with record A's `customers` commitment, so a receipt for it can only be
         // supported by an introduction of `scores`/A — which the corpus does not contain, and
         // which the `customers` ingestion at entry 1 is not.
-        let env_34 = signed(
+        let env_36 = signed(
             "retraction",
             &m2,
             json!({
@@ -799,7 +846,7 @@ impl Corpus {
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
             env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32, env_33,
-            env_34,
+            env_34, env_35, env_36,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -829,9 +876,14 @@ impl Corpus {
             (28, 25),
             (29, 25),
             (30, 25),
+            // cp32 covers [0, 32) — every entry through the `key` re-add at entry 31, and
+            // nothing beyond it. It is the only checkpoint whose enumerated prefix reaches the
+            // self-retiring `key` statement at entry 30 while stopping short of the two
+            // deliberately non-verifying fixtures at entries 32 and 33.
             (32, 25),
-            (33, 25),
+            (34, 25),
             (35, 25),
+            (37, 25),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
@@ -851,8 +903,9 @@ impl Corpus {
                     29 => "cp29",
                     30 => "cp30",
                     32 => "cp32",
-                    33 => "cp33",
-                    _ => "cp35",
+                    34 => "cp34",
+                    35 => "cp35",
+                    _ => "cp37",
                 },
                 checkpoint: cp,
                 witness_id,
@@ -1074,14 +1127,14 @@ impl Corpus {
     }
 
     fn check_signatures(&self, keys: &Keys) {
-        // Entries 30 and 31 are intentionally non-verifying vector fixtures: well-formed
-        // retractions naming the real authority's `key_id` with garbage `sig` bytes (entry 31
+        // Entries 32 and 33 are intentionally non-verifying vector fixtures: well-formed
+        // retractions naming the real authority's `key_id` with garbage `sig` bytes (entry 33
         // also carries a second, genuinely valid entry from a non-authority key). Every OTHER
         // entry must genuinely verify; these two must genuinely NOT — both are asserted below,
         // so a generator bug that accidentally produced a valid signature (defeating the
         // vector's purpose) or an invalid one elsewhere (a real regression) would each be
         // caught.
-        const NON_VERIFYING_ENTRIES: [usize; 2] = [30, 31];
+        const NON_VERIFYING_ENTRIES: [usize; 2] = [32, 33];
         for (index, env) in self.envelopes.iter().enumerate() {
             if NON_VERIFYING_ENTRIES.contains(&index) {
                 continue;

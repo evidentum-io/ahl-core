@@ -78,7 +78,7 @@
       "claim_type": "record-ingested",
       "expect": "reject",
       "file": "record-ingested-stale-manifest-must-fail.ahl",
-      "reason": "`subject.manifest` binding is invalid: `subject.manifest` (`sha256:437053c55efe84c0b4c774140206689576bea846e08ec1381b3df0dfc12ba588`) is not the manifest version ACTIVE at subject.entry_index 32 (`sha256:6dedcc481094b4f3cb3eb1e13bf4bad4c4c91fc0f7f3f5c17ec5945e3d4e4740`) (I-D §2.2, §7.6)",
+      "reason": "`subject.manifest` binding is invalid: `subject.manifest` (`sha256:437053c55efe84c0b4c774140206689576bea846e08ec1381b3df0dfc12ba588`) is not the manifest version ACTIVE at subject.entry_index 34 (`sha256:6dedcc481094b4f3cb3eb1e13bf4bad4c4c91fc0f7f3f5c17ec5945e3d4e4740`) (I-D §2.2, §7.6)",
       "rule": "I-D §2.2 / §7.6 — subject.manifest must be the manifest ACTIVE at subject.entry_index, not merely an earlier one"
     },
     {
@@ -218,14 +218,14 @@
       "claim_type": "trigger-effective",
       "expect": "reject",
       "file": "trigger-effective-non-verifying-candidate-must-fail.ahl",
-      "reason": "envelope signature at entry index 30 did not verify",
+      "reason": "envelope signature at entry index 32 did not verify",
       "rule": "I-D §7.2 / §7.5.1 4d — every competing candidate's envelope must verify before authority is compared"
     },
     {
       "claim_type": "trigger-effective",
       "expect": "reject",
       "file": "trigger-effective-unverified-authority-signature-must-fail.ahl",
-      "reason": "envelope signature at entry index 31 did not verify",
+      "reason": "envelope signature at entry index 33 did not verify",
       "rule": "I-D §7.5.1 4d — every subject envelope signature entry must verify"
     },
     {
@@ -316,8 +316,15 @@
       "claim_type": "governance-state",
       "expect": "reject",
       "file": "governance-state-non-verifying-entry-must-fail.ahl",
-      "reason": "envelope signature at entry index 30 did not verify",
+      "reason": "envelope signature at entry index 32 did not verify",
       "rule": "I-D §7.5.1 4d — every enumerated envelope must verify, not only the ones a claim type inspects"
+    },
+    {
+      "boundary": "the manifest and key state active at the target index is exactly the presented chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "governance-state",
+      "embedded_receipts": 0,
+      "expect": "accept",
+      "file": "governance-state-self-retiring-key.ahl"
     },
     {
       "claim_type": "governance-state",
