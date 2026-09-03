@@ -1660,6 +1660,43 @@ fn an_unsupported_version_is_reported_ahead_of_the_size_budget() {
     );
 }
 
+/// The same §7.5 step-1 ordering, one level down: the version read of an EMBEDDED receipt
+/// precedes the §7.8 nesting-depth limit that would otherwise stop the recursion at its door.
+///
+/// I-D §7.5 step 1: "Read `ahl_receipt_version` and act on it before any other check, including
+/// schema validation... Then parse the receipt, enforce the resource limits of Section 7.8."
+/// The depth cap is one of those limits, so a receipt tree that breaks both rules must report
+/// the version: `unverifiable` is a fixed property of the artifact, while the cap is a
+/// verifier-local configuration a differently-configured verifier would not hit at all.
+#[test]
+fn an_embedded_receipts_version_is_read_before_the_depth_limit() {
+    let (_, valid) = read_receipt("disposition-effective-valid.ahl");
+    let shallow =
+        TrustPolicy { limits: Limits { max_depth: 1, ..Limits::default() }, ..trust_policy() };
+
+    // The cap really is live for this tree: the innermost receipt sits at depth 2.
+    assert!(
+        matches!(
+            verify_receipt(&valid, &shallow),
+            Err(ReceiptError::LimitExceeded("embedded-receipt nesting depth"))
+        ),
+        "the depth cap must fire for a tree this verifier does support"
+    );
+
+    let mut foreign = valid;
+    foreign["claim_material"]["trigger"]["claim_material"]["introduction"]["ahl_receipt_version"] =
+        json!("1");
+    assert!(
+        matches!(
+            verify_receipt(&foreign, &shallow),
+            Err(ReceiptError::UnsupportedVersion { field: "ahl_receipt_version", got, .. })
+                if got == "1"
+        ),
+        "an over-deep receipt whose innermost embedded receipt carries an unsupported version \
+         must report the version (I-D §7.5 step 1)"
+    );
+}
+
 #[test]
 fn the_adaptor_profile_hash_is_pinned_by_both_manifest_versions_and_by_receipts() {
     let vectors = statement_vectors();

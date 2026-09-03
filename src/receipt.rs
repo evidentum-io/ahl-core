@@ -3830,13 +3830,24 @@ fn verify_nested(
     budget: &mut Budget,
     depth: usize,
 ) -> Result<Verdict> {
-    budget.enter(depth)?;
-
     // --- §7.5 step 1: versions, identifiers -----------------------------------------
     // Re-read here rather than assumed from the caller: an embedded receipt reaches this
     // function without passing through [`verify_receipt`], and §7.5 step 1's rule is about
     // every receipt, the embedded ones included (§7.1).
+    //
+    // It runs BEFORE [`Budget::enter`], because §7.5 step 1 is explicit about the order — "Read
+    // `ahl_receipt_version` and act on it before any other check, including schema validation.
+    // THEN parse the receipt, enforce the resource limits of Section 7.8" — and the two
+    // outcomes are not interchangeable at any depth. An unsupported version is a fixed property
+    // of the artifact, `unverifiable` under §7.7 for every verifier; the nesting-depth and
+    // embedded-count caps are §7.8 limits this verifier reports as `invalid`. Entering first
+    // would tell the holder of a deeply nested receipt of an unsupported revision that the
+    // nesting is the defect, and a verifier configured with a deeper limit would then report
+    // the version instead — two verifiers contradicting each other over one artifact. The read
+    // itself is two member lookups on an already-parsed object, so nothing is decoded, hashed
+    // or recursed into ahead of the budget it precedes.
     check_receipt_versions(receipt)?;
+    budget.enter(depth)?;
 
     let envelope = obj(receipt, "envelope")?;
     let subject = obj(receipt, "subject")?;
