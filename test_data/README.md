@@ -129,13 +129,18 @@ The corpus is 33 anchored entries carrying these interlocking scenarios:
    alongside a non-verifying one that names the authority. Spec §2.1 forbids two envelopes
    sharing a statement id, and the statement id digests the payload alone, so the three carry
    different `reason_code` values — otherwise they would be one statement anchored three times,
-   of which only entry 29 would govern and the other two would be void. The two non-verifying
-   fixtures sit at the TAIL of the corpus on purpose. I-D §7.5.1 4d requires every carried
-   envelope to verify, enumerated material included, and enumerated governance currency covers
-   exactly `[0, tree_size(C))` (§7.4), so a non-verifying envelope anchored at index *i* makes
-   every enumerated claim at a tree size greater than *i* invalid. Placing the fixtures before
-   the genuinely co-signed trigger would leave no checkpoint at which that trigger's own
-   effectiveness could be enumerated.
+   of which only entry 29 would govern and the other two would be void.
+
+   The two non-verifying fixtures sit at the TAIL of the corpus on purpose. I-D §7.5.1 4d
+   requires every carried envelope to verify, enumerated material included, and enumerated
+   governance currency covers exactly `[0, tree_size(C))` (§7.4) — so a non-verifying envelope
+   anchored at index *i* makes every enumerated claim at a tree size greater than *i* invalid.
+   Placing the fixtures before the genuinely co-signed trigger would leave no checkpoint at
+   which that trigger's own effectiveness could be enumerated. Two negatives exercise the rule
+   from opposite ends: `trigger-effective-non-verifying-candidate-must-fail.ahl`, where the
+   defective envelopes ARE competing candidates for the subject record, and
+   `governance-state-non-verifying-entry-must-fail.ahl`, where no claim-specific rule looks at
+   them at all. Both are refused, which is what "every carried envelope" means.
 7. **Continued history.** A consistency proof from cp20 to cp24 backs
    `assurance.continued_history` on a receipt, and a proof generated for a different pair of
    sizes — genuine, correctly built, about the wrong fact — is rejected. `anchoring.checkpoint`

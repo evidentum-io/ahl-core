@@ -3462,6 +3462,7 @@ impl Enumeration {
 
 fn verify_enumeration(
     material: &Value,
+    governance: &Governance<'_>,
     root: &Hash,
     tree_size: u64,
     what: &'static str,
@@ -3526,6 +3527,24 @@ fn verify_enumeration(
             what,
             detail: "recomputed root differs from the checkpoint root".to_owned(),
         });
+    }
+
+    // I-D §7.5.1 4d: with K established, EVERY carried envelope is verified under the envelope
+    // signature rule of §2.1 at ITS OWN entry index — enumerated material included, and no
+    // subset of it. "An envelope carrying a non-verifying entry, or an entry naming a key not
+    // active at that index, is invalid however many other entries verify... Failure is
+    // `invalid`." So a non-verifying envelope anywhere in an enumerated range invalidates the
+    // run; it is never skipped as uninteresting and never downgraded to a challenge. §8.4 puts
+    // it as two tests in order — "Validity and authorization are separate tests, applied in
+    // that order" — so only a VALID envelope is ever tested for authority, and a challenge is
+    // a valid envelope whose signers hold no authority, never an unreadable one.
+    //
+    // This runs after the range proof, so every envelope verified here has already been shown
+    // to be the entry the log committed at that index, rather than carried bytes claiming to
+    // be. It is the one choke point all three enumerated forms pass through — governance
+    // currency, competing-trigger candidates, and the propagation-completeness prefix.
+    for (offset, envelope) in envelopes.iter().enumerate() {
+        verify_envelope_at(envelope, governance, from_index + offset as u64, budget)?;
     }
 
     Ok(Enumeration { from_index, to_index, entries: envelopes })
@@ -4009,8 +4028,14 @@ fn verify_governance_enumeration(
     budget: &mut Budget,
 ) -> Result<Enumeration> {
     let material = obj(currency, "material")?;
-    let enumeration =
-        verify_enumeration(material, &anchoring.root, anchoring.tree_size, "governance", budget)?;
+    let enumeration = verify_enumeration(
+        material,
+        governance,
+        &anchoring.root,
+        anchoring.tree_size,
+        "governance",
+        budget,
+    )?;
 
     // Format §4: enumerated currency is an authenticated range over **exactly**
     // `[0, tree_size(C))`, where C is the receipt's verified checkpoint. Anything narrower
@@ -4652,19 +4677,22 @@ fn authority_at(
 /// Whether the envelope at `index` is a trigger signed — cryptographically, not just by
 /// claimed `key_id` — by the record's authority.
 ///
-/// Receipt format §5 step 3a splits this into two separate tests, in order:
+/// I-D §8.4 fixes two separate tests, in that order, and this function applies both:
 ///
-/// 1. **Envelope validity**: EVERY entry in `signatures` MUST resolve to a producer key active
-///    at `index` and MUST verify (`crate::verify_envelope`'s AND-all semantics). An envelope
-///    carrying even one non-verifying or unresolvable entry is invalid outright, regardless of
-///    its other entries — a candidate's `signatures[].key_id` naming an authority key proves
-///    nothing on its own, since the `sig` bytes are controlled by whoever assembled the
-///    statement, who may be a party without authority.
-/// 2. **Authorization**, tested only once the envelope is valid: the trigger is authorized iff
-///    AT LEAST ONE of those verified signers is in the authority key set active at `index`.
-///    Core spec §2.3.3 requires a trigger to be "signed by the record's authority", not signed
-///    *exclusively* by authority keys — a trigger genuinely co-signed by the authority AND some
-///    other active producer key is still authorized.
+/// 1. **Envelope validity** (§7.5.1 4d): EVERY entry in `signatures` MUST resolve to a producer
+///    key active at `index` and MUST verify (`crate::verify_envelope`'s AND-all semantics). An
+///    envelope carrying even one non-verifying or unresolvable entry is invalid outright,
+///    regardless of its other entries — a candidate's `signatures[].key_id` naming an authority
+///    key proves nothing on its own, since the `sig` bytes are controlled by whoever assembled
+///    the statement, who may be a party without authority. Failure is `invalid` FOR THE RUN and
+///    is returned as an error, never as `Ok(false)`: reporting it as "unauthorized" would file
+///    a defective envelope under §8.4's challenge outcome, which is reserved for a VALID
+///    envelope whose signers hold no authority.
+/// 2. **Authorization** (§7.5.1 4e), tested only once the envelope is valid: the trigger is
+///    authorized iff AT LEAST ONE of those verified signers is in the authority key set active
+///    at `index`. Core spec §2.3.3 requires a trigger to be "signed by the record's authority",
+///    not signed *exclusively* by authority keys — a trigger genuinely co-signed by the
+///    authority AND some other active producer key is still authorized.
 ///
 /// Splitting the two tests this way, rather than restricting step 1's resolver to authority
 /// keys, is what makes a legitimately co-signed trigger classify correctly: restricting
@@ -4682,7 +4710,7 @@ fn is_authorized_trigger(
     budget.spend(1)?;
     let pubkeys = ctx.governance.producer_pubkeys_at(index);
     if !crate::verify_envelope(envelope, |key_id| pubkeys.get(key_id).cloned())? {
-        return Ok(false);
+        return Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: index });
     }
     let authority = authority_at(ctx, dataset, by_ingestion, index)?;
     let signers: BTreeSet<String> = array(envelope, "signatures")?
@@ -4723,7 +4751,13 @@ fn verify_trigger_authority(
     Ok(())
 }
 
-/// The §3 competing-trigger enumeration required by `trigger-effective`.
+/// The §7.2 competing-trigger enumeration required by `trigger-effective`.
+///
+/// Every candidate's envelope has already been verified at its own entry index by
+/// [`verify_enumeration`] — §7.2: "Every competing candidate's envelope MUST be verified under
+/// Section 2.1 before authority is compared" — so what remains here is purely the §7.5.1 4e
+/// authority comparison over envelopes already known valid. A candidate that fails validity
+/// never reaches this point: it is `invalid` for the run, not a challenge.
 fn verify_competing_triggers(
     ctx: &ClaimCtx<'_>,
     introduction: &Embedded,
@@ -4742,8 +4776,14 @@ fn verify_competing_triggers(
     let competing = obj(material, "competing")?;
     let range_material = obj(competing, "corpus_range")?;
 
-    let enumeration =
-        verify_enumeration(range_material, &root, tree_size, "competing triggers", budget)?;
+    let enumeration = verify_enumeration(
+        range_material,
+        ctx.governance,
+        &root,
+        tree_size,
+        "competing triggers",
+        budget,
+    )?;
 
     // The range must be the complete corpus prefix, or the prefix from the record's
     // introduction — sound because a trigger anchored before the introduction is never
@@ -4762,8 +4802,8 @@ fn verify_competing_triggers(
     // Among the **effective** triggers naming the record, the greatest entry index governs
     // (spec §2.3.3); the subject must be that one.
     //
-    // Effectiveness is decided before the index comparison, not after. A trigger signed by a
-    // key that is not the record's authority anchors as a challenge and is "never traversed" —
+    // Effectiveness is decided before the index comparison, not after. A VALID trigger signed
+    // by a key that is not the record's authority anchors as a challenge, "never traversed" —
     // so it can never displace an earlier valid trigger, however much later it sits in the
     // log. Selecting by index first and filtering afterwards would let anyone who can get a
     // statement anchored unseat the governing trigger of a record they have no authority over.
@@ -5046,7 +5086,14 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, budget: &mut Budget) -> Resul
     // prefix of A, which is what makes D usable without a second proof mechanism.
     let root = parse_hash_hex(text(ctx.anchoring_checkpoint, "root_hash")?)?;
     let tree_size = declared_size;
-    let prefix = verify_enumeration(prefix_material, &root, anchor_size, "corpus prefix", budget)?;
+    let prefix = verify_enumeration(
+        prefix_material,
+        ctx.governance,
+        &root,
+        anchor_size,
+        "corpus prefix",
+        budget,
+    )?;
     if prefix.from_index != 0 || prefix.to_index != tree_size {
         return Err(ReceiptError::RangeProofInvalid {
             what: "corpus prefix",

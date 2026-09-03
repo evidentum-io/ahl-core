@@ -145,11 +145,11 @@
       "file": "trigger-effective-later-challenge-ignored.ahl"
     },
     {
-      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-effective",
-      "embedded_receipts": 1,
-      "expect": "accept",
-      "file": "trigger-effective-non-verifying-signature-ignored.ahl"
+      "expect": "reject",
+      "file": "trigger-effective-non-verifying-candidate-must-fail.ahl",
+      "reason": "envelope signature at entry index 30 did not verify",
+      "rule": "I-D §7.2 / §7.5.1 4d — every competing candidate's envelope must verify before authority is compared"
     },
     {
       "claim_type": "trigger-effective",
@@ -241,6 +241,13 @@
       "embedded_receipts": 0,
       "expect": "accept",
       "file": "governance-state-valid.ahl"
+    },
+    {
+      "claim_type": "governance-state",
+      "expect": "reject",
+      "file": "governance-state-non-verifying-entry-must-fail.ahl",
+      "reason": "envelope signature at entry index 30 did not verify",
+      "rule": "I-D §7.5.1 4d — every enumerated envelope must verify, not only the ones a claim type inspects"
     },
     {
       "claim_type": "governance-state",

@@ -1278,6 +1278,16 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl" => {
             matches!(error, ReceiptError::FormatConflict { .. })
         }
+        // I-D §7.5.1 4d: every enumerated envelope is verified under K at its own entry index.
+        // The two vectors reach the same rule from opposite ends — one where the defective
+        // envelope IS a competing candidate for the subject record (§7.2: "Every competing
+        // candidate's envelope MUST be verified under Section 2.1 before authority is
+        // compared"), one where no claim-specific rule looks at it at all — and both name the
+        // entry index of the first non-verifying envelope in range, never a later one.
+        "trigger-effective-non-verifying-candidate-must-fail.ahl"
+        | "governance-state-non-verifying-entry-must-fail.ahl" => {
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 30 })
+        }
         other => panic!("{other}: negative vector has no rule assertion in the test suite"),
     };
     assert!(fired, "{name}: expected rejection by {rule}, got: {error}");

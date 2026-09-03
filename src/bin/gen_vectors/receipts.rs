@@ -912,15 +912,14 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Accept,
     });
 
-    // Two LATER NON-VERIFYING triggers on F, at entries 30 and 31: entry 30's
-    // `signatures[0].key_id` names `producer-1`'s real key — the genuine `customers` authority
-    // — but `sig` is garbage, and entry 31 pairs a genuine `producer-2` signature with a second
-    // entry naming the authority whose `sig` is likewise garbage. Competing-trigger selection
-    // must verify each candidate's signature cryptographically before comparing authority, or
-    // an envelope that merely reuses a real `key_id` with a non-verifying signature can
-    // displace the genuinely authorized trigger by anchoring at a later index.
+    // Two NON-VERIFYING triggers on F, at entries 30 and 31: entry 30's `signatures[0].key_id`
+    // names `producer-1`'s real key — the genuine `customers` authority — but `sig` is garbage,
+    // and entry 31 pairs a genuine `producer-2` signature with a second entry naming the
+    // authority whose `sig` is likewise garbage. Both are competing candidates for record F,
+    // and I-D §7.2 requires every competing candidate's envelope to be verified under §2.1
+    // BEFORE authority is compared, with §7.5.1 4d making failure `invalid` for the run.
     out.push(Vector {
-        file: "trigger-effective-non-verifying-signature-ignored.ahl",
+        file: "trigger-effective-non-verifying-candidate-must-fail.ahl",
         receipt: Spec {
             claim_type: "trigger-effective",
             subject_index: 29,
@@ -940,21 +939,31 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 key_entry(&keys.producer_1, None, 25),
                 key_entry(&keys.producer_2, None, 28),
             ]),
-            note: "Proves that the co-signed retraction at entry 29 governs record F at cp32, \
-                   EVEN THOUGH two further triggers naming the same record sit at the greater \
-                   entry indexes 30 and 31. Neither of those envelopes verifies: entry 30's \
-                   sole signature entry correctly names `producer-1`'s real key_id — the \
-                   genuine `customers` dataset authority — but its `sig` does not verify \
-                   against that key's actual public key, and entry 31 pairs a genuine \
-                   `producer-2` signature with a second entry naming the authority whose `sig` \
-                   likewise does not verify. A verifier that treated a matching `key_id` as \
-                   proof of authorization, without cryptographically checking the signature it \
-                   is attached to, would let either entry unseat the real trigger merely by \
-                   anchoring later."
+            note: "MUST FAIL. The subject — the genuinely co-signed retraction at entry 29 — is \
+                   itself impeccable, and so is every proof in this receipt: the enumeration is \
+                   complete over [0, 32), the competing range is the introduction-fixed \
+                   [20, 32), and the range proofs open cp32's root. What it cannot survive is \
+                   its own competing-candidate set. Entries 30 and 31 also retract F, and \
+                   neither envelope verifies: entry 30's sole signature names `producer-1`'s \
+                   real key_id — the `customers` authority — with `sig` bytes that key never \
+                   produced, and entry 31 pairs a genuine `producer-2` signature with a second \
+                   entry naming the authority whose `sig` likewise does not verify. I-D §7.2 \
+                   requires every competing candidate's envelope to be verified under §2.1 \
+                   before authority is compared, and §7.5.1 4d makes a non-verifying entry \
+                   `invalid` — \"however many other entries verify\", with a verifier \
+                   forbidden to \"accept a subset\". Treating such a candidate as a mere \
+                   challenge and carrying on would report as proven a governing claim resting \
+                   on material the verifier could not read, so the run is invalid instead. \
+                   `trigger-effective-co-signed-by-authority.ahl` proves the same subject at \
+                   cp30, where the range stops short of both defective entries."
                 .to_owned(),
         }
         .build(corpus, keys),
-        expect: Expect::Accept,
+        expect: Expect::Reject {
+            rule: "I-D §7.2 / §7.5.1 4d — every competing candidate's envelope must verify \
+                   before authority is compared",
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 30 }),
+        },
     });
 
     // Entry 31: the SUBJECT of its own `trigger-effective` claim carries two signature
@@ -1517,6 +1526,48 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         file: "governance-state-valid.ahl",
         receipt: governance_state_valid.clone(),
         expect: Expect::Accept,
+    });
+
+    // The same claim over a range that reaches the two non-verifying fixtures. Nothing here is
+    // a competing candidate — `governance-state` compares no authority at all and applies no
+    // trigger filter — so this is the general form of the rule: enumerated material is
+    // verified envelope by envelope, whatever each envelope happens to say.
+    out.push(Vector {
+        file: "governance-state-non-verifying-entry-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "governance-state",
+            subject_index: 25,
+            anchor: cp32,
+            chain: vec![0, 9, 25, 28],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 32, cp32),
+            claim_material: json!({ "target_index": 26 }),
+            producer_keys: None,
+            note: "MUST FAIL. The claim is the one `governance-state-valid.ahl` proves — \
+                   manifest version 2 is the governance state active at entry index 26 — and \
+                   every governance-specific check still passes: the chain is complete, the \
+                   rotation proof verifies, and no manifest or key statement is anchored in \
+                   (25, 26]. The range is what fails. §4 fixes enumerated material at exactly \
+                   [0, tree_size(C)), and at cp32 that prefix reaches entries 30 and 31, the \
+                   two deliberately non-verifying retractions of record F. Neither is a \
+                   competing candidate — `governance-state` compares no authority and filters \
+                   for no record — and neither is a manifest or a `key` statement, so no \
+                   governance-specific rule looks at them at all. I-D §7.5.1 4d nevertheless \
+                   requires EVERY carried envelope to verify under K at its own entry index, \
+                   so a verifier that checked only the entries it found interesting would \
+                   accept enumerated material it had not actually read. The receipt is invalid \
+                   however sound the governance claim itself is."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4d — every enumerated envelope must verify, not only the ones a \
+                   claim type inspects",
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 30 }),
+        },
     });
 
     // --- governance-key rotation proofs (I-D §7.1, §7.5.1 4b(M)): four ways an element can
