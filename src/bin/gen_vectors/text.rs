@@ -292,7 +292,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 ## The scenarios
 
-The corpus is 47 anchored entries carrying these interlocking scenarios:
+The corpus is 57 anchored entries carrying these interlocking scenarios:
 
 1. **Propagation.** A retroactive correction at entry 6 affects four derived records; the
    successor derivation consuming the *replacement* is correctly outside the affected set.
@@ -390,8 +390,8 @@ ordinary artifact of a real log rather than something a producer must manufactur
    the key state and no type-specific validation at all (§7.5 step 1 exempts a non-verifying
    enumeration-only entry from the version read too), while §7.4 adds that a void entry's
    absence from `governance.chain[]` is not an omission.
-   `governance-state-void-governance-entries.ahl` (over cp40) verifies with four informative
-   items.
+   `governance-state-void-governance-entries.ahl` (over cp40) verifies with five informative
+   items — the void derivation at entry 37 is inside that range too.
 
    A void entry occupies no statement id either, because §2.1's first-wins rule is about
    GOVERNING statements and a void entry never becomes one. Entry 41 is BYTE-FOR-BYTE the
@@ -401,7 +401,7 @@ ordinary artifact of a real log rather than something a producer must manufactur
    inducted; a verifier that claimed the id when it voided the first copy would leave the key
    retired and refuse the subject.
 
-   Entries 43, 44 and 45 are the other half of 4b's rule: an ingestion, a manifest version and
+   Entries 51, 52 and 53 are the other half of 4b's rule: an ingestion, a manifest version and
    a `key` statement that all DO verify while declaring `ahl_version: "0.5"`. A carried
    statement of a revision this document does not define is "`unverifiable` as for any carried
    statement" (§7.1); only the RECEIPT's own `ahl_receipt_version` ends the run (§7.5 step 1).
@@ -414,11 +414,11 @@ ordinary artifact of a real log rather than something a producer must manufactur
    `unverifiable`: the governing `key` statement through the induction (4b) and the manifest
    through the completeness check (4c), which must read the revision before calling its absence
    from the chain an omission — `governance-state-foreign-revision-key-must-fail.ahl` (over
-   cp46) and `governance-state-foreign-revision-manifest-must-fail.ahl` (over cp45), both on
+   cp54) and `governance-state-foreign-revision-manifest-must-fail.ahl` (over cp53), both on
    `governance`; a `governance.chain[]` hop the step-3 walk cannot interpret —
    `statement-anchored-foreign-revision-chain-hop-must-fail.ahl`, on `governance`, where the
    stop lands at the hop's own index; and a non-governance entry an enumerated sweep meets —
-   `governance-state-foreign-revision-entry-must-fail.ahl` (over cp44), on `envelope-validity`,
+   `governance-state-foreign-revision-entry-must-fail.ahl` (over cp52), on `envelope-validity`,
    the assertion of the sweep that met it. In each case the run continues: 4b ends "a later
    required `invalid` still dominates", and the tests pair every path with a §7.6 disagreement
    that does exactly that while the gap stays reported beside it.
@@ -426,17 +426,16 @@ ordinary artifact of a real log rather than something a producer must manufactur
    Which of 4b's two rules applies is settled by the ORDER they are stated in. A
    `governance.chain[]` element "is different: the receipt presents it as its own lineage, so
    its phase-1 failure is `invalid`", and only then does the foreign-revision rule apply — to "A
-   VERIFYING purported governance entry". Entry 46 is the pair to entry 44 that shows it: the
+   VERIFYING purported governance entry". Entry 54 is the pair to entry 52 that shows it: the
    same manifest shape at the same declared revision, carrying a signature no key produced.
    `statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl` hangs it off the same
-   chain position and is `invalid` on `governance`, naming the signature at entry 46 — a
+   chain position and is `invalid` on `governance`, naming the signature at entry 54 — a
    verifier that read the revision member first would report a broken lineage as its own
    capability gap, and any unsigned chain element could then hide behind a version its receipt
-   made up. All nine entries sit past every checkpoint the rest of the corpus anchors at, so no
-   other vector's range reaches them.
+   made up.
 
 12. **Input-set trees take the §2.7 tree rules.** I-D §2.7 states one set of rules, "identical
-   for every AHL tree — outputs, input sets, and dispositions". Entry 37 is a batch whose three
+   for every AHL tree — outputs, input sets, and dispositions". Entry 50 is a batch whose three
    output leaves each commit an input-set tree breaking exactly one of them: leaves out of
    ascending `record` order, a record repeated under two roles, and a `record` that is not a
    family string under §2.1. The three `record-derived-input-set-*-must-fail.ahl` vectors carry
@@ -449,8 +448,9 @@ ordinary artifact of a real log rather than something a producer must manufactur
 
    The cost is stated rather than hidden: closure traversal opens every committed tree it
    reaches and validates it against these same rules before reading an edge, so a closure walk
-   reaching entry 37 fails by §2.7. Every closure scenario this corpus publishes stops at tree
-   size 28 or below, and the three defective trees are deliberately absent from
+   reaching entry 50 fails by §2.7. That is why the batch sits at entry 50 rather than earlier:
+   every propagation prefix this corpus declares stops below it. The three defective trees are
+   deliberately absent from
    `vectors/merkle/`, where they would be read as conforming material. That rejection is
    asserted rather than assumed: `tests/vectors.rs` reassembles the defective material from
    the three receipt vectors that carry it and runs a traversal one entry PAST the conforming

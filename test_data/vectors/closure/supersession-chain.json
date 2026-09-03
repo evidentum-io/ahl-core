@@ -4,7 +4,7 @@
     "root_hash": "sha256:0e01ac1b2462968d079311e992b270729be925f9db3d36034589d5c1b3e93240",
     "tree_size": 13
   },
-  "description": "Revocation closure `supersession-chain` over the 47-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
+  "description": "Revocation closure `supersession-chain` over the 57-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",

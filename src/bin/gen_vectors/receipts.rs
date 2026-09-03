@@ -416,13 +416,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp34 = corpus.anchor("cp34");
     let cp35 = corpus.anchor("cp35");
     let cp37 = corpus.anchor("cp37");
-    let cp38 = corpus.anchor("cp38");
     let cp40 = corpus.anchor("cp40");
     let cp43 = corpus.anchor("cp43");
-    let cp44 = corpus.anchor("cp44");
-    let cp45 = corpus.anchor("cp45");
-    let cp46 = corpus.anchor("cp46");
-    let cp47 = corpus.anchor("cp47");
+    let cp51 = corpus.anchor("cp51");
+    let cp52 = corpus.anchor("cp52");
+    let cp53 = corpus.anchor("cp53");
+    let cp54 = corpus.anchor("cp54");
+    let cp55 = corpus.anchor("cp55");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -1096,9 +1096,9 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             .collect();
         Spec {
             claim_type: "record-derived",
-            subject_index: 37,
-            anchor: cp38,
-            chain: vec![0, 25],
+            subject_index: 50,
+            anchor: cp51,
+            chain: vec![0, 25, 46],
             record_subject: scores(output),
             competing: "not-checked",
             content_binding: "none",
@@ -2237,7 +2237,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    only VERIFYING manifest and key entries in that range\", so the void \
                    manifest at 39 is not an omission from `governance.chain[]` however much it \
                    looks like one. Four void entries are reported as informative items (§7.7) — \
-                   32, 33, 38, 39 — and the governance claim stands."
+                   32, 33, 37, 38, 39 — and the governance claim stands."
                 .to_owned(),
         }
         .build(corpus, keys),
@@ -2273,8 +2273,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    verifying copy at 41 is inducted and its effect applied. A verifier that \
                    claimed the statement id when it voided the first copy would skip the second \
                    as a duplicate, leave `producer-2` retired, and reject this receipt's subject \
-                   envelope. Four void entries are reported as informative items — 32, 33, 38 \
-                   and 39 — and none of them changes the result."
+                   envelope. Five void entries are reported as informative items — 32, 33, \
+                   37, 38 and 39 — and none of them changes the result."
                 .to_owned(),
         }
         .build(corpus, keys),
@@ -2288,16 +2288,16 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
-            anchor: cp44,
-            chain: vec![0, 25],
+            anchor: cp52,
+            chain: vec![0, 25, 46, 47],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 44, cp44),
+            currency_material: corpus.enumeration(0, 52, cp52),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
-            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 43: an \
+            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 51: an \
                    INGESTION, genuinely signed by `producer-1`, declaring `ahl_version: \
                    \"0.5\"`. I-D §7.1 settles what that is worth: a carried statement's \
                    unsupported `ahl_version` \"is `unverifiable` as for any carried statement\", \
@@ -2329,8 +2329,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "statement-anchored",
             subject_index: 26,
-            anchor: cp46,
-            chain: vec![0, 25, 44],
+            anchor: cp54,
+            chain: vec![0, 25, 46, 52],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -2339,13 +2339,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_material: json!({}),
             producer_keys: None,
             note: "MUST NOT VERIFY, and not for a defect. The chain carries three hops: the \
-                   genesis manifest, version 2 at entry 25, and the manifest at entry 44 — \
+                   genesis manifest, version 2 at entry 25, and the manifest at entry 52 — \
                    genuinely signed by `producer-1`, and declaring `ahl_version: \"0.5\"`. I-D \
                    §7.5.1 4b: such a hop \"is not inducted, K is unestablished at and after its \
                    index, the governance finding is `unverifiable`\". The walk therefore stops \
-                   at entry 44 having ESTABLISHED the prefix state — genesis and version 2 — \
+                   at entry 52 having ESTABLISHED the prefix state — genesis and version 2 — \
                    which is what the subject at entry 26 is verified against, and every check \
-                   that would need a key at or after 44 rests on `governance` instead. The \
+                   that would need a key at or after 52 rests on `governance` instead. The \
                    hop VERIFIES, which is what the rule is about — \"A VERIFYING purported \
                    governance entry\" — so phase 1 has already passed by the time the revision \
                    is acted on, and what an unsupported one costs is this finding rather than \
@@ -2368,8 +2368,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "statement-anchored",
             subject_index: 26,
-            anchor: cp47,
-            chain: vec![0, 25, 46],
+            anchor: cp55,
+            chain: vec![0, 25, 46, 54],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -2377,8 +2377,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             currency_material: json!({}),
             claim_material: json!({}),
             producer_keys: None,
-            note: "MUST NOT VERIFY, for a DEFECT. The last hop is the manifest at entry 46: \
-                   well formed, declaring `ahl_version: \"0.5\"` exactly as the hop at entry 44 \
+            note: "MUST NOT VERIFY, for a DEFECT. The last hop is the manifest at entry 54: \
+                   well formed, declaring `ahl_version: \"0.5\"` exactly as the hop at entry 52 \
                    does, and carrying a signature that does not verify. I-D §7.5.1 4b orders \
                    these two rules: \"A `governance.chain[]` element is different: the receipt \
                    presents it as its own lineage, so its phase-1 failure is `invalid`\", and \
@@ -2393,7 +2393,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Reject {
             rule: "I-D §7.5.1 4b — a chain element's phase-1 failure is invalid, whatever \
                    revision it declares",
-            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 46 }),
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 54 }),
         },
     });
 
@@ -2404,16 +2404,16 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
-            anchor: cp45,
-            chain: vec![0, 25],
+            anchor: cp53,
+            chain: vec![0, 25, 46, 47],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 45, cp45),
+            currency_material: corpus.enumeration(0, 53, cp53),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
-            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 44: a manifest \
+            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 52: a manifest \
                    version genuinely signed by `producer-1`, absent from `governance.chain[]`, \
                    and declaring `ahl_version: \"0.5\"`. A verifier that checked completeness \
                    before revision would call that absence an omission and report `invalid` — a \
@@ -2438,17 +2438,17 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
-            anchor: cp46,
-            chain: vec![0, 25],
+            anchor: cp54,
+            chain: vec![0, 25, 46, 47],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 46, cp46),
+            currency_material: corpus.enumeration(0, 54, cp54),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
             note: "MUST NOT VERIFY, and not for a defect. The range reaches the `key` statement \
-                   at entry 45: genuinely signed by `producer-1`, and declaring \
+                   at entry 53: genuinely signed by `producer-1`, and declaring \
                    `ahl_version: \"0.5\"`. I-D §7.5.1 4b: \"A VERIFYING purported \
                    governance entry that declares an `ahl_version` this revision does not define \
                    is neither: it is not inducted, K is unestablished at and after its index, \

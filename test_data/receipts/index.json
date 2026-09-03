@@ -398,7 +398,7 @@
       "embedded_receipts": 0,
       "expect": "verified",
       "file": "governance-state-void-governance-entries.ahl",
-      "informative": 4
+      "informative": 5
     },
     {
       "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
@@ -406,14 +406,14 @@
       "embedded_receipts": 0,
       "expect": "verified",
       "file": "statement-anchored-void-then-verifying-key.ahl",
-      "informative": 4
+      "informative": 5
     },
     {
       "claim_type": "governance-state",
       "expect": "unverifiable",
       "file": "governance-state-foreign-revision-entry-must-fail.ahl",
       "finding": "envelope-validity",
-      "informative": 4,
+      "informative": 6,
       "reason": "unsupported ahl_version: expected `0.4`, got `0.5` (unverifiable, not invalid)",
       "rule": "I-D §7.1 — a carried statement of an unsupported revision is unverifiable, not the end of the run"
     },
@@ -430,7 +430,7 @@
       "expect": "invalid",
       "file": "statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl",
       "finding": "governance",
-      "reason": "envelope signature at entry index 46 did not verify",
+      "reason": "envelope signature at entry index 54 did not verify",
       "rule": "I-D §7.5.1 4b — a chain element's phase-1 failure is invalid, whatever revision it declares"
     },
     {
@@ -438,7 +438,7 @@
       "expect": "unverifiable",
       "file": "governance-state-foreign-revision-manifest-must-fail.ahl",
       "finding": "governance",
-      "informative": 2,
+      "informative": 3,
       "reason": "unsupported ahl_version: expected `0.4`, got `0.5` (unverifiable, not invalid)",
       "rule": "I-D §7.5.1 4b / §7.4 — a verifying governance entry of an unsupported revision is not an omission"
     },

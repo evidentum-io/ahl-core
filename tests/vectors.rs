@@ -42,7 +42,7 @@ use serde_json::{json, Value};
 /// entry from a non-authority key alongside a non-verifying authority-named one. The two
 /// non-verifying fixtures sit at the tail so that enumerated material below them stays
 /// verifiable (I-D §7.5.1 4d).
-const STATEMENT_FILES: [&str; 47] = [
+const STATEMENT_FILES: [&str; 57] = [
     "00-manifest-genesis.json",
     "01-ingestion-customers-a.json",
     "02-ingestion-customers-b.json",
@@ -80,16 +80,26 @@ const STATEMENT_FILES: [&str; 47] = [
     "34-ingestion-customers-e-stale-manifest.json",
     "35-correction-a-to-cross-dataset-replacement.json",
     "36-retraction-cross-dataset-record.json",
-    "37-derivation-batch-defective-input-sets.json",
+    "37-invalid-signature-derivation-k-from-h.json",
     "38-invalid-signature-key-add.json",
     "39-invalid-signature-manifest.json",
     "40-key-retire-producer-2-again.json",
     "41-key-add-producer-2-verifying-copy.json",
     "42-ingestion-customers-g-under-producer-2.json",
-    "43-ingestion-foreign-revision.json",
-    "44-manifest-foreign-revision.json",
-    "45-key-add-foreign-revision.json",
-    "46-manifest-foreign-revision-unsigned.json",
+    "43-derivation-k-from-h-verifying-copy.json",
+    "44-propagation-over-f-retraction-at-cp38.json",
+    "45-propagation-over-f-retraction-at-cp44.json",
+    "46-manifest-v3-resnapshot-producer-2.json",
+    "47-manifest-v3-second-envelope.json",
+    "48-invalid-signature-manifest-v3-third-envelope.json",
+    "49-ingestion-customers-i-under-v3.json",
+    "50-derivation-batch-defective-input-sets.json",
+    "51-ingestion-foreign-revision.json",
+    "52-manifest-foreign-revision.json",
+    "53-key-add-foreign-revision.json",
+    "54-manifest-foreign-revision-unsigned.json",
+    "55-manifest-v4-rotate-log-key.json",
+    "56-ingestion-customers-j-under-v4.json",
 ];
 
 /// The corpus prefix over which closure recomputation is defined.
@@ -100,7 +110,7 @@ const STATEMENT_FILES: [&str; 47] = [
 /// before reading an edge from it, so a walk reaching entry 37 fails by §2.7 — and the trees
 /// are deliberately not published under `vectors/merkle/`, where they would be read as
 /// conforming material. Every published closure scenario stops at tree size 28 or below.
-const CONFORMING_TREE_PREFIX: usize = 37;
+const CONFORMING_TREE_PREFIX: usize = 50;
 
 /// The four published closure scenarios.
 const CLOSURE_FILES: [&str; 6] = [
@@ -159,7 +169,7 @@ fn key_set(vectors: &[Value]) -> BTreeMap<String, String> {
             );
         }
     };
-    for index in [0usize, 25] {
+    for index in [0usize, 25, 46, 55] {
         let manifest = &vectors[index]["envelope"]["payload"];
         absorb(&manifest["keys"]);
         absorb(&manifest["log"]["keys"]);
@@ -222,16 +232,18 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
     let vectors = statement_vectors();
     let m1 = field_str(&vectors[0], "statement_id").expect("vector carries statement_id");
     let m2 = field_str(&vectors[25], "statement_id").expect("vector carries statement_id");
+    let m3 = field_str(&vectors[46], "statement_id").expect("vector carries statement_id");
+    let m4 = field_str(&vectors[55], "statement_id").expect("vector carries statement_id");
 
     // A manifest statement declares no `manifest` member (spec §2.2, receipt §2.3).
-    for index in [0usize, 25] {
+    for index in [0usize, 25, 46, 47, 48, 55] {
         assert!(
             vectors[index]["envelope"]["payload"].get("manifest").is_none(),
             "a manifest statement must not declare a `manifest` member"
         );
     }
     for (index, vector) in vectors.iter().enumerate() {
-        if index == 0 || index == 25 {
+        if matches!(index, 0 | 25 | 46 | 47 | 48 | 55) {
             continue;
         }
         // Entry 34 is the ONE deliberate exception: I-D §2.2 §7.6's negative vector
@@ -241,15 +253,25 @@ fn every_statement_binds_to_the_manifest_version_active_at_its_entry_index() {
         if index == 34 {
             continue;
         }
-        // Entries 39, 44 and 46 are purported MANIFESTS — a manifest statement declares no
-        // `manifest` member (spec §2.3.5): 39 void for want of a verifying signature, 44
-        // verifying but declaring a revision this document does not define, 46 neither signed
+        // Entries 39, 52 and 54 are purported MANIFESTS — a manifest statement declares no
+        // `manifest` member (spec §2.3.5): 39 void for want of a verifying signature, 52
+        // verifying but declaring a revision this document does not define, 54 neither signed
         // nor of a revision this document defines (I-D §7.5.1 4b, 4d).
-        if index == 39 || index == 44 || index == 46 {
+        if matches!(index, 39 | 52 | 54) {
             continue;
         }
         // The manifest version id is the manifest statement's *statement id* (spec §2.3.5).
-        let expected = if index < 25 { m1 } else { m2 };
+        // Version 3 is anchored at entry 46 and version 4 at entry 55, so a statement past
+        // either binds the version active at its own entry index (I-D §2.2).
+        let expected = if index < 25 {
+            m1
+        } else if index < 46 {
+            m2
+        } else if index < 55 {
+            m3
+        } else {
+            m4
+        };
         assert_eq!(
             field_str(&vector["envelope"]["payload"], "manifest")
                 .expect("payload carries manifest"),
@@ -349,19 +371,21 @@ fn no_two_anchored_envelopes_share_a_statement_id() {
     // duplicates occur, the one with the smallest entry index governs and later ones are void."
     // A corpus that broke this could not demonstrate the rules it exists for — a vector
     // asserting that some later entry governs would be asserting the opposite of §2.1.
-    // One pair is deliberate, and it is the pair §2.1's rule does not reach: entry 38 is a
-    // purported `key` statement whose envelope does not verify and entry 41 is the same
-    // statement genuinely signed. §2.1 voids later duplicates among GOVERNING statements, and
+    // Three groups are deliberate. Entries 38 and 41 are a purported `key` statement whose
+    // envelope does not verify and the same statement genuinely signed; entries 37 and 43 are
+    // the same for a derivation. §2.1 voids later duplicates among GOVERNING statements, and
     // I-D §7.5.1 4b admits an enumeration-only entry to the induction "only if its envelope
     // verifies in phase 1" — so the void copy governs nothing, occupies no statement id, and the
-    // verifying copy is inducted. Their ENTRY ids differ, since the signatures do.
-    const VOID_THEN_VERIFYING: [usize; 2] = [38, 41];
+    // verifying copy is inducted. Entries 46, 47 and 48 are §2.1's own case: one manifest
+    // version under three signature sets, of which the smallest entry index governs. Every ENTRY
+    // id in all three groups differs, since the signature sets do.
+    const DUPLICATED_ON_PURPOSE: [usize; 7] = [37, 38, 41, 43, 46, 47, 48];
     let vectors = statement_vectors();
     let mut statements: BTreeMap<String, usize> = BTreeMap::new();
     let mut entries: BTreeMap<String, usize> = BTreeMap::new();
     for (index, vector) in vectors.iter().enumerate() {
         let sid = field_str(vector, "statement_id").expect("statement_id").to_owned();
-        if VOID_THEN_VERIFYING.contains(&index) {
+        if DUPLICATED_ON_PURPOSE.contains(&index) {
             statements.entry(sid).or_insert(index);
             let eid = field_str(vector, "entry_id").expect("entry_id").to_owned();
             assert!(
@@ -385,9 +409,9 @@ fn no_two_anchored_envelopes_share_a_statement_id() {
             );
         }
     }
-    // One statement id fewer than entries: the void copy at 38 and the verifying copy at 41 are
-    // one statement, anchored twice, of which only the verifying one governs.
-    assert_eq!(statements.len(), STATEMENT_FILES.len() - 1);
+    // Four statement ids fewer than entries: two void-then-verifying pairs (37/43 and 38/41)
+    // and one manifest version under three signature sets (46/47/48).
+    assert_eq!(statements.len(), STATEMENT_FILES.len() - 4);
     assert_eq!(entries.len(), STATEMENT_FILES.len());
 
     // The three retractions of record F that exist to exercise signature handling — the
@@ -487,7 +511,7 @@ fn every_statement_signature_verifies() {
     // corpus uses, for the reliance rule of I-D §7.5.1 4d. Entry 46 is the third of that kind
     // and declares `ahl_version: "0.5"` besides, for the ordering rule of 4b: a chain element's
     // phase-1 failure is `invalid` whatever revision it declares.
-    const NON_VERIFYING: [usize; 5] = [32, 33, 38, 39, 46];
+    const NON_VERIFYING: [usize; 7] = [32, 33, 37, 38, 39, 48, 54];
     let vectors = statement_vectors();
     let keys = key_set(&vectors);
     for (index, vector) in vectors.iter().enumerate() {
@@ -834,19 +858,24 @@ fn checkpoints_and_witness_cosignatures_verify_under_the_active_manifest() {
         );
 
         // Format §2.2: the active manifest is the one with the greatest entry index smaller
-        // than the checkpoint's tree size — EXCEPT cp26, whose `active_manifest_entry_index`
-        // is deliberately the OUTGOING manifest (0), not the checkpoint's own true active one
-        // (25): it exists solely as the I-D §7.1 rotation-anchoring EXCEPTION's checkpoint,
-        // which binds to the manifest version active IMMEDIATELY BEFORE the rotating entry
-        // index, never to the version the rotation installs.
+        // than the checkpoint's tree size. Manifest versions are anchored at entries 0, 25, 46
+        // and 55 — entries 47 and 48 are further envelopes of the version at 46, void under
+        // I-D §2.1's first-wins rule, so neither becomes the active version.
+        //
+        // Two checkpoints are deliberate exceptions, and both are rotation-anchoring proofs:
+        // cp26 for the witness-set rotation at entry 25 and cp56 for the log-key rotation at
+        // entry 55. I-D §7.1 binds such a checkpoint to the manifest version active IMMEDIATELY
+        // BEFORE the rotating manifest's own entry index — the OUTGOING state — never to the
+        // version the rotation installs.
         let tree_size = cp["tree_size"].as_u64().expect("tree_size");
         let name = field_str(entry, "name").expect("named checkpoint");
-        let expected = if name == "cp26" {
-            0
-        } else if tree_size > 25 {
-            25
-        } else {
-            0
+        let expected = match name {
+            "cp26" => 0,
+            "cp56" => 46,
+            _ if tree_size > 55 => 55,
+            _ if tree_size > 46 => 46,
+            _ if tree_size > 25 => 25,
+            _ => 0,
         };
         assert_eq!(
             entry["active_manifest_entry_index"].as_u64(),
@@ -1440,7 +1469,7 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
         }
         "statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl" => {
-            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 46 })
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 54 })
         }
         "governance-state-foreign-revision-key-must-fail.ahl"
         | "governance-state-foreign-revision-manifest-must-fail.ahl"
@@ -2401,8 +2430,8 @@ fn a_void_entry_leaves_its_statement_id_free_for_a_verifying_copy() {
 fn a_verifying_foreign_revision_governance_entry_is_unverifiable_either_way() {
     let policy = trust_policy();
     for (name, index) in [
-        ("governance-state-foreign-revision-key-must-fail.ahl", 45usize),
-        ("governance-state-foreign-revision-manifest-must-fail.ahl", 44),
+        ("governance-state-foreign-revision-key-must-fail.ahl", 53usize),
+        ("governance-state-foreign-revision-manifest-must-fail.ahl", 52),
     ] {
         let (_, receipt) = read_receipt(name);
         let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
@@ -2489,11 +2518,11 @@ fn a_verifying_foreign_revision_governance_entry_is_unverifiable_either_way() {
 fn a_chain_hop_that_does_not_verify_is_invalid_whatever_revision_it_declares() {
     let policy = trust_policy();
 
-    // Entries 44 and 46 are the same manifest shape at the same declared revision; only the
+    // Entries 52 and 54 are the same manifest shape at the same declared revision; only the
     // signature differs, and only these two vectors' last hop differs with it.
     let statements = statement_vectors();
     let keys = key_set(&statements);
-    for (index, verifies) in [(44usize, true), (46, false)] {
+    for (index, verifies) in [(52usize, true), (54, false)] {
         let entry = &statements[index];
         assert_eq!(entry["envelope"]["payload"]["ahl_version"], json!("0.5"), "entry {index}");
         assert_eq!(entry["envelope"]["payload"]["type"], json!("manifest"), "entry {index}");
@@ -2521,7 +2550,7 @@ fn a_chain_hop_that_does_not_verify_is_invalid_whatever_revision_it_declares() {
     assert!(
         matches!(
             verify_receipt(&broken, &policy),
-            Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: 46 })
+            Err(ReceiptError::EnvelopeSignatureInvalid { entry_index: 54 })
         ),
         "the failure is named at the hop's own index: {:?}",
         verify_receipt(&broken, &policy)
@@ -2574,8 +2603,8 @@ fn a_carried_statement_of_an_unsupported_revision_does_not_end_the_run() {
         },
     ];
     for ((name, assertion, index), mutate) in [
-        ("statement-anchored-foreign-revision-chain-hop-must-fail.ahl", Assertion::Governance, 44),
-        ("governance-state-foreign-revision-entry-must-fail.ahl", Assertion::EnvelopeValidity, 43),
+        ("statement-anchored-foreign-revision-chain-hop-must-fail.ahl", Assertion::Governance, 52),
+        ("governance-state-foreign-revision-entry-must-fail.ahl", Assertion::EnvelopeValidity, 51),
     ]
     .into_iter()
     .zip(mutations)
@@ -5667,7 +5696,7 @@ fn dedup_keys_on_the_whole_receipt_not_the_envelope() {
 /// rejected over, rather than about a copy that could drift from them.
 fn defective_tree_material() -> TreeMaterial {
     let mut trees = tree_material();
-    let batch = &statement_vectors()[37]["envelope"]["payload"];
+    let batch = &statement_vectors()[50]["envelope"]["payload"];
     let mut outputs: Vec<(u64, Value)> = Vec::new();
     for name in [
         "record-derived-input-set-unsorted-must-fail.ahl",
@@ -5702,10 +5731,10 @@ fn defective_tree_material() -> TreeMaterial {
 /// dispositions." Closure traversal is one of the two consumers of committed tree material, and
 /// it must reject a non-conforming tree exactly as receipt verification does.
 ///
-/// `CONFORMING_TREE_PREFIX` caps every other closure walk in this suite at entry 37, so without
+/// `CONFORMING_TREE_PREFIX` caps every other closure walk in this suite at entry 50, so without
 /// this test nothing shows what happens at the entry the cap exists for — the rejection would
 /// be asserted only about receipts. Here the walk is deliberately run one entry further, over
-/// the SAME committed material the receipt vectors carry: entry 37's outputs tree is well
+/// the SAME committed material the receipt vectors carry: entry 50's outputs tree is well
 /// formed and opens correctly, and the first input-set tree the traversal then opens carries a
 /// `record` that is not a family string, so the traversal stops on the tree rule rather than
 /// reading an edge out of material it has not validated.
@@ -5718,7 +5747,7 @@ fn closure_traversal_rejects_a_non_conforming_committed_tree() {
         .expect("the conforming prefix must traverse cleanly, or the cap is in the wrong place");
 
     let error = edges(&envelopes, &trees, CONFORMING_TREE_PREFIX + 1)
-        .expect_err("a traversal reaching entry 37 must be refused by the §2.7 tree rules");
+        .expect_err("a traversal reaching entry 50 must be refused by the §2.7 tree rules");
     assert!(
         matches!(&error, AhlError::InvalidCommitment(record) if record == "not-a-commitment"),
         "the tree rule that fires must be the one the material breaks, got: {error}"

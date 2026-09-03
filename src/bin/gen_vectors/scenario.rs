@@ -64,17 +64,36 @@ pub const DS_SCORES: &str = "scores";
 pub const LEAF_FORMAT: &str = "ahl-leaf-v2";
 pub const CANONICALIZATION: &str = "jcs";
 
+/// Entry index of the manifest version that rotates the LOG checkpoint-signing key.
+///
+/// Named rather than repeated, because three separate rules read it: which key signs a
+/// checkpoint at a given tree size (§7.5.1 4f), which key set a rotation proof must verify
+/// under (§7.5.1 4b(M), the OUTGOING set), and which manifest version a receipt binds its
+/// `keys.log[]` entries to.
+pub const LOG_ROTATION_INDEX: u64 = 55;
+
+/// Entry index of the manifest version that rotates the WITNESS key set (manifest v2).
+///
+/// A later version that keeps the same witness must repeat the key object v2 declared,
+/// `valid_from_index` included: I-D §7.1 compares witness key objects AS A SET, so re-declaring
+/// the same key at a new index would read as a rotation of the witness set.
+pub const WITNESS_ROTATION_INDEX: u64 = 25;
+
 /// Log id: `SHA-256("ahl-test-log-1")`.
 pub const LOG_SEED: &[u8] = b"ahl-test-log-1";
 
 /// Test key seeds. Deliberately trivial byte patterns: these are public constants and must
 /// be visibly unusable for anything real.
-const SEEDS: [(&str, &str); 5] = [
+const SEEDS: [(&str, &str); 6] = [
     (PRODUCER_1, "0101010101010101010101010101010101010101010101010101010101010101"),
     (PRODUCER_2, "0202020202020202020202020202020202020202020202020202020202020202"),
     ("log-1", "0303030303030303030303030303030303030303030303030303030303030303"),
     (WITNESS_1, "0404040404040404040404040404040404040404040404040404040404040404"),
     (WITNESS_2, "0606060606060606060606060606060606060606060606060606060606060606"),
+    // The incoming log checkpoint-signing key. The manifest version that installs it replaces
+    // `log-1` in `log.keys` outright, which is what makes that version a governance-key
+    // rotation on the LOG side (I-D §7.1, §7.5.1 4b(M)).
+    ("log-2", "0707070707070707070707070707070707070707070707070707070707070707"),
 ];
 
 /// Dataset key for the `keyed` dataset `customers` (spec §2.4).
@@ -90,6 +109,7 @@ pub struct Keys {
     pub producer_1: TestKey,
     pub producer_2: TestKey,
     pub log_1: TestKey,
+    pub log_2: TestKey,
     pub witness_1: TestKey,
     pub witness_2: TestKey,
 }
@@ -101,7 +121,14 @@ impl Keys {
     }
 
     pub fn all(&self) -> Vec<&TestKey> {
-        vec![&self.producer_1, &self.producer_2, &self.log_1, &self.witness_1, &self.witness_2]
+        vec![
+            &self.producer_1,
+            &self.producer_2,
+            &self.log_1,
+            &self.log_2,
+            &self.witness_1,
+            &self.witness_2,
+        ]
     }
 
     /// The corpus key with this `key_id`, whatever its role.
@@ -115,6 +142,19 @@ impl Keys {
             (&self.witness_1, WITNESS_1)
         } else {
             (&self.witness_2, WITNESS_2)
+        }
+    }
+
+    /// The log checkpoint-signing key a given manifest version declares.
+    ///
+    /// Every version up to and including manifest v3 declares `log-1`; the version anchored at
+    /// [`LOG_ROTATION_INDEX`] replaces it with `log-2`, and every version from that index
+    /// onward declares the incoming key alone.
+    pub const fn log_for(&self, manifest_index: u64) -> &TestKey {
+        if manifest_index >= LOG_ROTATION_INDEX {
+            &self.log_2
+        } else {
+            &self.log_1
         }
     }
 }
@@ -141,6 +181,7 @@ pub fn write_and_load_keys(root: &Path) -> Keys {
         producer_1: load(PRODUCER_1),
         producer_2: load(PRODUCER_2),
         log_1: load("log-1"),
+        log_2: load("log-2"),
         witness_1: load(WITNESS_1),
         witness_2: load(WITNESS_2),
     }
@@ -226,7 +267,14 @@ pub fn manifest(
             "checkpoint_cadence": "PT1H",
             "cadence_epoch": T_CADENCE_EPOCH,
             "witness_grace_period": "PT15M",
-            "keys": [ keys.log_1.key_object(0) ],
+            // I-D §7.1 compares log key objects AS A SET, `valid_from_index` included, so a
+            // version that merely re-declares the same key at a new index would read as a
+            // rotation. Every version below [`LOG_ROTATION_INDEX`] therefore repeats the
+            // genesis object verbatim; the version AT that index declares the incoming key
+            // alone, which is the rotation this corpus proves.
+            "keys": [ keys.log_for(entry_index).key_object(
+                if entry_index >= LOG_ROTATION_INDEX { LOG_ROTATION_INDEX } else { 0 },
+            ) ],
         },
         "witnesses": [ {
             "witness_id": witness_id,
