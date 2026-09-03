@@ -1974,6 +1974,36 @@ fn an_unauthenticated_rotation_applies_no_effect_to_the_key_state() {
     }
 }
 
+/// An untrusted `local-policy` witness entry no cosignature names costs the run nothing.
+///
+/// I-D §7.1: "Every key USED in verification MUST appear in `keys` with its source and its
+/// binding." The obligation is conditional on use, so an entry the verifier cannot resolve and
+/// no cosignature reaches for is not a gap in anything the receipt asserts — reporting one
+/// would make a receipt `unverifiable` over a key nothing in it depends on.
+#[test]
+fn an_unused_untrusted_witness_entry_is_not_a_gap() {
+    let policy = trust_policy();
+    let impostor = TestKey::from_seed_hex("impostor", &"ee".repeat(32)).expect("32-byte seed");
+    let (_, mut receipt) = read_receipt("statement-anchored-valid.ahl");
+    // Local policy holds no trusted witness key at all, so this entry cannot be resolved. Every
+    // carried cosignature keeps naming the manifest-chain key it always named.
+    receipt["keys"]["witness"].as_array_mut().expect("witness keys").push(json!({
+        "witness_id": "witness-1",
+        "key_id": impostor.key_id(),
+        "pubkey": impostor.pubkey(),
+        "source": "local-policy",
+    }));
+
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    assert_eq!(
+        report.finding(Assertion::Witnesses).map(|finding| finding.outcome),
+        Some(Outcome::Verified),
+        "an entry no cosignature names is not a witness gap"
+    );
+    assert!(verify_receipt(&receipt, &policy).is_ok());
+}
+
 /// A gap on the PRIMARY checkpoint's cosignatures does not suppress the later checkpoint.
 ///
 /// I-D §7.6 states `continued_history` as its own rule — "`later_checkpoint`,

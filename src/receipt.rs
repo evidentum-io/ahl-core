@@ -3158,7 +3158,7 @@ fn verify_rotation_proof(
     // lifted out of the manifest behind the block's back. Where the receipt is well formed the
     // two agree; where they do not, it is verifying under a key it never declared.
     let (outgoing_log_keys, outgoing_log_attempted, _) =
-        bind_keys_by_group(receipt, policy, manifests, outgoing_index, "log", run)?;
+        bind_keys_by_group(receipt, policy, manifests, outgoing_index, "log")?;
     let signer = outgoing_log_keys.get(checkpoint_key_id).ok_or_else(|| {
         let entry_index =
             outgoing_log_attempted.get(checkpoint_key_id).copied().unwrap_or(outgoing_index);
@@ -4424,7 +4424,6 @@ fn bind_keys_by_group(
     manifests: &[(u64, &Value)],
     active_index: u64,
     group: &str,
-    run: &mut Run,
 ) -> Result<BoundKeys> {
     let keys = obj(receipt, "keys")?;
     let mut bound = BTreeMap::new();
@@ -4446,13 +4445,14 @@ fn bind_keys_by_group(
             // tolerating either would replace a precise report with a missing-key one.
             // An unrecognized `source` is a schema failure of the entry itself and ends the
             // run. A `local-policy` key policy does not hold is the other thing entirely: a gap
-            // in the VERIFIER's configuration (I-D §7.1, §7.7), recorded here and carried past,
-            // so that the cosignatures naming OTHER keys — over this checkpoint or over the
-            // later one — are still evaluated. The key is left unbound and remembered, because
-            // a cosignature naming it is unevaluated rather than bound to a missing key.
-            Err(error @ ReceiptError::WitnessKeyNotTrusted { .. }) => {
+            // in the VERIFIER's configuration (I-D §7.1, §7.7). It is REMEMBERED here and
+            // reported nowhere: §7.1's obligation is conditional on use — "Every key USED in
+            // verification MUST appear in `keys`" — so an entry no cosignature names costs the
+            // run nothing, and the gap is recorded at the cosignature that actually reaches for
+            // it ([`verify_witness_cosignatures`]). The key is left unbound and remembered,
+            // because a cosignature naming it is unevaluated rather than bound to a missing key.
+            Err(ReceiptError::WitnessKeyNotTrusted { .. }) => {
                 untrusted.insert(key_id);
-                run.tolerate::<()>(Err(error))?;
             }
             Err(error @ ReceiptError::Malformed(_)) => return Err(error),
             Err(_) if !bound.contains_key(&key_id) => {
@@ -4552,14 +4552,14 @@ fn verify_checkpoint(
     }
 
     let (log_keys, log_attempted, _) =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log", run)?;
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log")?;
     // A `local-policy` witness key the verifier does not hold is a gap in the VERIFIER's
     // configuration (I-D §7.1, §7.7): it settles the witness assertion `unverifiable` for the
     // cosignatures that name it and stops nothing else — not the checkpoint signature below,
     // which is under a log key, and not the cosignatures naming keys that did resolve.
     run.phase(Assertion::Witnesses);
     let witness_binding =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness", run)?;
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness")?;
     run.phase(Assertion::CheckpointAuthentication);
 
     let signing_key = log_keys.get(text(checkpoint, "key_id")?).ok_or_else(|| {
@@ -4648,11 +4648,16 @@ fn verify_witness_cosignatures(
         let cosignature = witness_cosignature_object(cosignature)?;
         let witness_id = text(cosignature, "witness_id")?.to_owned();
         let key_id = text(cosignature, "key_id")?;
-        // The gap was recorded when the entry failed to bind; what it means HERE is that this
-        // cosignature is unevaluated. Reporting it as a key that failed to bind would state a
-        // defect of the receipt over a key the verifier simply does not hold.
+        // A cosignature naming a key local policy does not hold is where the gap becomes real:
+        // §7.1's key obligation is conditional on USE, so it is recorded here rather than when
+        // the entry failed to bind, and this cosignature is unevaluated. Reporting it as a key
+        // that failed to bind would state a defect of the receipt over a key the verifier
+        // simply does not hold.
         if untrusted.contains(key_id) {
             unevaluated = true;
+            run.tolerate::<()>(Err(ReceiptError::WitnessKeyNotTrusted {
+                key_id: key_id.to_owned(),
+            }))?;
             continue;
         }
         let resolved = witness_keys.get(key_id).ok_or_else(|| ReceiptError::KeyNotBound {
@@ -6858,7 +6863,7 @@ fn authenticate_checkpoint(
     // own active manifest — so this resolves against THIS checkpoint's own `active_index`,
     // exactly as [`verify_checkpoint`] does for the primary checkpoint.
     let (log_keys, log_attempted, _) =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log", run)?;
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "log")?;
     let signing_key = log_keys.get(key_id).ok_or_else(|| {
         let entry_index = log_attempted.get(key_id).copied().unwrap_or(active_index);
         ReceiptError::KeyNotBound { key_id: key_id.to_owned(), entry_index }
@@ -6910,7 +6915,7 @@ fn verify_later_witnesses(
 
     run.phase(Assertion::Witnesses);
     let binding =
-        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness", run)?;
+        bind_keys_by_group(receipt, policy, &governance.manifests, active_index, "witness")?;
     let established = verify_witness_cosignatures(
         anchoring,
         "later_witnesses",
