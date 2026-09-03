@@ -280,12 +280,12 @@
       "file": "trigger-effective-later-challenge-ignored.ahl"
     },
     {
+      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "trigger-effective",
-      "expect": "invalid",
-      "file": "trigger-effective-non-verifying-candidate-must-fail.ahl",
-      "finding": "envelope-validity",
-      "reason": "envelope signature at entry index 32 did not verify",
-      "rule": "I-D §7.2 / §7.5.1 4d — every competing candidate's envelope must verify before authority is compared"
+      "embedded_receipts": 1,
+      "expect": "verified",
+      "file": "trigger-effective-void-candidate.ahl",
+      "informative": 2
     },
     {
       "claim_type": "trigger-effective",
@@ -385,12 +385,12 @@
       "file": "governance-state-valid.ahl"
     },
     {
+      "boundary": "the manifest and key state active at the target index is exactly the presented chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
       "claim_type": "governance-state",
-      "expect": "invalid",
-      "file": "governance-state-non-verifying-entry-must-fail.ahl",
-      "finding": "envelope-validity",
-      "reason": "envelope signature at entry index 32 did not verify",
-      "rule": "I-D §7.5.1 4d — every enumerated envelope must verify, not only the ones a claim type inspects"
+      "embedded_receipts": 0,
+      "expect": "verified",
+      "file": "governance-state-void-entry.ahl",
+      "informative": 2
     },
     {
       "boundary": "the manifest and key state active at the target index is exactly the presented chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
@@ -548,8 +548,9 @@
       "expect": "invalid",
       "file": "governance-key-statement-unsigned-common-field-must-fail.ahl",
       "finding": "governance",
-      "reason": "envelope signature at entry index 9 did not verify",
-      "rule": "I-D §7.5.1 4b — phase 1 (signature) precedes phase 2 (type-specific validation) on enumerated key statements"
+      "informative": 1,
+      "reason": "key `sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827` is not bound to a manifest key object at entry index 9",
+      "rule": "I-D §7.1 / §7.5.1 4b — a key bound to a void governance statement resolves against nothing"
     },
     {
       "claim_type": "governance-state",

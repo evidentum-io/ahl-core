@@ -21,7 +21,7 @@ use ahl_core::closure::{affected_set, edges, RecordRef, TreeMaterial};
 use ahl_core::descriptor;
 use ahl_core::receipt::{
     verify_receipt, verify_receipt_report, AdaptorCapabilities, AdaptorProfile, Assertion, Limits,
-    Outcome, ReceiptError, TrustPolicy, TrustedWitnessKey,
+    Outcome, ReceiptError, TrustPolicy, TrustedWitnessKey, VoidReason,
 };
 use ahl_core::tree::ValidatedLeafSet;
 use ahl_core::{
@@ -1397,7 +1397,7 @@ fn assert_specific_rule(name: &str, rule: &str, error: &ReceiptError) {
         // outcome of the phase order I-D §7.5.1 4b forbids, and a test that accepted either
         // would be blind to exactly the regression the vector exists to catch.
         "governance-key-statement-unsigned-common-field-must-fail.ahl" => {
-            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 9 })
+            matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. })
         }
         "governance-key-rotation-proof-witness-key-unlisted-must-fail.ahl" => {
             matches!(error, ReceiptError::KeyNotBound { entry_index: 0, .. })
@@ -1635,24 +1635,45 @@ fn the_declared_and_enumerated_receipts_over_entry_19_carry_one_envelope() {
 /// material — it is a key the complete record shows was never in force — so it stays `invalid`.
 ///
 /// A vector cannot demonstrate this, because a conforming corpus anchors no such envelope: the
-/// case is reachable only by mutation.
+/// I-D §7.5.1 4d's reliance rule over an entry the receipt does not rest on: an envelope naming
+/// a key not active at its own index is VOID, not `invalid`.
+///
+/// "For every other carried envelope — a purported competing-trigger envelope, an entry of a
+/// propagation prefix, any entry an enumeration reveals — a non-verifying envelope is VOID
+/// (Section 2.1): it is excluded before any authority comparison, it is never effective and
+/// never traversed, it does not affect the result, and the verifier reports it as an informative
+/// item naming its entry index." The reason is the log contract: "a log anchors opaque bytes and
+/// validates none, so were a void entry a defect of every later receipt, any party able to
+/// anchor one envelope could disable every enumerated claim of that log from that index on."
 #[test]
-fn an_unresolvable_producer_key_is_invalid_under_enumerated_governance() {
-    assert_rejects_anchored(
-        "governance-state-valid.ahl",
-        // Entry 3 is an ordinary derivation inside the enumerated range, and not a chain hop.
-        // Corrupting the `key_id` its signature names — not the signature — leaves the
-        // envelope well formed and its named key unresolvable under any state.
-        |r| {
-            corrupt(
-                &mut r["governance"]["currency"]["material"]["entries"][3]["envelope"]
-                    ["signatures"][0]["key_id"],
-            );
-        },
-        |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 3 }),
-        "I-D §7.5.1 4c/4d — under enumerated governance an unresolvable key is invalid, never \
-         the §7.4 unverifiable outcome",
+fn an_unresolvable_key_on_a_non_relied_entry_is_void() {
+    let (_, mut receipt) = read_receipt("governance-state-valid.ahl");
+    // Entry 3 is an ordinary derivation inside the enumerated range, and not a chain hop.
+    // Corrupting the `key_id` its signature names — not the signature — leaves the envelope
+    // well formed and its named key unresolvable under any state.
+    corrupt(
+        &mut receipt["governance"]["currency"]["material"]["entries"][3]["envelope"]["signatures"]
+            [0]["key_id"],
     );
+    reanchor(&mut receipt);
+    let anchor = entry_id(&receipt["governance"]["chain"][0]["envelope"]);
+    receipt["governance"]["genesis_entry_id"] = json!(&anchor);
+    let policy = TrustPolicy { genesis_entry_id: anchor, ..trust_policy() };
+
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    assert!(verify_receipt(&receipt, &policy).is_ok());
+    let item = report
+        .informative
+        .iter()
+        .find(|item| item.entry_index == 3)
+        .expect("the void entry is reported by index");
+    assert_eq!(item.reason, VoidReason::KeyNotActive);
+    assert!(item.receipt_path.is_empty());
+    // An informative item is not a finding: it belongs to no assertion and never enters the
+    // reduction, so it cannot be what `dominating()` returns.
+    assert!(report.findings.iter().all(|finding| finding.outcome == Outcome::Verified));
+    assert!(report.dominating().is_none());
 }
 
 #[test]
@@ -2174,6 +2195,99 @@ fn two_independent_causes_agree_between_the_report_and_the_error() {
     assert_eq!(error.assertion(), dominating.assertion);
     assert_eq!(Some(error.to_string()), dominating.detail, "one fact, reported once");
     assert!(matches!(error, ReceiptError::WitnessKeyNotTrusted { .. }), "{error}");
+}
+
+/// Every vector's void entries are reported, counted, and consequential nowhere.
+///
+/// I-D §7.7: "For each void entry it inspected (Section 7.5.1 4d) the verifier MUST report one
+/// informative item carrying the entry index and the failure reason... Informative items are not
+/// findings: they belong to no required assertion, carry no result value, and never enter the
+/// reduction. Their number is the number of void entries inspected." `index.json` records that
+/// number for the vectors that have one, and no number for the vectors that have none.
+#[test]
+fn every_vector_reports_the_void_entries_it_inspected() {
+    let policy = trust_policy();
+    let mut with_void = 0;
+    for entry in receipt_index()["vectors"].as_array().expect("vectors") {
+        let name = field_str(entry, "file").expect("file");
+        let (_, receipt) = read_receipt(name);
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        let declared = entry.get("informative").and_then(Value::as_u64).unwrap_or(0);
+        assert_eq!(report.informative.len() as u64, declared, "{name}");
+        if declared > 0 {
+            with_void += 1;
+        }
+        // Reported, and consequential nowhere: an informative item belongs to no assertion, so
+        // it can change neither the reduction nor which finding decided it.
+        let findings_before = report.findings.len();
+        assert_eq!(
+            report.result,
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.counts_toward_result())
+                .map(|finding| finding.outcome)
+                .max()
+                .unwrap_or(Outcome::Verified),
+            "{name}: the result is the reduction of the FINDINGS alone"
+        );
+        assert_eq!(report.findings.len(), findings_before);
+    }
+    assert!(with_void >= 3, "the corpus must exercise the reliance rule, got {with_void}");
+}
+
+/// The two vectors the erratum turns from `invalid` into `verified`, and what they now report.
+///
+/// I-D §7.5.1 4d: a non-verifying envelope the receipt does not rest on "is VOID (Section 2.1):
+/// it is excluded before any authority comparison, it is never effective and never traversed, it
+/// does not affect the result". Entries 32 and 33 of this corpus are the two deliberately
+/// non-verifying retractions of record F; both vectors carry them inside an enumerated range,
+/// and neither rests on either.
+#[test]
+fn a_void_entry_in_a_range_leaves_the_result_alone() {
+    let policy = trust_policy();
+    for name in ["trigger-effective-void-candidate.ahl", "governance-state-void-entry.ahl"] {
+        let (_, receipt) = read_receipt(name);
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(report.result, Outcome::Verified, "{name}: {:#?}", report.findings);
+        assert!(report.verdict.is_some(), "{name}");
+        assert!(report.dominating().is_none(), "{name}: nothing decided against this receipt");
+
+        let indexes: Vec<u64> = report.informative.iter().map(|item| item.entry_index).collect();
+        assert_eq!(indexes, vec![32, 33], "{name}: both void entries are named by index");
+        for item in &report.informative {
+            assert_eq!(item.reason, VoidReason::SignatureInvalid, "{name}");
+            assert!(item.receipt_path.is_empty(), "{name}: carried by the receipt itself");
+        }
+        assert!(verify_receipt(&receipt, &policy).is_ok(), "{name}");
+    }
+}
+
+/// A void governance statement applies no effect, and a receipt that RESTS on that effect is
+/// `invalid` — on its own key listing, not on the void entry.
+///
+/// I-D §7.5.1 4b: an enumeration-only entry "ENTERS the induction only if its envelope verifies
+/// in phase 1... a purported `manifest` or `key` entry that does not verify is void — not
+/// inducted, no effect on K, the walk continues past it". §7.5 step 1 exempts it from the
+/// version read and from §2.2's common fields until that check passes, so the vector's second
+/// defect — a missing `issued_at` — is never reached.
+#[test]
+fn a_receipt_resting_on_a_void_key_statement_is_invalid_on_its_own_listing() {
+    let policy = trust_policy();
+    let (_, receipt) = read_receipt("governance-key-statement-unsigned-common-field-must-fail.ahl");
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid);
+    assert_eq!(
+        report.informative.iter().map(|item| item.entry_index).collect::<Vec<_>>(),
+        vec![9],
+        "the void statement is reported as an informative item"
+    );
+    let error = verify_receipt(&receipt, &policy).expect_err("the listing rests on it");
+    assert!(matches!(error, ReceiptError::KeyNotBound { entry_index: 9, .. }), "{error}");
+    assert!(
+        !error.to_string().contains("issued_at"),
+        "a void entry takes no type-specific validation at all: {error}"
+    );
 }
 
 /// Every non-verified vector's dominating finding is a cause, never a derivation — the fallback
@@ -3191,6 +3305,97 @@ fn the_challenge_trigger_is_anchored_but_never_authorised() {
 // case isolates one rule rather than tripping several at once. These complement the receipt
 // vectors on disk: the vectors are the portable conformance artifacts, these are the unit
 // coverage of the branches a well-formed corpus never reaches.
+
+#[test]
+fn a_foreign_version_subject_is_unverifiable_even_with_a_corrupted_id() {
+    // I-D §7.5 step 1 / §2.2: "A verifier MUST likewise check each carried statement's
+    // ahl_version before validating that statement. Any value other than 0.4 yields
+    // unverifiable." Before the fix, id recomputation ran first, so a foreign-version subject
+    // whose copied id also happened to be wrong came out `invalid` instead.
+    assert_rejects(
+        "statement-anchored-valid.ahl",
+        |r| {
+            r["envelope"]["payload"]["ahl_version"] = json!("0.3");
+            corrupt(&mut r["subject"]["statement_id"]);
+        },
+        |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
+        "§7.5 step 1 / §2.2 — ahl_version is checked before id recomputation",
+    );
+}
+
+/// Every file under `root`, keyed by its path relative to `root`, with its exact bytes.
+fn collect_generated_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).expect("read_dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let relative = path.strip_prefix(root).expect("entry is under root").to_path_buf();
+                out.insert(relative, std::fs::read(&path).expect("read generated file"));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn the_generator_is_deterministic_across_runs() {
+    // "Two consecutive runs must leave `test_data/` byte-identical — if they do not, that is a
+    // bug" (test_data/README.md). Proven here, in CI, by running the generator into two fresh
+    // temporary directories and diffing byte-for-byte, rather than asserted only in that
+    // sentence. The third comparison — against the COMMITTED `test_data/` — is what catches a
+    // generator change whose output was never regenerated onto disk.
+    let base = std::env::temp_dir()
+        .join(format!("ahl-core-gen-vectors-determinism-{}", std::process::id()));
+    let run_a = base.join("run-a");
+    let run_b = base.join("run-b");
+    let _cleanup = TempDirGuard(base);
+
+    for dir in [&run_a, &run_b] {
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_gen_vectors"))
+            .arg(dir)
+            .status()
+            .expect("gen_vectors binary runs");
+        assert!(status.success(), "gen_vectors exited with {status} writing to {}", dir.display());
+    }
+
+    let a = collect_generated_files(&run_a);
+    let b = collect_generated_files(&run_b);
+    assert_eq!(
+        a.keys().collect::<Vec<_>>(),
+        b.keys().collect::<Vec<_>>(),
+        "two generator runs must write the same set of files"
+    );
+    for (path, bytes_a) in &a {
+        assert_eq!(
+            bytes_a,
+            &b[path],
+            "{}: two generator runs produced different bytes — the generator has hidden \
+             nondeterminism",
+            path.display()
+        );
+    }
+
+    let committed = collect_generated_files(&test_data());
+    assert_eq!(
+        a.keys().collect::<Vec<_>>(),
+        committed.keys().collect::<Vec<_>>(),
+        "the generator's file set must match the committed test_data/ exactly — regenerate \
+         with `cargo run --bin gen_vectors`"
+    );
+    for (path, bytes) in &a {
+        assert_eq!(
+            bytes,
+            &committed[path],
+            "{}: committed test_data/ is stale relative to the generator — regenerate with \
+             `cargo run --bin gen_vectors`",
+            path.display()
+        );
+    }
+}
 
 /// Apply `mutate` to a named valid receipt and assert the rejection it must produce.
 fn assert_rejects(
@@ -5348,114 +5553,26 @@ impl Drop for TempDirGuard {
     }
 }
 
-/// Every file under `root`, keyed by its path relative to `root`, with its exact bytes.
-fn collect_generated_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
-        for entry in std::fs::read_dir(dir).expect("read_dir") {
-            let path = entry.expect("dir entry").path();
-            if path.is_dir() {
-                walk(&path, root, out);
-            } else {
-                let relative = path.strip_prefix(root).expect("entry is under root").to_path_buf();
-                out.insert(relative, std::fs::read(&path).expect("read generated file"));
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    walk(root, root, &mut out);
-    out
-}
-
+/// I-D §7.5 step 1, as the erratum leaves it: an entry an enumeration alone carries has its
+/// version read "only after its own-index signature check has passed (Section 7.5.1 4b and 4d):
+/// one that does not verify is void with no version or type validation at all, so that no
+/// non-verifying enumeration-only entry can make a run `unverifiable` merely by declaring a
+/// version."
+///
+/// Mutating a carried entry's payload therefore no longer reaches the version read at all: the
+/// entry is no longer the one the log committed at that index, and the range proof says so
+/// first. That ordering is the point — the version of an entry nothing has authenticated is not
+/// a fact about the receipt.
 #[test]
-fn the_generator_is_deterministic_across_runs() {
-    // "Two consecutive runs must leave `test_data/` byte-identical — if they do not, that is a
-    // bug" (test_data/README.md). Proven here, in CI, by running the generator into two fresh
-    // temporary directories and diffing byte-for-byte, rather than asserted only in that
-    // sentence. The third comparison — against the COMMITTED `test_data/` — is what catches a
-    // generator change whose output was never regenerated onto disk.
-    let base = std::env::temp_dir()
-        .join(format!("ahl-core-gen-vectors-determinism-{}", std::process::id()));
-    let run_a = base.join("run-a");
-    let run_b = base.join("run-b");
-    let _cleanup = TempDirGuard(base);
-
-    for dir in [&run_a, &run_b] {
-        let status = std::process::Command::new(env!("CARGO_BIN_EXE_gen_vectors"))
-            .arg(dir)
-            .status()
-            .expect("gen_vectors binary runs");
-        assert!(status.success(), "gen_vectors exited with {status} writing to {}", dir.display());
-    }
-
-    let a = collect_generated_files(&run_a);
-    let b = collect_generated_files(&run_b);
-    assert_eq!(
-        a.keys().collect::<Vec<_>>(),
-        b.keys().collect::<Vec<_>>(),
-        "two generator runs must write the same set of files"
-    );
-    for (path, bytes_a) in &a {
-        assert_eq!(
-            bytes_a,
-            &b[path],
-            "{}: two generator runs produced different bytes — the generator has hidden \
-             nondeterminism",
-            path.display()
-        );
-    }
-
-    let committed = collect_generated_files(&test_data());
-    assert_eq!(
-        a.keys().collect::<Vec<_>>(),
-        committed.keys().collect::<Vec<_>>(),
-        "the generator's file set must match the committed test_data/ exactly — regenerate \
-         with `cargo run --bin gen_vectors`"
-    );
-    for (path, bytes) in &a {
-        assert_eq!(
-            bytes,
-            &committed[path],
-            "{}: committed test_data/ is stale relative to the generator — regenerate with \
-             `cargo run --bin gen_vectors`",
-            path.display()
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// I-D revision 0.4 §7.5 step 1 / §2.2 / §7.6: version-first ordering and manifest binding
-// ---------------------------------------------------------------------------
-
-#[test]
-fn a_foreign_version_subject_is_unverifiable_even_with_a_corrupted_id() {
-    // I-D §7.5 step 1 / §2.2: "A verifier MUST likewise check each carried statement's
-    // ahl_version before validating that statement. Any value other than 0.4 yields
-    // unverifiable." Before the fix, id recomputation ran first, so a foreign-version subject
-    // whose copied id also happened to be wrong came out `invalid` instead.
-    assert_rejects(
-        "statement-anchored-valid.ahl",
-        |r| {
-            r["envelope"]["payload"]["ahl_version"] = json!("0.3");
-            corrupt(&mut r["subject"]["statement_id"]);
-        },
-        |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
-        "§7.5 step 1 / §2.2 — ahl_version is checked before id recomputation",
-    );
-}
-
-#[test]
-fn a_foreign_version_enumerated_envelope_is_unverifiable() {
-    // The same rule applied to every enumerated envelope — governance currency, competing
-    // triggers, and propagation prefixes alike — not only the subject and the governance
-    // chain. `governance-state-valid.ahl` carries enumerated governance currency material.
+fn an_enumerated_entrys_version_is_read_only_behind_its_own_range_proof() {
     assert_rejects(
         "governance-state-valid.ahl",
         |r| {
             r["governance"]["currency"]["material"]["entries"][0]["envelope"]["payload"]
                 ["ahl_version"] = json!("0.3");
         },
-        |e| matches!(e, ReceiptError::UnsupportedVersion { field: "ahl_version", .. }),
-        "§7.5 step 1 / §2.2 — every enumerated envelope's ahl_version is checked",
+        |e| matches!(e, ReceiptError::RangeProofInvalid { what: "governance", .. }),
+        "§7.5 step 1 — an enumeration-only entry's version is read behind its own-index checks",
     );
 }
 

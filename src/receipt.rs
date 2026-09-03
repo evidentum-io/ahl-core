@@ -447,6 +447,57 @@ impl Finding {
     }
 }
 
+/// Why a carried entry was VOID (I-D §2.1, §7.5.1 4d).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum VoidReason {
+    /// An entry of the envelope's `signatures` array did not verify over JCS(payload).
+    SignatureInvalid,
+    /// An entry named a key that is not active at that envelope's own entry index.
+    KeyNotActive,
+}
+
+impl VoidReason {
+    /// The token this reason is reported under.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::SignatureInvalid => "signature-invalid",
+            Self::KeyNotActive => "key-not-active",
+        }
+    }
+}
+
+impl core::fmt::Display for VoidReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// One entry the run inspected and found VOID (I-D §2.1, §7.5.1 4d, §7.7).
+///
+/// §7.5.1 4d decides what a non-verifying envelope means by RELIANCE: for an envelope the
+/// receipt rests on — its subject, an embedded receipt's subject, a `governance.chain[]`
+/// element — failure is `invalid`; "for every other carried envelope — a purported
+/// competing-trigger envelope, an entry of a propagation prefix, any entry an enumeration
+/// reveals — a non-verifying envelope is VOID: it is excluded before any authority comparison,
+/// it is never effective and never traversed, it does not affect the result, and the verifier
+/// reports it as an informative item naming its entry index."
+///
+/// §7.7: "Informative items are not findings: they belong to no required assertion, carry no
+/// result value, and never enter the reduction. Their number is the number of void entries
+/// inspected."
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InformativeItem {
+    /// The entry index of the void entry.
+    pub entry_index: u64,
+    /// Why it is void.
+    pub reason: VoidReason,
+    /// The receipt whose material carried it, in [`Finding::receipt_path`]'s terms.
+    pub receipt_path: Vec<String>,
+}
+
 /// What a completed verification run produced: one scalar result, and the findings it reduces
 /// from (I-D §7.7).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -457,6 +508,14 @@ pub struct Report {
     /// One finding per required assertion the run reached, ordered by receipt path and then by
     /// [`Assertion::ORDER`].
     pub findings: Vec<Finding>,
+    /// The void entries the run inspected (I-D §7.5.1 4d), in the order it inspected them.
+    ///
+    /// Not findings: they belong to no required assertion, carry no result value, never enter
+    /// the reduction and never appear in [`Self::dominating`]. A run whose only unusual feature
+    /// is a void entry is `verified` — "a log anchors opaque bytes and validates none, so were a
+    /// void entry a defect of every later receipt, any party able to anchor one envelope could
+    /// disable every enumerated claim of that log from that index on."
+    pub informative: Vec<InformativeItem>,
     /// The rendered claim boundary, present if and only if [`Self::result`] is
     /// [`Outcome::Verified`].
     ///
@@ -1691,6 +1750,16 @@ struct Run {
     /// Rejections recorded as findings and not propagated ([`Run::tolerate`]), so that
     /// [`verify_receipt`] can still return the one that decided the result.
     deferred: Vec<Tolerated>,
+    /// The void entries inspected so far (I-D §7.5.1 4d), reported alongside the findings and
+    /// entering neither the reduction nor any assertion.
+    informative: Vec<InformativeItem>,
+    /// The entry indexes those items are about.
+    ///
+    /// A void entry is "excluded before any authority comparison... never effective and never
+    /// traversed", so every later reader of the same material — the competing-trigger
+    /// comparison, the closure walk over a propagation prefix — asks this. Keyed by entry index
+    /// because one index is one envelope: the range proof over a checkpoint fixes which.
+    void_indexes: BTreeSet<u64>,
 }
 
 /// One rejection [`Run::tolerate`] recorded and carried on from: the assertion and receipt path
@@ -1773,6 +1842,8 @@ impl Run {
             path: Vec::new(),
             scope: None,
             blocked: Vec::new(),
+            informative: Vec::new(),
+            void_indexes: BTreeSet::new(),
             deferred: Vec::new(),
         }
     }
@@ -1879,6 +1950,22 @@ impl Run {
     /// reduction cannot decide the result whatever its value, so it is recorded and the run
     /// carries on. That is exactly an embedded receipt's content binding, which "is never a
     /// required assertion of the receipt that embeds it".
+    /// Record one void entry (I-D §2.1, §7.5.1 4d): reported, and consequential nowhere.
+    fn void(&mut self, entry_index: u64, reason: VoidReason) {
+        if self.void_indexes.insert(entry_index) {
+            self.informative.push(InformativeItem {
+                entry_index,
+                reason,
+                receipt_path: self.path.clone(),
+            });
+        }
+    }
+
+    /// Whether an entry at this index was found void earlier in the run.
+    fn is_void(&self, entry_index: u64) -> bool {
+        self.void_indexes.contains(&entry_index)
+    }
+
     fn tolerate<T>(&mut self, result: Result<T>) -> Result<Option<T>> {
         let error = match result {
             Ok(value) => return Ok(Some(value)),
@@ -1968,6 +2055,7 @@ impl Run {
         Report {
             result,
             findings: self.findings,
+            informative: self.informative,
             // I-D §7.7: only `verified` may be rendered in words that assert the property, so
             // no boundary is carried for the other two values.
             verdict: if result == Outcome::Verified { verdict } else { None },
@@ -3816,10 +3904,41 @@ fn read_chain<'a>(
             if !governing_ids.insert(statement_id(envelope)?) {
                 continue;
             }
-            walked_indexes.insert(index);
+            // I-D §7.5.1 4b: an entry the enumeration alone reveals "is selected for the walk
+            // by its purported `type`, but it ENTERS the induction only if its envelope verifies
+            // in phase 1 under K as established so far: a purported `manifest` or `key` entry
+            // that does not verify is void (Section 2.1) — not inducted, no effect on K, the
+            // walk continues past it". Phase 1 therefore comes FIRST, before the version read
+            // and before §2.2's common fields, which §7.5 step 1 exempts an enumeration-only
+            // entry from "until its own-index signature check has passed".
             let payload = payload_of(envelope)?;
-            check_ahl_version(payload)?;
-            verify_governance_phase_1(envelope, &manifests, &events, index, mode, run)?;
+            let keys = producer_keys_at_in(&manifests, &events, index);
+            run.spend(1)?;
+            let check = crate::check_envelope(envelope, |key_id| {
+                keys.get(key_id).map(|bound| bound.pubkey.clone())
+            })?;
+            if !matches!(check, crate::EnvelopeCheck::Verified) {
+                run.void(
+                    index,
+                    if matches!(check, crate::EnvelopeCheck::SignatureInvalid) {
+                        VoidReason::SignatureInvalid
+                    } else {
+                        VoidReason::KeyNotActive
+                    },
+                );
+                continue;
+            }
+            walked_indexes.insert(index);
+            // Verifying: the version read is now due, and an unsupported one is `unverifiable`
+            // for a statement this document cannot interpret — "not inducted, K is unestablished
+            // at and after its index, the governance finding is `unverifiable`". So the walk
+            // stops here exactly as it does at a rotation it could not authenticate.
+            if let Err(error @ ReceiptError::UnsupportedVersion { .. }) = check_ahl_version(payload)
+            {
+                run.tolerate::<()>(Err(error))?;
+                unestablished_from = Some(index);
+                break;
+            }
             common_payload_fields(payload)?;
             // Phase 2 (4b(K)) and phase 3 (the producer-key effect), in that order.
             events.push(validate_key_statement(
@@ -5200,18 +5319,16 @@ fn decode_enumeration(
             });
         }
         let envelope = obj(entry, "envelope")?;
-        // I-D §7.5 step 1 / §7.1: "A verifier MUST likewise check each carried statement's
-        // `ahl_version` BEFORE VALIDATING THAT STATEMENT. Any value other than `0.4` yields
-        // `unverifiable`." That is a version READ, decided from the bytes alone and reaching
-        // no conclusion about the statement, and §7.1 places it ahead of everything the
-        // document defines — so it stays here, at the decode, rather than moving behind a
-        // signature. Nothing else about the payload is looked at: §2.2's common payload
-        // fields are TYPE-SPECIFIC VALIDATION, which 4b's phase discipline forbids on
-        // material whose signature has not verified, so they run in phase 2 — inside the
-        // induction for a `key` statement, and after 4d for every other enumerated envelope
-        // ([`verify_enumerated_envelopes`]).
-        let entry_payload = payload_of(envelope)?;
-        check_ahl_version(entry_payload)?;
+        // The version read does NOT happen here. I-D §7.5 step 1 exempts an entry an
+        // enumeration alone carries: its "version is read only after its own-index signature
+        // check has passed (Section 7.5.1 4b and 4d): one that does not verify is void with no
+        // version or type validation at all, so that no non-verifying enumeration-only entry can
+        // make a run `unverifiable` merely by declaring a version." So the read moves behind the
+        // signature — into 4b's phase 2 for a governance statement the induction takes, and
+        // after 4d's own-index check for every other enumerated envelope
+        // ([`verify_enumerated_envelopes`]) — and the decode reads nothing of the payload but
+        // its shape.
+        payload_of(envelope)?;
         envelopes.push(envelope.clone());
     }
 
@@ -5282,14 +5399,17 @@ fn verify_enumerated_envelopes(
 ) -> Result<()> {
     // I-D §7.5.1 4d: with K established, every carried envelope that is NOT part of the
     // induction is verified under the envelope signature rule of §2.1 at ITS OWN entry index —
-    // enumerated material included, and no subset of it. "An envelope carrying a non-verifying
-    // entry, or an entry naming a key not active at that index, is invalid however many other
-    // entries verify... Failure is `invalid`." So a non-verifying envelope anywhere in an
-    // enumerated range invalidates the run; it is never skipped as uninteresting and never
-    // downgraded to a challenge. §8.4 puts it as two tests in order — "Validity and
+    // enumerated material included, and no subset of it. What a failure MEANS is decided by
+    // RELIANCE: "For every other carried envelope — a purported competing-trigger envelope, an
+    // entry of a propagation prefix, any entry an enumeration reveals — a non-verifying envelope
+    // is VOID (Section 2.1): it is excluded before any authority comparison, it is never
+    // effective and never traversed, it does not affect the result, and the verifier reports it
+    // as an informative item naming its entry index." Nothing here is an envelope the receipt
+    // rests on, so nothing here is `invalid`: the run carries on and the entry is recorded.
+    // §8.4 still puts validity and authority as two tests in order — "Validity and
     // authorization are separate tests, applied in that order" — so only a VALID envelope is
-    // ever tested for authority, and a challenge is a valid envelope whose signers hold no
-    // authority, never an unreadable one.
+    // ever tested for authority, and a void one "is never effective, whoever signed it, and it
+    // is not a challenge" (4e).
     //
     // This runs after the range proof, so every envelope verified here has already been shown
     // to be the entry the log committed at that index, rather than carried bytes claiming to
@@ -5324,7 +5444,14 @@ fn verify_enumerated_envelopes(
         if governance.walked_indexes.contains(&index) || verified_directly.contains(&index) {
             continue;
         }
-        verify_envelope_at(envelope, governance, index, run)?;
+        if !evaluate_envelope_at(envelope, governance, index, run)? {
+            // Void: no version read, no type validation, no effect anywhere. §7.5 step 1 exempts
+            // an enumeration-only entry from the version read "until its own-index signature
+            // check has passed... so that no non-verifying enumeration-only entry can make a run
+            // `unverifiable` merely by declaring a version".
+            continue;
+        }
+        check_ahl_version(payload_of(envelope)?)?;
         // Phase 2 for a non-induction enumerated envelope, and strictly after 4d's signature:
         // I-D §7.5.1 4b states the three-phase order "for both types" of governance statement,
         // and the reason it gives is general — "Type-specific validation MUST NOT run on
@@ -5648,7 +5775,7 @@ fn verify_nested(
     // verifier's own stopping point, not the receipt's.
     if let Some(enumeration) = &currency_enumeration {
         if governance.unestablished_from.is_none() {
-            check_manifest_completeness(enumeration, &governance)?;
+            check_manifest_completeness(enumeration, &governance, run)?;
         }
     }
     run.pass(Assertion::Governance);
@@ -6097,6 +6224,43 @@ fn verify_envelope_at(
     envelope_outcome(&check, governance.mode, index)
 }
 
+/// The §2.1 envelope rule over an envelope the receipt does NOT rest on, under 4d's reliance
+/// rule: `Ok(true)` where it verifies, `Ok(false)` where it is VOID.
+///
+/// I-D §7.5.1 4d: "For every other carried envelope — a purported competing-trigger envelope, an
+/// entry of a propagation prefix, any entry an enumeration reveals — a non-verifying envelope is
+/// VOID (Section 2.1): it is excluded before any authority comparison, it is never effective and
+/// never traversed, it does not affect the result, and the verifier reports it as an informative
+/// item naming its entry index." The reason it gives is the log contract: "a log anchors opaque
+/// bytes and validates none, so were a void entry a defect of every later receipt, any party
+/// able to anchor one envelope could disable every enumerated claim of that log from that index
+/// on."
+///
+/// The §2.1 subset rule is unchanged and applies per envelope: an envelope carrying one
+/// non-verifying entry is non-verifying whatever else verifies. What differs by reliance is only
+/// what that means for the RESULT.
+fn evaluate_envelope_at(
+    envelope: &Value,
+    governance: &Governance<'_>,
+    index: u64,
+    run: &mut Run,
+) -> Result<bool> {
+    let keys = governance.producer_pubkeys_at(index);
+    run.spend(1)?;
+    let check = crate::check_envelope(envelope, |key_id| keys.get(key_id).cloned())?;
+    match check {
+        crate::EnvelopeCheck::Verified => Ok(true),
+        crate::EnvelopeCheck::SignatureInvalid => {
+            run.void(index, VoidReason::SignatureInvalid);
+            Ok(false)
+        }
+        crate::EnvelopeCheck::KeyNotResolved { .. } => {
+            run.void(index, VoidReason::KeyNotActive);
+            Ok(false)
+        }
+    }
+}
+
 /// Decode and authenticate the `enumerated` governance currency material (I-D §7.4), ahead of
 /// the induction that consumes it.
 ///
@@ -6161,6 +6325,7 @@ fn enumerated_key_statements(enumeration: &Enumeration) -> Vec<(u64, &Value)> {
 fn check_manifest_completeness(
     enumeration: &Enumeration,
     governance: &Governance<'_>,
+    run: &mut Run,
 ) -> Result<()> {
     // What the CHAIN carries, not what the induction applied: an element skipped as a void
     // duplicate (I-D §2.1) is carried, and 4c asks whether the chain shows the range's manifests.
@@ -6169,6 +6334,16 @@ fn check_manifest_completeness(
         if statement_type_literal(envelope) == Some("manifest")
             && !governance.chain_indexes.contains(&index)
         {
+            // I-D §7.4: enumerated currency proves the presented statements are "the only
+            // VERIFYING manifest and key entries in that range — a void entry (Section 7.5.1
+            // 4d) is not a governance statement and its absence from the chain is not an
+            // omission". 4b says the same from the other side: "A VERIFYING enumerated
+            // `manifest` entry of this revision that is absent from `governance.chain[]` is an
+            // omission and is `invalid`; only a non-verifying purported manifest is void." So
+            // the signature decides which this is, and it is evaluated at the entry's own index.
+            if !evaluate_envelope_at(envelope, governance, index, run)? {
+                continue;
+            }
             return Err(ReceiptError::GovernanceChainInvalid(format!(
                 "enumeration reveals a `manifest` statement at entry index {index} that the \
                  presented chain omits"
@@ -7089,6 +7264,15 @@ fn verify_competing_triggers(
     let mut challenges = Vec::new();
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
         let index = enumeration.from_index + offset as u64;
+        // I-D §7.5.1 4d and 4e: a void entry "is excluded before any authority comparison", and
+        // "a trigger whose envelope does not verify is void and never effective, whoever signed
+        // it, and it is not a challenge". The 4d sweep over this range has already decided which
+        // those are. §7.2's `trigger-effective` row says the same of this comparison: a
+        // purported candidate that does not verify is "never a challenge, never effective, and
+        // not a defect of this receipt".
+        if run.is_void(index) {
+            continue;
+        }
         let payload = payload_of(envelope)?;
         if !matches!(statement_type(payload)?, "retraction" | "correction")
             || payload.get("dataset").and_then(Value::as_str) != Some(dataset.as_str())
@@ -7449,23 +7633,46 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> 
     }
 
     run.spend(u64::try_from(prefix.entries.len()).unwrap_or(u64::MAX))?;
-    let closure = affected_set(&prefix.entries, &trees, trigger_index, prefix.entries.len())
-        .map_err(|source| match source {
-            AhlError::MissingTreeMaterial(root) => ReceiptError::TreeMaterialInvalid {
-                root,
-                detail: "no leaf material carried".to_owned(),
-            },
-            AhlError::TreeRootMismatch { root, recomputed } => ReceiptError::TreeMaterialInvalid {
-                root,
-                detail: format!("recomputes to {recomputed}"),
-            },
-            AhlError::TreeCountMismatch { root, declared, got } => {
-                ReceiptError::TreeMaterialInvalid {
-                    root,
-                    detail: format!("commits {declared} leaves, {got} carried"),
-                }
+    // I-D §2.1: a void envelope is "never traversed by closure"; §7.5.1 4d says the same of an
+    // entry of a propagation prefix. Positions are preserved — an entry index is a position in
+    // this prefix — and each void one is replaced by material the walk reads nothing from, so it
+    // contributes no edge and no seed. The prefix's own root was recomputed above over the
+    // CARRIED bytes, which is what the checkpoint commits; voiding is about traversal, not about
+    // what the log anchored.
+    let traversable: Vec<Value> = prefix
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(offset, entry)| {
+            let index = prefix.from_index + offset as u64;
+            if run.is_void(index) {
+                Value::Null
+            } else {
+                entry.clone()
             }
-            other => ReceiptError::Ahl(other),
+        })
+        .collect();
+    let closure =
+        affected_set(&traversable, &trees, trigger_index, traversable.len()).map_err(|source| {
+            match source {
+                AhlError::MissingTreeMaterial(root) => ReceiptError::TreeMaterialInvalid {
+                    root,
+                    detail: "no leaf material carried".to_owned(),
+                },
+                AhlError::TreeRootMismatch { root, recomputed } => {
+                    ReceiptError::TreeMaterialInvalid {
+                        root,
+                        detail: format!("recomputes to {recomputed}"),
+                    }
+                }
+                AhlError::TreeCountMismatch { root, declared, got } => {
+                    ReceiptError::TreeMaterialInvalid {
+                        root,
+                        detail: format!("commits {declared} leaves, {got} carried"),
+                    }
+                }
+                other => ReceiptError::Ahl(other),
+            }
         })?;
 
     let anchored: BTreeSet<(String, String)> = dispositions

@@ -74,6 +74,9 @@ pub fn trust_policy(corpus: &Corpus, keys: &Keys, dataset_key: &[u8]) -> TrustPo
 }
 
 /// Build, self-check and write every receipt vector plus the corpus receipt index.
+// The self-check loop reports every vector's outcome as it writes it; splitting the reporting
+// from the writing would put the two out of step for a reader following the output.
+#[allow(clippy::too_many_lines)]
 pub fn write_all(corpus: &Corpus, keys: &Keys, root: &Path, dataset_key: &[u8]) {
     let policy = trust_policy(corpus, keys, dataset_key);
     let vectors = build_vectors(corpus, keys);
@@ -92,13 +95,20 @@ pub fn write_all(corpus: &Corpus, keys: &Keys, root: &Path, dataset_key: &[u8]) 
                 });
                 assert_eq!(report.result, Outcome::Verified, "{}", vector.file);
                 println!("  [ok] {} verified: {}", vector.file, verdict.claim_type);
-                index.push(json!({
+                let mut entry = json!({
                     "file": vector.file,
                     "claim_type": verdict.claim_type,
                     "expect": Outcome::Verified.name(),
                     "boundary": verdict.boundary,
                     "embedded_receipts": verdict.embedded_receipts,
-                }));
+                });
+                // I-D §7.7: "Their number is the number of void entries inspected." Recorded
+                // only where the vector carries one, so a reader sees which vectors are about
+                // the reliance rule of §7.5.1 4d.
+                if !report.informative.is_empty() {
+                    entry["informative"] = json!(report.informative.len());
+                }
+                index.push(entry);
             }
             Expect::Reject { rule, matches } => {
                 let error = outcome
@@ -128,14 +138,18 @@ pub fn write_all(corpus: &Corpus, keys: &Keys, root: &Path, dataset_key: &[u8]) 
                     "  [ok] {} {} on {} by {rule}: {error}",
                     vector.file, report.result, finding.assertion
                 );
-                index.push(json!({
+                let mut entry = json!({
                     "file": vector.file,
                     "claim_type": vector.receipt["claim"]["type"],
                     "expect": report.result.name(),
                     "finding": finding.assertion.name(),
                     "rule": rule,
                     "reason": error.to_string(),
-                }));
+                });
+                if !report.informative.is_empty() {
+                    entry["informative"] = json!(report.informative.len());
+                }
+                index.push(entry);
             }
         }
         write_jcs(&dir.join(vector.file), &vector.receipt);
@@ -1542,7 +1556,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     // and I-D §7.2 requires every competing candidate's envelope to be verified under §2.1
     // BEFORE authority is compared, with §7.5.1 4d making failure `invalid` for the run.
     out.push(Vector {
-        file: "trigger-effective-non-verifying-candidate-must-fail.ahl",
+        file: "trigger-effective-void-candidate.ahl",
         receipt: Spec {
             claim_type: "trigger-effective",
             subject_index: 29,
@@ -1562,31 +1576,27 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 key_entry(&keys.producer_1, None, 25),
                 key_entry(&keys.producer_2, None, 28),
             ]),
-            note: "MUST FAIL. The subject — the genuinely co-signed retraction at entry 29 — is \
-                   itself impeccable, and so is every proof in this receipt: the enumeration is \
-                   complete over [0, 34), the competing range is the introduction-fixed \
-                   [20, 34), and the range proofs open cp34's root. What it cannot survive is \
-                   its own competing-candidate set. Entries 32 and 33 also retract F, and \
-                   neither envelope verifies: entry 32's sole signature names `producer-1`'s \
-                   real key_id — the `customers` authority — with `sig` bytes that key never \
-                   produced, and entry 33 pairs a genuine `producer-2` signature with a second \
-                   entry naming the authority whose `sig` likewise does not verify. I-D §7.2 \
-                   requires every competing candidate's envelope to be verified under §2.1 \
-                   before authority is compared, and §7.5.1 4d makes a non-verifying entry \
-                   `invalid` — \"however many other entries verify\", with a verifier \
-                   forbidden to \"accept a subset\". Treating such a candidate as a mere \
-                   challenge and carrying on would report as proven a governing claim resting \
-                   on material the verifier could not read, so the run is invalid instead. \
-                   `trigger-effective-co-signed-by-authority.ahl` proves the same subject at \
-                   cp30, where the range stops short of both defective entries."
+            note: "The subject — the genuinely co-signed retraction at entry 29 — is \
+                   impeccable, and so is every proof here: the enumeration is complete over \
+                   [0, 34), the competing range is the introduction-fixed [20, 34), and the \
+                   range proofs open cp34's root. The competing set carries two entries that do \
+                   NOT verify: entry 32's sole signature names `producer-1`'s real key_id — the \
+                   `customers` authority — with `sig` bytes that key never produced, and entry \
+                   33 pairs a genuine `producer-2` signature with a second entry naming the \
+                   authority whose `sig` likewise does not verify (I-D §2.1: a verifier MUST \
+                   NOT accept a subset). Neither is an envelope this receipt RESTS on, so \
+                   §7.5.1 4d makes each VOID rather than a defect: \"excluded before any \
+                   authority comparison... never effective and never traversed\", reported as \
+                   an informative item naming its entry index (§7.7), and never a challenge \
+                   (4e). The genuinely co-signed trigger at entry 29 therefore governs, and the \
+                   receipt verifies. The reason 4d gives is the log contract: a log anchors \
+                   opaque bytes and validates none, so were a void entry a defect of every \
+                   later receipt, anyone able to anchor one envelope could disable every \
+                   enumerated claim of that log from that index on."
                 .to_owned(),
         }
         .build(corpus, keys),
-        expect: Expect::Reject {
-            rule: "I-D §7.2 / §7.5.1 4d — every competing candidate's envelope must verify \
-                   before authority is compared",
-            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 32 }),
-        },
+        expect: Expect::Accept,
     });
 
     // Entry 33: the SUBJECT of its own `trigger-effective` claim carries two signature
@@ -2156,7 +2166,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     // trigger filter — so this is the general form of the rule: enumerated material is
     // verified envelope by envelope, whatever each envelope happens to say.
     out.push(Vector {
-        file: "governance-state-non-verifying-entry-must-fail.ahl",
+        file: "governance-state-void-entry.ahl",
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
@@ -2169,29 +2179,26 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             currency_material: corpus.enumeration(0, 34, cp34),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
-            note: "MUST FAIL. The claim is the one `governance-state-valid.ahl` proves — \
-                   manifest version 2 is the governance state active at entry index 26 — and \
-                   every governance-specific check still passes: the chain carries every \
-                   manifest the range reveals, the rotation proof verifies, and no manifest or \
-                   key statement is anchored in \
-                   (25, 26]. The range is what fails. §4 fixes enumerated material at exactly \
-                   [0, tree_size(C)), and at cp34 that prefix reaches entries 32 and 33, the \
-                   two deliberately non-verifying retractions of record F. Neither is a \
-                   competing candidate — `governance-state` compares no authority and filters \
-                   for no record — and neither is a manifest or a `key` statement, so no \
-                   governance-specific rule looks at them at all. I-D §7.5.1 4d nevertheless \
-                   requires EVERY carried envelope to verify under K at its own entry index, \
-                   so a verifier that checked only the entries it found interesting would \
-                   accept enumerated material it had not actually read. The receipt is invalid \
-                   however sound the governance claim itself is."
+            note: "The claim is the one `governance-state-valid.ahl` proves — manifest version \
+                   2 is the governance state active at entry index 26 — over a range that \
+                   REACHES two entries which do not verify. §4 fixes enumerated material at \
+                   exactly [0, tree_size(C)), and at cp34 that prefix reaches entries 32 and 33, \
+                   the two deliberately non-verifying retractions of record F. I-D §7.5.1 4d \
+                   requires every carried envelope to be verified at its own entry index, and \
+                   decides what a failure MEANS by reliance: neither entry is one this receipt \
+                   rests on — not its subject, not an embedded subject, not a \
+                   `governance.chain[]` element — so each is VOID and reported as an \
+                   informative item (§7.7), the result is unaffected, and the governance claim \
+                   stands. §7.4 says the same from the currency side: enumerated material proves \
+                   the presented statements are \"the only VERIFYING manifest and key entries in \
+                   that range\", and a void entry \"is not a governance statement and its \
+                   absence from the chain is not an omission\". What the range proof still \
+                   guarantees is completeness: nothing is hidden by voiding, since the void \
+                   entries are enumerated and reported by index."
                 .to_owned(),
         }
         .build(corpus, keys),
-        expect: Expect::Reject {
-            rule: "I-D §7.5.1 4d — every enumerated envelope must verify, not only the ones a \
-                   claim type inspects",
-            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 32 }),
-        },
+        expect: Expect::Accept,
     });
 
     // The other side of the same rule: an enumerated range that reaches a `key` statement
@@ -2717,21 +2724,23 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             &governance_state_valid,
             &m1,
             keys,
-            "MUST FAIL, at PHASE 1. The `key` statement at entry index 9 carries TWO \
-             independent defects: `signatures[0].sig` is garbage rather than a signature \
-             `producer-1` ever produced, and the payload carries no `issued_at`. I-D §7.5.1 \
-             4b processes every governance statement in three phases, \"in this order, for \
-             both types\": signature, then type-specific validation, then effect — and \
-             \"type-specific validation MUST NOT run on material whose signature has not \
-             verified\", because running it first \"lets anyone able to hand a verifier a \
-             receipt drive it\". A verifier that validated §2.2's common payload fields while \
-             decoding the enumeration would report the missing `issued_at`; the conformant \
-             result is the signature failure at entry index 9.",
+            "MUST FAIL, and NOT on the void entry. The `key` statement at entry index 9 \
+             carries TWO independent defects: `signatures[0].sig` is garbage rather than a \
+             signature `producer-1` ever produced, and the payload carries no `issued_at`. I-D \
+             §7.5.1 4b enters an enumeration-only entry into the induction \"only if its \
+             envelope verifies in phase 1\"; this one does not, so it is VOID — not inducted, \
+             no effect on K, the walk continues — and §7.5 step 1 exempts it from the version \
+             read and from §2.2's common fields entirely, so the missing `issued_at` is never \
+             reached and cannot be what a verifier reports. What DOES fail is what this receipt \
+             rests on: it lists `producer-2` in `keys.producer[]` bound to entry index 9, and \
+             the void statement applied no effect, so that binding resolves against nothing. \
+             The receipt is invalid on its own key listing (I-D §7.1), with the void entry \
+             reported as an informative item (§7.7) beside it.",
         ),
         expect: Expect::Reject {
-            rule: "I-D §7.5.1 4b — phase 1 (signature) precedes phase 2 (type-specific \
-                   validation) on enumerated key statements",
-            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 9 }),
+            rule: "I-D §7.1 / §7.5.1 4b — a key bound to a void governance statement resolves \
+                   against nothing",
+            matches: |e| matches!(e, ReceiptError::KeyNotBound { entry_index: 9, .. }),
         },
     });
 
