@@ -2045,6 +2045,21 @@ struct Governance<'a> {
     /// them is ever a capability gap, and none is downgraded." What the INDUCTION decides is
     /// something else — which version was active, and what its contents may be trusted for.
     chain_index: BTreeMap<String, u64>,
+    /// The entry indexes at which the induction actually WALKED a governance statement, both
+    /// streams and the genesis included.
+    ///
+    /// §7.5.1 4d verifies "every carried envelope that is NOT part of the induction", and what
+    /// makes an envelope part of it is having been walked — not its type and not its statement
+    /// id, which a void duplicate shares with the copy that governs. Keyed by entry index for
+    /// that reason: one index, one envelope.
+    walked_indexes: BTreeSet<u64>,
+    /// The chain hops the induction skipped as void duplicates (I-D §2.1), with their entry
+    /// indexes.
+    ///
+    /// Void of EFFECT is not the same as absent: §7.5 step 4 says "verify every carried
+    /// envelope", so these are verified under 4d at their own entry indexes like any other
+    /// carried envelope that the induction did not walk.
+    void_chain: Vec<(u64, &'a Value)>,
     /// Every entry index the chain carries an element at, void duplicates included.
     ///
     /// What §7.5.1 4c asks of enumerated currency is that the CHAIN carry every manifest the
@@ -3705,6 +3720,9 @@ fn read_chain<'a>(
     // it is void — skipped whole, applying no effect and consuming no rotation proof. Seeded
     // with the genesis manifest, which the base case above has already walked.
     let mut governing_ids = BTreeSet::from([statement_id(genesis_envelope)?]);
+    // The genesis hop is walked by the base case above.
+    let mut walked_indexes = BTreeSet::from([0u64]);
+    let mut void_chain: Vec<(u64, &Value)> = Vec::new();
     let mut chain_cursor = 0usize;
     let mut key_cursor = 0usize;
     // The genesis manifest, at entry index 0, is the statement the base case has just walked.
@@ -3728,10 +3746,13 @@ fn read_chain<'a>(
             walked_index = index;
             // §2.1 again, over the other stream: a `key` statement anchored a second time
             // governs nothing, and applying its effect twice would change the key state from
-            // the duplicate's index onward.
+            // the duplicate's index onward. It is still a carried envelope, and 4d verifies it
+            // where every other enumerated envelope is verified — the enumerated sweep exempts
+            // the indexes the induction WALKED, and this is not one of them.
             if !governing_ids.insert(statement_id(envelope)?) {
                 continue;
             }
+            walked_indexes.insert(index);
             let payload = payload_of(envelope)?;
             check_ahl_version(payload)?;
             verify_governance_phase_1(envelope, &manifests, &events, index, mode, run)?;
@@ -3759,14 +3780,18 @@ fn read_chain<'a>(
         // three. The `predecessor` linkage of any later manifest is therefore computed against
         // that governing copy, which is what `previous_manifest_*` still holds here.
         //
-        // AMBIGUITY (I-D §7.5.1 4d): whether a void carried envelope must nonetheless verify is
-        // not settled — 4d is scoped to "every carried envelope that is NOT part of the
-        // induction", and a void duplicate is part of neither. Read minimally: an envelope that
-        // governs nothing is not validated as though it did, and skipping it can establish
-        // nothing, since the governing copy of the same bytes was walked in full.
+        // Void of effect is not exempt from verification. I-D §7.5 step 4: "Establish the key
+        // state, and verify EVERY CARRIED ENVELOPE, by the procedure of the next subsection."
+        // §7.5.1 4d: "With K established, verify every carried envelope that is not part of the
+        // induction... An envelope carrying a non-verifying entry, or an entry naming a key not
+        // active at that index, is invalid however many other entries verify." A void duplicate
+        // is carried and is not part of the induction, so it is kept here and verified at its
+        // own entry index under completed K, with the subject and the rest of 4d's envelopes.
         if !governing_ids.insert(statement_id(envelope)?) {
+            void_chain.push((index, envelope));
             continue;
         }
+        walked_indexes.insert(index);
 
         let payload = payload_of(envelope)?;
         check_ahl_version(payload)?;
@@ -3950,6 +3975,8 @@ fn read_chain<'a>(
         events,
         manifest_by_version_id,
         chain_index,
+        walked_indexes,
+        void_chain,
         chain_indexes,
         unestablished_from,
     })
@@ -5149,6 +5176,27 @@ fn decode_enumeration(
 }
 
 /// I-D §7.5.1 4d over material [`decode_enumeration`] has already authenticated.
+/// I-D §7.5.1 4d over the chain hops the induction skipped as void duplicates (I-D §2.1).
+///
+/// §7.5 step 4: "Establish the key state, and verify EVERY CARRIED ENVELOPE, by the procedure of
+/// the next subsection." §7.5.1 4d: "With K established, verify every carried envelope that is
+/// not part of the induction... An envelope carrying a non-verifying entry, or an entry naming a
+/// key not active at that index, is invalid however many other entries verify." A void duplicate
+/// is carried and was not walked, so it is verified here — at its own entry index, under
+/// completed K, in the same phase and by the same rule as the subject's own envelope.
+///
+/// Past an induction stop the key state at such an index was never established, so the check
+/// does not run: the envelope-validity assertion rests on `governance` and says so, exactly as
+/// the subject's does.
+fn verify_void_chain_envelopes(governance: &Governance<'_>, run: &mut Run) -> Result<()> {
+    for (index, envelope) in &governance.void_chain {
+        if governance.established_at(*index) {
+            verify_envelope_at(envelope, governance, *index, run)?;
+        }
+    }
+    Ok(())
+}
+
 fn verify_enumerated_envelopes(
     enumeration: &Enumeration,
     governance: &Governance<'_>,
@@ -5182,18 +5230,19 @@ fn verify_enumerated_envelopes(
         // 4d by the state that already includes a statement's own effect is not what 4b/4d
         // ask for.
         //
-        // Membership is decided by statement TYPE, not by position in the range: 4b walks
-        // exactly the `manifest` and `key` statements, whatever indexes they occupy. The
-        // enumerated `key` statements ARE the induction's second stream, so every one of them
-        // has been through 4b phase 1 by construction, and [`check_manifest_completeness`]
-        // separately requires every enumerated `manifest` to appear in the chain the induction
-        // walked — under enumerated mode over `[0, tree_size(C))`, a superset of every other
-        // enumerated range, and before 4d runs at all. Nothing is exempted here that the
-        // induction has not already verified.
-        if matches!(statement_type_literal(envelope), Some("manifest" | "key")) {
+        // Membership is decided by what the induction WALKED, at the entry index it walked it
+        // at — not by statement type. The enumerated `key` statements ARE the induction's second
+        // stream and the enumerated `manifest` statements are in the chain it walked
+        // ([`check_manifest_completeness`] requires it, before 4d runs at all), so a governance
+        // statement the induction walked is exempt for the reason above. A VOID duplicate
+        // (I-D §2.1) is not: the induction skipped it, so nothing has verified it, and 4d's
+        // "every carried envelope that is not part of the induction" reaches it. Exempting by
+        // type would exempt it too, since it carries the same type — and the same statement id —
+        // as the copy that governs.
+        let index = enumeration.from_index + offset as u64;
+        if governance.walked_indexes.contains(&index) {
             continue;
         }
-        let index = enumeration.from_index + offset as u64;
         verify_envelope_at(envelope, governance, index, run)?;
         // Phase 2 for a non-induction enumerated envelope, and strictly after 4d's signature:
         // I-D §7.5.1 4b states the three-phase order "for both types" of governance statement,
@@ -5564,6 +5613,7 @@ fn verify_nested(
     } else {
         None
     };
+    verify_void_chain_envelopes(&governance, run)?;
     // I-D §2.2's common payload fields, checked only now that the subject's own signature has
     // verified — the same rule chain hops get, applied to the one carried envelope that is
     // never itself a chain hop.
@@ -7468,12 +7518,13 @@ fn render(claim_type: &str, assurance: &Assurance) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
-        chain_version_index, log_key_set, verify_rotation_proof, witness_key_set,
-        AdaptorCapabilities, AdaptorProfile, Assertion, Governance, Limits, Outcome, ReceiptError,
-        RotationContext, Run, TrustPolicy, MAX_EMBEDDED_RECEIPTS, TEST_ADAPTOR_PROFILE_ID,
+        chain_version_index, log_key_set, verify_rotation_proof, verify_void_chain_envelopes,
+        witness_key_set, AdaptorCapabilities, AdaptorProfile, Assertion, Governance, Limits,
+        Outcome, ReceiptError, RotationContext, Run, TrustPolicy, MAX_EMBEDDED_RECEIPTS,
+        TEST_ADAPTOR_PROFILE_ID,
     };
     use crate::{
         checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, sha256_hex, statement_id,
@@ -7554,6 +7605,91 @@ mod tests {
         assert_eq!(void, vec![false, false, true]);
     }
 
+    /// I-D §7.5 step 4: "Establish the key state, and verify EVERY CARRIED ENVELOPE, by the
+    /// procedure of the next subsection." §7.5.1 4d: "With K established, verify every carried
+    /// envelope that is not part of the induction... An envelope carrying a non-verifying entry,
+    /// or an entry naming a key not active at that index, is invalid however many other entries
+    /// verify."
+    ///
+    /// A void duplicate (I-D §2.1) is carried and was not walked, so 4d reaches it. Void of
+    /// EFFECT is not void of verification: it applies nothing to K, resolves no version and
+    /// consumes no rotation proof, and it still has to verify at its own entry index.
+    ///
+    /// Driven through [`verify_void_chain_envelopes`] — the function `verify_nested` calls —
+    /// rather than end to end, for the reason
+    /// [`a_duplicate_statement_id_is_governed_by_its_smallest_index`] states: a chain duplicate
+    /// needs the same envelope genuinely anchored at two entry indexes, and step 3 proves each
+    /// index by an inclusion path the corpus's log cannot produce for a second one. The same
+    /// holds for an enumerated `key` duplicate, whose index is fixed by the range proof.
+    #[test]
+    fn a_void_duplicate_is_still_verified_under_4d() {
+        fn governance<'a>(
+            manifest: &'a Value,
+            void: &'a Value,
+            unestablished_from: Option<u64>,
+        ) -> Governance<'a> {
+            Governance {
+                mode: "enumerated",
+                manifests: vec![(0, manifest)],
+                events: Vec::new(),
+                manifest_by_version_id: std::collections::BTreeMap::new(),
+                chain_index: std::collections::BTreeMap::new(),
+                walked_indexes: std::collections::BTreeSet::from([0]),
+                void_chain: vec![(30, void)],
+                chain_indexes: std::collections::BTreeSet::from([0, 30]),
+                unestablished_from,
+            }
+        }
+
+        let producer = TestKey::from_seed_hex("producer", &"11".repeat(32)).expect("32-byte seed");
+        let manifest = json!({
+            "type": "manifest",
+            "keys": [ { "key_id": producer.key_id(), "pubkey": producer.pubkey() } ],
+        });
+        let payload = json!({ "type": "key", "ahl_version": "0.4" });
+        let signed = |key: &TestKey| {
+            json!({
+                "payload": payload,
+                "signatures": [ {
+                    "key_id": key.key_id(),
+                    "sig": key.sign(&jcs(&payload)),
+                } ],
+            })
+        };
+        let verifying = signed(&producer);
+        let mut defective = signed(&producer);
+        defective["signatures"][0]["sig"] = json!(producer.sign(b"other bytes entirely"));
+
+        // The induction walked the genesis alone; the duplicate at entry index 30 is void, and
+        // its index is therefore not among the ones the enumerated sweep exempts.
+        assert!(!governance(&manifest, &verifying, None).walked_indexes.contains(&30));
+
+        // A void duplicate that verifies costs the run nothing.
+        let mut run = Run::new(Limits::default());
+        verify_void_chain_envelopes(&governance(&manifest, &verifying, None), &mut run)
+            .expect("a void duplicate whose signature verifies");
+        assert!(run.findings.is_empty(), "{:#?}", run.findings);
+
+        // One that does not verify is `invalid`, however void its effect.
+        let mut run = Run::new(Limits::default());
+        run.phase(Assertion::EnvelopeValidity);
+        let error = verify_void_chain_envelopes(&governance(&manifest, &defective, None), &mut run)
+            .expect_err("a void duplicate whose signature does not verify");
+        assert!(
+            matches!(error, ReceiptError::EnvelopeSignatureInvalid { entry_index: 30 }),
+            "{error}"
+        );
+        assert_eq!(error.class(), Outcome::Invalid);
+        // The phase it is raised in is the one that reports it: 4d is envelope validity.
+        assert_eq!(run.attribute(&error), Assertion::EnvelopeValidity);
+
+        // Past an induction stop the key state at that index was never established, so the
+        // check does not run and the assertion rests on `governance` instead.
+        let mut run = Run::new(Limits::default());
+        verify_void_chain_envelopes(&governance(&manifest, &defective, Some(25)), &mut run)
+            .expect("no key state was established at entry index 30");
+    }
+
     /// A manifest binding the induction never reached is a capability gap, not a defect.
     ///
     /// I-D §7.7 divides the two: material the receipt was required to carry and does not is
@@ -7585,6 +7721,8 @@ mod tests {
             events: Vec::new(),
             manifest_by_version_id: by_version_id.clone(),
             chain_index: chain_index.clone(),
+            walked_indexes: std::collections::BTreeSet::from([0, 25]),
+            void_chain: Vec::new(),
             chain_indexes: std::collections::BTreeSet::from([0, 25]),
             unestablished_from,
         };
