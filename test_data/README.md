@@ -262,7 +262,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 | `adaptor/` | Both adaptor profile documents, content-addressed: `ahl-test-log-v1.md`, pinned by the main corpus's manifest versions, and `ahl-adaptor-atl-v1.md`, pinned by the ATL-bound corpus's — see the release note below |
 | `vectors/statements/` | The toy corpus's anchored envelopes, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
-| `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 34, 35, 37 and 38, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
+| `vectors/checkpoints/` | Signed checkpoints at the tree sizes the scenarios need, each signed by the log key its active manifest version declares and cosigned by that version's witness — EXCEPT cp26 and cp56, deliberately signed and cosigned under the OUTGOING state for the I-D §7.1 rotation-anchoring proofs at manifest v2 (witness set) and manifest v4 (log key); see "Governance-key rotation" below |
 | `vectors/closure/` | Six closure scenarios (see below) |
 | `vectors/witness/` | Signed witness refusal evidence carrying two conflicting checkpoints (spec §3.3 step 3) |
 | `receipts/` | One positive and at least one negative receipt per claim-type registry entry, plus `index.json` naming the I-D §7.7 result each must reach, the assertion whose finding produces a non-verified one, the rule each negative must trip, and the trust policy those outcomes assume |
@@ -573,7 +573,7 @@ runs must leave `test_data/` byte-identical — if they do not, that is a bug.
 
 Before writing anything the generator verifies its own output and aborts on any mismatch:
 statement-id and entry-id uniqueness (spec §2.1), every envelope signature — including that the
-two deliberately non-verifying fixtures really do not verify — the manifest lineage and
+deliberately non-verifying fixtures really do not verify — the manifest lineage and
 key-snapshot semantics, the challenge's authority status, every checkpoint signature and witness
 cosignature, every inclusion proof, every range proof (including that it rejects substitution),
 every consistency proof between published checkpoints (including that a proof for the wrong pair
