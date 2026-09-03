@@ -2280,6 +2280,66 @@ fn every_vector_reports_the_void_entries_it_inspected() {
     assert!(with_void >= 3, "the corpus must exercise the reliance rule, got {with_void}");
 }
 
+/// A void prefix entry is "never traversed by closure" (I-D §2.1, §7.5.1 4d), and voiding it is
+/// not cosmetic: it changes what the closure reaches.
+///
+/// The material is the corpus prefix `propagation-complete-valid.ahl` carries — entries [0, 8),
+/// the correction at entry 6 as the trigger, and the committed trees that prefix references —
+/// walked through `affected_set`, the same function the verifier calls. Entry 3 derives S1 from
+/// the record the correction at entry 6 supersedes, so it is a derivation the closure reaches:
+/// with the entry carried the closure includes its output, and with the entry VOID — replaced positionally by material the
+/// walk reads nothing from, exactly as `verify_propagation_complete` does — it does not. A
+/// verifier that traversed a void entry would recompute a different affected set and refuse a
+/// receipt whose anchored set is the right one.
+///
+/// The receipt half of the same fact is the control: `propagation-complete-valid.ahl` verifies,
+/// its prefix root recomputed over the CARRIED bytes rather than the traversable copy.
+///
+/// A vector whose prefix carries a void derivation is not constructible from this corpus, and
+/// the reason is structural: every propagation it anchors declares D at tree size 8 or 13, the
+/// free entry indexes are all past the deliberately non-conforming batch at entry 39, and a
+/// closure walk reaching that batch fails on the I-D §2.7 tree rules before any traversal
+/// question is reached. Adding one means moving that batch — a corpus renumbering, not another
+/// entry.
+#[test]
+fn a_void_prefix_entry_is_not_traversed_by_closure() {
+    let policy = trust_policy();
+    let (_, receipt) = read_receipt("propagation-complete-valid.ahl");
+    let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    assert!(report.informative.is_empty(), "no entry of this prefix is void");
+
+    // The prefix the receipt carries, and the trees it references.
+    let prefix: Vec<Value> = receipt["claim_material"]["corpus_prefix"]["entries"]
+        .as_array()
+        .expect("prefix entries")
+        .iter()
+        .map(|entry| entry["envelope"].clone())
+        .collect();
+    assert_eq!(prefix.len(), 8, "the prefix is [0, 8)");
+    let trees = tree_material();
+
+    // Carried: the derivation at entry 3 is reached, and its output is in the closure.
+    let carried = affected_set(&prefix, &trees, 6, prefix.len()).expect("closure over [0, 8)");
+
+    // Void: the same walk with entry 3 replaced positionally by material it reads nothing from.
+    let mut voided = prefix;
+    voided[3] = Value::Null;
+    let without = affected_set(&voided, &trees, 6, voided.len()).expect("closure over [0, 8)");
+
+    assert_ne!(
+        carried.affected, without.affected,
+        "voiding a derivation the closure reaches must change the closure, or this test proves \
+         nothing about traversal"
+    );
+    assert!(
+        carried.affected.len() > without.affected.len(),
+        "the void entry is what put its output in the affected set"
+    );
+    // The seeds come from the trigger, which is not void either way.
+    assert_eq!(carried.seeds, without.seeds);
+}
+
 /// A void entry occupies no statement id, so a later verifying copy of the same statement is
 /// inducted and its effect applied.
 ///
