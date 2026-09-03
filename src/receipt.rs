@@ -3554,6 +3554,28 @@ fn verify_enumeration(
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Read the two container versions and act on them, per I-D §7.5 step 1.
+///
+/// Both are read before anything else because revision 0.4 "verifies no material issued under
+/// any earlier revision" (§2.2, §7.1): a version this build does not implement is a capability
+/// gap, [`ReceiptError::UnsupportedVersion`] — `unverifiable` under §7.7, never `invalid` —
+/// and no rule this document states applies to the rest of the bytes.
+fn check_receipt_versions(receipt: &Value) -> Result<()> {
+    for (field, expected) in
+        [("ahl_receipt_version", RECEIPT_VERSION), ("spec_version", SPEC_VERSION)]
+    {
+        let got = text(receipt, field)?;
+        if got != expected {
+            return Err(ReceiptError::UnsupportedVersion {
+                field: if field == "spec_version" { "spec_version" } else { "ahl_receipt_version" },
+                expected,
+                got: got.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Verify an Evidence Receipt against locally configured policy.
 ///
 /// Implements I-D §7.5's algorithm in the order it fixes: step 1, versions before anything
@@ -3568,6 +3590,21 @@ fn verify_enumeration(
 ///
 /// Returns the [`ReceiptError`] variant naming the first rule that rejected the receipt.
 pub fn verify_receipt(receipt: &Value, policy: &TrustPolicy) -> Result<Verdict> {
+    // I-D §7.5 step 1: "Read `ahl_receipt_version` and act on it BEFORE ANY OTHER CHECK,
+    // including schema validation... THEN parse the receipt, enforce the resource limits of
+    // Section 7.8." The order decides what the holder of a receipt is told. A version this
+    // build does not implement is `unverifiable` under §7.7 at ANY size, and reporting the
+    // decoded-size budget first would send its holder to produce a smaller receipt that this
+    // verifier would refuse just the same — a verifier-local budget presented as the reason a
+    // fixed capability gap stopped the run.
+    //
+    // This crate is handed an ALREADY-PARSED document, so the parse-size cap §7.8 places
+    // before that read has no work left to bound here: the decision costs two member lookups
+    // on a parsed object, and nothing is decoded, canonicalized or hashed to reach it. The
+    // §7.8 decoded-size budget — the verifier-local one, measured over the whole receipt's
+    // canonical form — is enforced immediately afterwards, still ahead of every semantic and
+    // cryptographic check, which is where the rest of step 1 puts it.
+    check_receipt_versions(receipt)?;
     let encoded = jcs(receipt);
     if encoded.len() > policy.limits.max_decoded_bytes {
         return Err(ReceiptError::LimitExceeded("decoded size budget"));
@@ -3590,18 +3627,10 @@ fn verify_nested(
     budget.enter(depth)?;
 
     // --- §7.5 step 1: versions, identifiers -----------------------------------------
-    for (field, expected) in
-        [("ahl_receipt_version", RECEIPT_VERSION), ("spec_version", SPEC_VERSION)]
-    {
-        let got = text(receipt, field)?;
-        if got != expected {
-            return Err(ReceiptError::UnsupportedVersion {
-                field: if field == "spec_version" { "spec_version" } else { "ahl_receipt_version" },
-                expected,
-                got: got.to_owned(),
-            });
-        }
-    }
+    // Re-read here rather than assumed from the caller: an embedded receipt reaches this
+    // function without passing through [`verify_receipt`], and §7.5 step 1's rule is about
+    // every receipt, the embedded ones included (§7.1).
+    check_receipt_versions(receipt)?;
 
     let envelope = obj(receipt, "envelope")?;
     let subject = obj(receipt, "subject")?;

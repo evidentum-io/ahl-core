@@ -1494,6 +1494,41 @@ fn resource_limits_fail_closed_rather_than_degrading() {
     assert!(verdict.embedded_receipts <= 64);
 }
 
+/// I-D §7.5 step 1 orders the version read ahead of the §7.8 limits, and the order is
+/// observable exactly here: a receipt that breaks BOTH rules at once must report the version.
+///
+/// The two outcomes are not interchangeable. An unsupported version is a fixed property of the
+/// artifact under §7.7 — every verifier reaches it, at any size — while the decoded-size budget
+/// is verifier-local policy that a differently-configured verifier would not hit at all
+/// (§7.8). Reporting the budget would tell the receipt's holder to produce a smaller receipt
+/// that this build would refuse just the same.
+#[test]
+fn an_unsupported_version_is_reported_ahead_of_the_size_budget() {
+    let (_, valid) = read_receipt("statement-anchored-valid.ahl");
+
+    // Small enough that every receipt in the corpus exceeds it, so the budget really is live.
+    let starved = TrustPolicy {
+        limits: Limits { max_decoded_bytes: 1, ..Limits::default() },
+        ..trust_policy()
+    };
+    assert!(
+        matches!(verify_receipt(&valid, &starved), Err(ReceiptError::LimitExceeded(_))),
+        "the size budget must fire for a receipt this verifier does support"
+    );
+
+    let mut foreign = valid;
+    foreign["ahl_receipt_version"] = json!("1");
+    assert!(
+        matches!(
+            verify_receipt(&foreign, &starved),
+            Err(ReceiptError::UnsupportedVersion { field: "ahl_receipt_version", got, .. })
+                if got == "1"
+        ),
+        "an oversized receipt of an unsupported version must report the version (I-D §7.5 \
+         step 1)"
+    );
+}
+
 #[test]
 fn the_adaptor_profile_hash_is_pinned_by_both_manifest_versions_and_by_receipts() {
     let vectors = statement_vectors();
