@@ -1,4 +1,4 @@
-//! The 28-entry toy corpus and every non-receipt vector file it produces.
+//! The toy corpus and every non-receipt vector file it produces.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -2179,10 +2179,14 @@ impl Corpus {
             (27, 28, "the trailing entry"),
         ];
         json!({
-            "description": "Authenticated range proofs over the 28-entry log tree under cp28 \
-                            (core spec §3 contract item 5, receipt format §4.2, adaptor profile \
-                            §8). Each proof establishes that the listed entries are exactly and \
-                            completely the leaf set of the range under the checkpoint root.",
+            "description": format!(
+                "Authenticated range proofs over the size-{} log tree under {} (core spec §3 \
+                 contract item 5, receipt format §4.2, adaptor profile §8). Each proof \
+                 establishes that the listed entries are exactly and completely the leaf set of \
+                 the range under the checkpoint root.",
+                cp28.tree_size(),
+                cp28.name,
+            ),
             "adaptor": { "id": ADAPTOR_ID, "hash": self.adaptor_hash },
             "checkpoint": { "name": cp28.name, "tree_size": 28, "root": cp28.root() },
             "serialization": "base64 of: \"AHLRP1\" || tree_size:u64be || from_index:u64be || \
@@ -2264,9 +2268,10 @@ impl Corpus {
             let trigger = self.payload(case.trigger_index);
             let mut vector = json!({
                 "description": format!(
-                    "Revocation closure `{}` over the 28-entry toy corpus (core spec §5.1, §5.3), \
-                     evaluated at the checkpoint committing the trigger.",
-                    case.name
+                    "Revocation closure `{}` over the {}-entry toy corpus (core spec §5.1, \
+                     §5.3), evaluated at the checkpoint committing the trigger.",
+                    case.name,
+                    self.envelopes.len()
                 ),
                 "trigger": {
                     "statement_id": self.statement_id(case.trigger_index),

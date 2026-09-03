@@ -6,7 +6,7 @@
     "root_hash": "sha256:9e0b2eccb79e75ee5c2560c280aafaf935e1bf547889f6e058decefed9c81870",
     "tree_size": 8
   },
-  "description": "Revocation closure `toy-corpus` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
+  "description": "Revocation closure `toy-corpus` over the 47-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",

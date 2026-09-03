@@ -250,7 +250,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 | Path | Contents |
 | --- | --- |
 | `adaptor/` | The test adaptor profile document, content-addressed and pinned in both manifest versions |
-| `vectors/statements/` | The 45-entry toy corpus, plus malformed statements naming the rule each violates |
+| `vectors/statements/` | The toy corpus's anchored envelopes, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
 | `vectors/checkpoints/` | Signed checkpoints at tree sizes 8, 13, 20, 24, 25, 26, 28, 29, 30, 32, 34, 35, 37 and 38, each cosigned by the witness its active manifest version declares — EXCEPT cp26, deliberately cosigned by the OUTGOING witness-1 for the I-D §7.1 rotation-anchoring proof at manifest v2 (see "Governance-key rotation" below) |
 | `vectors/closure/` | Six closure scenarios (see below) |
