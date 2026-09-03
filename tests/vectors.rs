@@ -2004,7 +2004,6 @@ fn a_capability_gap_reaches_only_the_assertions_that_rest_on_it() {
         Assertion::Anchoring,
         Assertion::Governance,
         Assertion::EnvelopeValidity,
-        Assertion::CrossField,
         Assertion::ClaimMaterial,
         // Required here because this vector's own `assurance.content_binding` is not `none`.
         Assertion::ContentBinding,
@@ -2015,6 +2014,15 @@ fn a_capability_gap_reaches_only_the_assertions_that_rest_on_it() {
             "{assertion} does not rest on the adaptor profile and must be checked"
         );
     }
+    // §7.6 lists `witnessed` and `continued_history` among the cross-field rules, and with no
+    // checkpoint authenticated neither was evaluated — so the cross-field finding says so
+    // rather than reporting the rules that DID run as though they were all of them.
+    let finding = report.finding(Assertion::CrossField).expect("cross-field finding");
+    assert_eq!(finding.outcome, Outcome::Unverifiable);
+    assert!(
+        finding.detail.as_ref().is_some_and(|detail| detail.contains("checkpoint-authentication")),
+        "the cross-field finding must name the rule it could not evaluate: {finding:?}"
+    );
 
     // And a defect elsewhere still dominates the gap, which is the whole reason the run carries
     // on: `invalid` if any required finding is `invalid`, whichever was reached first.
@@ -2139,7 +2147,6 @@ fn an_untrusted_local_policy_witness_key_settles_only_the_witness_assertion() {
         Assertion::Governance,
         Assertion::CheckpointAuthentication,
         Assertion::EnvelopeValidity,
-        Assertion::CrossField,
         Assertion::ClaimMaterial,
     ] {
         assert_eq!(
@@ -2148,6 +2155,13 @@ fn an_untrusted_local_policy_witness_key_settles_only_the_witness_assertion() {
             "{assertion} does not rest on a witness key the verifier holds"
         );
     }
+    // §7.6's `witnessed` rule is one of the cross-field rules, and it was not evaluated.
+    let finding = report.finding(Assertion::CrossField).expect("cross-field finding");
+    assert_eq!(finding.outcome, Outcome::Unverifiable);
+    assert!(
+        finding.detail.as_ref().is_some_and(|detail| detail.contains("witnesses")),
+        "the cross-field finding must name the rule it could not evaluate: {finding:?}"
+    );
 
     // With a byte-decidable defect on the same receipt, the defect decides the result and the
     // witness gap is reported beside it.

@@ -1757,11 +1757,15 @@ impl Run {
             .chain(also)
             .find(|prerequisite| self.blocked.contains(prerequisite));
         match unmet {
-            Some(prerequisite) => self.record(
-                assertion,
-                Outcome::Unverifiable,
-                Some(format!("rests on `{prerequisite}`, which is unverifiable (I-D §7.7)")),
-            ),
+            Some(prerequisite) => {
+                let detail = format!("rests on `{prerequisite}`, which is unverifiable (I-D §7.7)");
+                self.record(assertion, Outcome::Unverifiable, Some(detail));
+                // Dependence is transitive: an assertion left `unverifiable` by a gap is itself
+                // a prerequisite nothing further can be settled against.
+                if !self.blocked.contains(&assertion) {
+                    self.blocked.push(assertion);
+                }
+            }
             None => self.record(assertion, Outcome::Verified, None),
         }
     }
@@ -5359,9 +5363,24 @@ fn verify_nested(
         }
     }
     let record_subject = check_record_subject(claim, payload, &claim_type, &subject_type)?;
+    // §7.6 lists `witnessed` and `continued_history` among the cross-field rules, and each is
+    // decidable only where 4f evaluated it. Where one was not — no profile to authenticate a
+    // checkpoint with, or a cosignature under a key local policy does not hold — the cross-field
+    // finding is `unverifiable` naming that prerequisite rather than `verified`: a rule that was
+    // skipped is not a rule that held. The rules that WERE evaluated still fail `invalid` above.
+    let unevaluated: Vec<Assertion> = anchoring.as_ref().map_or_else(
+        || vec![Assertion::CheckpointAuthentication],
+        |anchoring| {
+            if anchoring.witnessed.is_none() || anchoring.continued_history.is_none() {
+                vec![Assertion::Witnesses]
+            } else {
+                Vec::new()
+            }
+        },
+    );
     // The §7.6 rules decidable from the container alone are settled; the ones over embedded
     // material are reached inside step 5 and, where one of them fires, replace this finding.
-    run.pass(Assertion::CrossField);
+    run.pass_resting_on(Assertion::CrossField, &unevaluated);
 
     // --- §7.5 step 5: the §7.2 claim-material requirements --------------------------
     let ctx = ClaimCtx {
