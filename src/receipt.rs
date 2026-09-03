@@ -5188,18 +5188,30 @@ fn decode_enumeration(
 /// Past an induction stop the key state at such an index was never established, so the check
 /// does not run: the envelope-validity assertion rests on `governance` and says so, exactly as
 /// the subject's does.
-fn verify_void_chain_envelopes(governance: &Governance<'_>, run: &mut Run) -> Result<()> {
+///
+/// Returns the entry indexes it VERIFIED. One logical envelope is verified — and charged to the
+/// §7.8 verification-work budget — exactly once: under enumerated governance the same manifest
+/// is also carried by the enumerated range (§7.5.1 4c requires the chain to show every manifest
+/// the range reveals), and charging it twice could exhaust a budget sized for the receipt and
+/// turn a `verified` run into `unverifiable` over nothing the receipt did.
+fn verify_void_chain_envelopes(
+    governance: &Governance<'_>,
+    run: &mut Run,
+) -> Result<BTreeSet<u64>> {
+    let mut verified = BTreeSet::new();
     for (index, envelope) in &governance.void_chain {
         if governance.established_at(*index) {
             verify_envelope_at(envelope, governance, *index, run)?;
+            verified.insert(*index);
         }
     }
-    Ok(())
+    Ok(verified)
 }
 
 fn verify_enumerated_envelopes(
     enumeration: &Enumeration,
     governance: &Governance<'_>,
+    verified_directly: &BTreeSet<u64>,
     run: &mut Run,
 ) -> Result<()> {
     // I-D §7.5.1 4d: with K established, every carried envelope that is NOT part of the
@@ -5240,7 +5252,10 @@ fn verify_enumerated_envelopes(
         // type would exempt it too, since it carries the same type — and the same statement id —
         // as the copy that governs.
         let index = enumeration.from_index + offset as u64;
-        if governance.walked_indexes.contains(&index) {
+        // Already verified, and already charged: the indexes the induction walked (4b phase 1)
+        // and the void chain hops the direct 4d sweep just verified. §7.8's work budget counts
+        // verifications, so one carried envelope must cost one.
+        if governance.walked_indexes.contains(&index) || verified_directly.contains(&index) {
             continue;
         }
         verify_envelope_at(envelope, governance, index, run)?;
@@ -5269,7 +5284,11 @@ fn verify_enumeration(
     run: &mut Run,
 ) -> Result<Enumeration> {
     let enumeration = decode_enumeration(material, root, tree_size, what, run)?;
-    verify_enumerated_envelopes(&enumeration, governance, run)?;
+    // No direct-sweep exemption here: these are the CLAIM's own ranges (competing triggers, the
+    // completeness prefix), each verified as its own carried material. What the governance path
+    // exempts is the one duty discharged twice over one envelope — the 4d sweep over the void
+    // chain hops, which runs before the currency range's own sweep.
+    verify_enumerated_envelopes(&enumeration, governance, &BTreeSet::new(), run)?;
     Ok(enumeration)
 }
 
@@ -5613,7 +5632,9 @@ fn verify_nested(
     } else {
         None
     };
-    verify_void_chain_envelopes(&governance, run)?;
+    // The void chain hops are verified here, once. Under enumerated governance the same
+    // envelopes reappear in the range, and the sweep below skips exactly these indexes.
+    let void_verified = verify_void_chain_envelopes(&governance, run)?;
     // I-D §2.2's common payload fields, checked only now that the subject's own signature has
     // verified — the same rule chain hops get, applied to the one carried envelope that is
     // never itself a chain hop.
@@ -5680,7 +5701,7 @@ fn verify_nested(
             // would report a partial check as a complete one, so the whole assertion rests on
             // `governance` instead.
             if governance.unestablished_from.is_none() {
-                verify_enumerated_envelopes(enumeration, &governance, run)?;
+                verify_enumerated_envelopes(enumeration, &governance, &void_verified, run)?;
             }
             run.phase(Assertion::CrossField);
             Some(enumeration)
@@ -7521,15 +7542,16 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        chain_version_index, log_key_set, verify_rotation_proof, verify_void_chain_envelopes,
-        witness_key_set, AdaptorCapabilities, AdaptorProfile, Assertion, Governance, Limits,
-        Outcome, ReceiptError, RotationContext, Run, TrustPolicy, MAX_EMBEDDED_RECEIPTS,
-        TEST_ADAPTOR_PROFILE_ID,
+        chain_version_index, log_key_set, verify_enumerated_envelopes, verify_rotation_proof,
+        verify_void_chain_envelopes, witness_key_set, AdaptorCapabilities, AdaptorProfile,
+        Assertion, Enumeration, Governance, Limits, Outcome, ReceiptError, RotationContext, Run,
+        TrustPolicy, MAX_EMBEDDED_RECEIPTS, TEST_ADAPTOR_PROFILE_ID,
     };
     use crate::{
         checkpoint, cosignature_bytes, hash_hex, inclusion_proof, jcs, sha256_hex, statement_id,
         tree_root, TestKey,
     };
+    use std::collections::BTreeSet;
 
     /// I-D §6.2: "Each manifest version's log and witness key objects replace the prior set in
     /// full" — a SET, not a sequence, so re-listing the same key objects in a different order
@@ -7686,8 +7708,74 @@ mod tests {
         // Past an induction stop the key state at that index was never established, so the
         // check does not run and the assertion rests on `governance` instead.
         let mut run = Run::new(Limits::default());
-        verify_void_chain_envelopes(&governance(&manifest, &defective, Some(25)), &mut run)
-            .expect("no key state was established at entry index 30");
+        let verified =
+            verify_void_chain_envelopes(&governance(&manifest, &defective, Some(25)), &mut run)
+                .expect("no key state was established at entry index 30");
+        assert!(verified.is_empty(), "an unverified index is not an exempt one");
+    }
+
+    /// One logical envelope, one verification — and one charge against the §7.8
+    /// verification-work budget.
+    ///
+    /// Under enumerated governance the void chain hop is also an entry of the range, since
+    /// §7.5.1 4c requires the chain to show every manifest the range reveals. Verifying it in
+    /// both sweeps would charge it twice, and §7.8's budget is a count: a receipt whose budget
+    /// is sized for the work it needs would then exhaust it and be reported `unverifiable` over
+    /// nothing the receipt did, which §7.7 keeps for capability gaps alone.
+    #[test]
+    fn a_void_duplicate_is_charged_to_the_work_budget_once() {
+        let producer = TestKey::from_seed_hex("producer", &"11".repeat(32)).expect("32-byte seed");
+        let manifest = json!({
+            "type": "manifest",
+            "keys": [ { "key_id": producer.key_id(), "pubkey": producer.pubkey() } ],
+        });
+        let payload = json!({
+            "type": "key",
+            "ahl_version": "0.4",
+            "issued_at": "2026-01-01T00:00:00Z",
+            "manifest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        });
+        let envelope = json!({
+            "payload": payload,
+            "signatures": [ {
+                "key_id": producer.key_id(),
+                "sig": producer.sign(&jcs(&payload)),
+            } ],
+        });
+        // One object, carried twice: as the chain's void hop and as the range's entry at the
+        // same index.
+        let enumeration = Enumeration { from_index: 30, to_index: 31, entries: vec![envelope] };
+        let governance = Governance {
+            mode: "enumerated",
+            manifests: vec![(0, &manifest)],
+            events: Vec::new(),
+            manifest_by_version_id: std::collections::BTreeMap::new(),
+            chain_index: std::collections::BTreeMap::new(),
+            walked_indexes: std::collections::BTreeSet::from([0]),
+            void_chain: vec![(30, &enumeration.entries[0])],
+            chain_indexes: std::collections::BTreeSet::from([0, 30]),
+            unestablished_from: None,
+        };
+
+        // A budget of exactly one signature check: the count this receipt's material needs.
+        let mut run = Run::new(Limits { max_work_units: 1, ..Limits::default() });
+        let verified = verify_void_chain_envelopes(&governance, &mut run)
+            .expect("the void duplicate verifies");
+        assert_eq!(run.work, 1, "one envelope, one charge");
+
+        verify_enumerated_envelopes(&enumeration, &governance, &verified, &mut run)
+            .expect("the range's copy of it is not verified a second time");
+        assert_eq!(run.work, 1, "and not charged a second time");
+
+        // Without the exemption the same run exhausts a budget sized for its own work, which is
+        // the defect: `unverifiable` over nothing the receipt did.
+        let mut run = Run::new(Limits { max_work_units: 1, ..Limits::default() });
+        verify_void_chain_envelopes(&governance, &mut run).expect("the void duplicate verifies");
+        let error =
+            verify_enumerated_envelopes(&enumeration, &governance, &BTreeSet::new(), &mut run)
+                .expect_err("the second charge exhausts the budget");
+        assert!(matches!(error, ReceiptError::BudgetExhausted { .. }), "{error}");
+        assert_eq!(error.class(), Outcome::Unverifiable);
     }
 
     /// A manifest binding the induction never reached is a capability gap, not a defect.
