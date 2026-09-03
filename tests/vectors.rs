@@ -1849,6 +1849,45 @@ fn an_uncarried_key_transition_is_reported_as_the_prerequisite_it_is() {
     }
 }
 
+/// Which assertion a rejection belongs to is decided by the phase of the §7.5 algorithm that
+/// raised it, not by the error type the check reached for.
+///
+/// I-D §7.7 asks for a finding "for each assertion the receipt REQUIRES". One variant —
+/// `Malformed`, here — is raised by the container shape checks of step 3, by phase-2 validation
+/// of a governance statement inside the §7.5.1 induction, and by the §7.2 claim-material schema.
+/// Those are three different assertions, and a reader told "structure" about a malformed
+/// governance payload has been told the wrong thing.
+#[test]
+fn one_variant_is_reported_under_the_assertion_whose_phase_raised_it() {
+    let policy = trust_policy();
+    for (name, expected) in [
+        // Step 3, the container's own shapes.
+        (
+            "governance-key-rotation-proof-malformed-witness-entry-must-fail.ahl",
+            Assertion::Structure,
+        ),
+        // §7.5.1 4b(K), phase 2 of the induction.
+        ("governance-key-statement-malformed-valid-time-must-fail.ahl", Assertion::Governance),
+        // §7.2, the claim type's own material.
+        ("record-derived-input-members-on-full-array-must-fail.ahl", Assertion::ClaimMaterial),
+    ] {
+        let (_, receipt) = read_receipt(name);
+        let error = verify_receipt(&receipt, &policy).expect_err("a negative vector");
+        assert!(matches!(error, ReceiptError::Malformed(_)), "{name}: {error}");
+        // The variant's own answer is the same for all three: it is the fallback for a
+        // rejection examined outside a run, and cannot tell them apart.
+        assert_eq!(error.assertion(), Assertion::Structure, "{name}");
+
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.outcome == Outcome::Invalid)
+            .unwrap_or_else(|| panic!("{name}: an invalid finding"));
+        assert_eq!(finding.assertion, expected, "{name}: reported under the wrong assertion");
+    }
+}
+
 /// A capability gap the run cannot continue past still reports the assertions it had settled,
 /// and reports the rest as resting on it rather than as having held.
 ///

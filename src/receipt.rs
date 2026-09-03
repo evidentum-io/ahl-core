@@ -1289,11 +1289,20 @@ impl ReceiptError {
         }
     }
 
-    /// Which required assertion (I-D §7.7) this rejection belongs to.
+    /// Which required assertion (I-D §7.7) this rejection belongs to, judged from the variant
+    /// alone.
     ///
-    /// Exhaustive and without a wildcard, for the same reason [`Self::class`] is: every check
-    /// this crate performs maps to exactly one assertion, and a variant added later must be
-    /// placed deliberately rather than inherit a home.
+    /// This is the FALLBACK. Inside a verification run the assertion is the phase of the §7.5
+    /// algorithm that was running when the rejection was raised, which is the only thing that
+    /// can tell a malformed container member from a malformed governance payload from a
+    /// malformed claim-material member — one variant, three assertions. This function is what
+    /// answers for a rejection examined outside a run, or raised before any phase has begun
+    /// (the version read and the decoded-size budget of [`verify_receipt_report`]'s first two
+    /// steps), and the variants whose home does not depend on where they arose answer here
+    /// exactly as they would there.
+    ///
+    /// Exhaustive and without a wildcard, for the same reason [`Self::class`] is: a variant
+    /// added later must be placed deliberately rather than inherit a home.
     #[must_use]
     pub fn assertion(&self) -> Assertion {
         match *self {
@@ -1320,7 +1329,11 @@ impl ReceiptError {
             | Self::ManifestSchemaInvalid { .. }
             | Self::RotationProofInvalid { .. }
             | Self::GovernanceRangeNotComplete { .. }
-            | Self::KeyNotBound { .. } => Assertion::Governance,
+            | Self::KeyNotBound { .. }
+            // Not a §7.6 disagreement: what cannot be evidenced is the governance COVERAGE two
+            // members ask for at once (§7.4's enumerated range against §2.1's coverage through
+            // a later checkpoint), which is the governance assertion's own subject.
+            | Self::FormatConflict { .. } => Assertion::Governance,
             Self::CheckpointSignatureInvalid
             | Self::WitnessCosignatureInvalid { .. }
             | Self::WitnessKeyNotTrusted { .. }
@@ -1335,8 +1348,7 @@ impl ReceiptError {
             | Self::SubjectManifestPresence { .. }
             | Self::SubjectManifestBindingInvalid(_)
             | Self::EmbeddedOrderingViolation { .. }
-            | Self::EmbeddedSubjectMismatch { .. }
-            | Self::FormatConflict { .. } => Assertion::CrossField,
+            | Self::EmbeddedSubjectMismatch { .. } => Assertion::CrossField,
             // The one variant whose home depends on its own payload: the same range-proof
             // recomputation authenticates governance currency (§7.5.1 4c) and competing-trigger
             // and completeness material (§7.2), and the two are different assertions.
@@ -1568,6 +1580,16 @@ struct Run {
     /// an embedded receipt is recorded at that receipt's own path as the run unwinds, which is
     /// where a reader has to look for it.
     path: Vec<String>,
+    /// The assertion whose PHASE of the §7.5 algorithm is currently running, if any.
+    ///
+    /// A rejection is attributed to this rather than to the variant it happens to be: I-D §7.7
+    /// asks for a finding "for each assertion the receipt REQUIRES", and which assertion a
+    /// failure belongs to is decided by what was being checked, not by which error type the
+    /// check reached for. A malformed member is `structure` in the container, `governance` in a
+    /// governance statement's phase-2 validation, and `claim-material` in claim material — one
+    /// variant, three assertions. Saved and restored around each embedded receipt, and left as
+    /// it stands when a rejection unwinds, so the report names the phase the run stopped in.
+    scope: Option<Assertion>,
     /// The assertion of the receipt currently being verified whose `unverifiable` outcome the
     /// assertions after it rest on, if any (I-D §7.7; see [`Run::pass`]).
     ///
@@ -1601,6 +1623,7 @@ impl Run {
             verified: BTreeMap::new(),
             findings: Vec::new(),
             path: Vec::new(),
+            scope: None,
             blocked: None,
             deferred: Vec::new(),
         }
@@ -1625,6 +1648,28 @@ impl Run {
             return;
         }
         self.findings.push(Finding { assertion, outcome, receipt_path: self.path.clone(), detail });
+    }
+
+    /// Enter the phase of the §7.5 algorithm that settles `assertion`.
+    ///
+    /// Every rejection raised from here until the next call is attributed to `assertion`. The
+    /// phases of one receipt are a straight sequence, so this is set at each boundary rather
+    /// than pushed and popped; what does nest is a receipt inside another receipt's claim
+    /// material, and the enclosing phase is saved and restored around that descent.
+    const fn phase(&mut self, assertion: Assertion) {
+        self.scope = Some(assertion);
+    }
+
+    /// The assertion a rejection belongs to: the phase that was running, or — for a rejection
+    /// raised outside any phase — the one the variant itself names.
+    fn attribute(&self, error: &ReceiptError) -> Assertion {
+        match *error {
+            // The one exception to attribution by phase. A budget is spent by every phase and
+            // exhausted by whichever happens to reach the last unit, so the phase says nothing;
+            // I-D §7.8 wants the BUDGET named, which is what this assertion does.
+            ReceiptError::BudgetExhausted { .. } => Assertion::ResourceLimits,
+            _ => self.scope.unwrap_or_else(|| error.assertion()),
+        }
     }
 
     /// Record one required assertion the algorithm has just settled.
@@ -1663,7 +1708,7 @@ impl Run {
             Err(error) => error,
         };
         if error.class() != Outcome::Unverifiable
-            && counts_toward_result(error.assertion(), &self.path)
+            && counts_toward_result(self.attribute(&error), &self.path)
         {
             return Err(error);
         }
@@ -1680,7 +1725,7 @@ impl Run {
         ) {
             return Err(error);
         }
-        let settled = error.assertion();
+        let settled = self.attribute(&error);
         self.record(settled, error.class(), Some(error.to_string()));
         self.deferred.push((settled, self.path.clone(), error));
         // A content binding is a leaf: I-D §7.2 rests no other assertion on it, and §7.7's own
@@ -1709,7 +1754,7 @@ impl Run {
         let verdict = match outcome {
             Ok(verdict) => Some(verdict),
             Err(error) => {
-                let stopped_at = error.assertion();
+                let stopped_at = self.attribute(&error);
                 let class = error.class();
                 self.record(stopped_at, class, Some(error.to_string()));
                 if class == Outcome::Unverifiable {
@@ -4766,12 +4811,19 @@ fn verify_nested(
     // the version instead — two verifiers contradicting each other over one artifact. The read
     // itself is two member lookups on an already-parsed object, so nothing is decoded, hashed
     // or recursed into ahead of the budget it precedes.
-    check_receipt_versions(receipt)?;
-    run.enter(depth)?;
     // The dependence I-D §7.7 draws between findings is between the assertions of ONE receipt,
     // so each receipt starts with none and the enclosing receipt's state is put back before
-    // this one's verdict is returned.
+    // this one's verdict is returned. The enclosing PHASE goes back with it: an embedded
+    // receipt is verified inside its parent's claim-material step, and the parent's remaining
+    // phases are its own.
     let enclosing_block = run.blocked.take();
+    let enclosing_phase = run.scope.take();
+    run.phase(Assertion::Versions);
+    check_receipt_versions(receipt)?;
+    // I-D §7.8's FIXED limits: a property of the artifact's structure, not a budget.
+    run.phase(Assertion::Structure);
+    run.enter(depth)?;
+    run.pass(Assertion::ResourceLimits);
 
     let envelope = obj(receipt, "envelope")?;
     let subject = obj(receipt, "subject")?;
@@ -4782,7 +4834,10 @@ fn verify_nested(
     // touching `subject.statement_id`/`entry_id` is what keeps a foreign-version subject from
     // being reported `invalid` over a copied identifier this document has no rules for.
     let payload = payload_of(envelope)?;
+    run.phase(Assertion::Versions);
     check_ahl_version(payload)?;
+    run.pass(Assertion::Versions);
+    run.phase(Assertion::Structure);
     if text(subject, "statement_id")? != statement_id(envelope)? {
         return Err(ReceiptError::IdentifierMismatch { field: "statement_id" });
     }
@@ -4791,11 +4846,6 @@ fn verify_nested(
     }
     let subject_index = number(subject, "entry_index")?;
     let subject_type = statement_type(payload)?.to_owned();
-    // Step 1 is settled for this receipt. Both assertions stay open to a later rejection —
-    // an enumerated statement's own `ahl_version`, or a budget exhausted deeper in the run —
-    // and [`Run::record`] keeps the dominating outcome where one arrives.
-    run.pass(Assertion::Versions);
-    run.pass(Assertion::ResourceLimits);
 
     // --- §7.5 step 2: adaptor profile ---------------------------------------------
     // I-D §3.2, §7.5 step 2: "MUST recompute the digest over the artifact rather than trusting
@@ -4806,6 +4856,7 @@ fn verify_nested(
     // ([`ReceiptError::AdaptorHashMismatch`]) — the receipt names a document policy can prove
     // is not the one it trusts, never conflated into the same outcome as simply not knowing
     // the profile.
+    run.phase(Assertion::AdaptorProfile);
     let adaptor = obj(obj(receipt, "anchoring")?, "adaptor")?;
     let adaptor_id = text(adaptor, "id")?;
     let profile = policy
@@ -4859,8 +4910,10 @@ fn verify_nested(
     // "No signature and no cosignature is verified in this step." The checkpoint's own members
     // are read here only as the structural commitment the carried material is bound to; that
     // the log issued this root is established at 4f and nowhere earlier.
+    run.phase(Assertion::Structure);
     check_container_shapes(receipt)?;
     run.pass(Assertion::Structure);
+    run.phase(Assertion::Anchoring);
     let checkpoint = checkpoint_object(obj(anchoring_block, "checkpoint")?)?;
     let tree_size = number(checkpoint, "tree_size")?;
     let root = parse_hash_hex(text(checkpoint, "root_hash")?)?;
@@ -4880,6 +4933,7 @@ fn verify_nested(
     // against, on the same terms — an unauthenticated structural commitment, upgraded wholesale
     // by 4f — so it precedes every signature without making any signature's outcome depend on
     // material no key vouches for.
+    run.phase(Assertion::Governance);
     let currency = obj(obj(receipt, "governance")?, "currency")?;
     let mode = text(currency, "mode")?;
     if !GOVERNANCE_MODES.contains(&mode) {
@@ -4933,6 +4987,7 @@ fn verify_nested(
     // --- §7.5.1 4f: authenticated checkpoint validation -----------------------------
     // Only on passing this do step 3's path results become claims about the log's state
     // rather than about carried bytes.
+    run.phase(Assertion::CheckpointAuthentication);
     let anchoring = verify_checkpoint(
         receipt,
         policy,
@@ -4953,20 +5008,27 @@ fn verify_nested(
     // required finding, and `invalid` dominates `unverifiable`, so the run records that finding
     // and carries on — the assertions after it rest on the same unresolved key and are reported
     // as resting on it, while a defect reached later still decides the result.
+    run.phase(Assertion::EnvelopeValidity);
     let envelope_outcome = verify_envelope_at(envelope, &governance, subject_index, run);
     let envelope_valid = run.tolerate(envelope_outcome)?;
     // I-D §2.2's common payload fields, checked only now that the subject's own signature has
     // verified — the same rule chain hops get, applied to the one carried envelope that is
     // never itself a chain hop.
+    run.phase(Assertion::Structure);
     common_payload_fields(payload)?;
     // Every producer key the receipt lists must be in force at the subject's entry index under
     // the §7.2 snapshot rule, bound to the governance statement that put it there (§2.2).
+    // The receipt's own `keys.producer[]` listing, bound to the governance state that put each
+    // key in force (I-D §7.1, §2.2) — a governance fact rather than a signature.
+    run.phase(Assertion::Governance);
     bind_producer_keys(receipt, &governance, subject_index)?;
     if envelope_valid.is_some() {
+        run.phase(Assertion::EnvelopeValidity);
         run.pass(Assertion::EnvelopeValidity);
     }
 
     // --- §2.1 / §4: governance currency ---------------------------------------------
+    run.phase(Assertion::CrossField);
     let claim = obj(receipt, "claim")?;
     let claim_type = text(claim, "type")?.to_owned();
     let assurance = read_assurance(obj(claim, "assurance")?, &claim_type)?;
@@ -4992,7 +5054,9 @@ fn verify_nested(
             None
         }
         Some(enumeration) => {
+            run.phase(Assertion::EnvelopeValidity);
             verify_enumerated_envelopes(enumeration, &governance, run)?;
+            run.phase(Assertion::CrossField);
             Some(enumeration)
         }
     };
@@ -5072,7 +5136,11 @@ fn verify_nested(
         enumeration,
         depth,
     };
+    run.phase(Assertion::ClaimMaterial);
     verify_claim_material(&ctx, run)?;
+    // The content-binding step inside claim material sets its own phase; put this receipt's
+    // claim material back before the assertion is recorded.
+    run.phase(Assertion::ClaimMaterial);
     run.pass(Assertion::ClaimMaterial);
     // I-D §7.7: the content binding is a required assertion "if and only if its own
     // `assurance.content_binding` is not `none`". Where it is required and the run reached the
@@ -5081,6 +5149,7 @@ fn verify_nested(
         run.pass(Assertion::ContentBinding);
     }
     run.blocked = enclosing_block;
+    run.scope = enclosing_phase;
 
     Ok(Verdict {
         boundary: render(&claim_type, &assurance),
@@ -5439,7 +5508,7 @@ fn verify_claim_material(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
 fn verify_record_ingested(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
     ctx.require_subject_type("ingestion")?;
     let (dataset, record) = ctx.record_subject.ok_or_else(|| ctx.missing("record_subject"))?;
-    let binding = verify_content_binding(ctx, dataset, record, "record_bytes");
+    let binding = verify_content_binding(ctx, run, dataset, record, "record_bytes");
     run.tolerate(binding).map(|_| ())
 }
 
@@ -5480,11 +5549,19 @@ fn verify_record_ingested(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
 #[allow(clippy::too_many_lines)]
 fn verify_content_binding(
     ctx: &ClaimCtx<'_>,
+    run: &mut Run,
     dataset: &str,
     record: &str,
     field: &'static str,
 ) -> Result<()> {
     let material = ctx.material()?;
+    // The two presence rules below are not the content binding itself, and neither is a
+    // required assertion of a receipt that asserts `content_binding: "none"` — §7.7 makes the
+    // content binding required "if and only if its own `assurance.content_binding` is not
+    // `none`". They keep the assertions their own rules belong to: §7.6's "a combination the
+    // type cannot satisfy" is a cross-field disagreement, and §7.2's "carried together or not
+    // at all" is claim material.
+    run.phase(Assertion::CrossField);
     // I-D §7.2, both record rows: the bytes and `canonicalization` are present "if and only if
     // `content_binding` is not `none`, together with `media_type` if and only if the descriptor
     // requires it". Presence is therefore settled from the assurance field alone, BEFORE any of
@@ -5504,10 +5581,13 @@ fn verify_content_binding(
     // Neither member is evidence without the other, so they stand or fall together: bytes with
     // no descriptor cannot be canonicalized, and a descriptor with no bytes canonicalizes
     // nothing. Whichever is absent is the one named.
+    run.phase(Assertion::ClaimMaterial);
     if has_bytes != has_canonicalization {
         return Err(if has_bytes { ctx.missing("canonicalization") } else { ctx.missing(field) });
     }
 
+    // From here the receipt's own content binding is what is being settled.
+    run.phase(Assertion::ContentBinding);
     let manifest_version_id = text(ctx.payload, "manifest")?;
     let (_, manifest) =
         ctx.governance.manifest_by_version_id(manifest_version_id).ok_or_else(|| {
@@ -5711,7 +5791,7 @@ fn verify_record_derived(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> {
         }
     }
 
-    let binding = verify_content_binding(ctx, &claimed.0, &claimed.1, "output_bytes");
+    let binding = verify_content_binding(ctx, run, &claimed.0, &claimed.1, "output_bytes");
     run.tolerate(binding).map(|_| ())
 }
 
@@ -5931,6 +6011,11 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, run: &mut Run, kind: &str) -> Result<()> {
     // The introduction proof establishes who may retract (§3 authority note).
     let introduction =
         verify_embedded(ctx, "introduction", "introduction", &INTRODUCTION_TYPES, run)?;
+    // The two rules below are §7.6 cross-field rules — "Every embedded receipt's
+    // `record_subject` and entry indexes match the referencing material" — reached from inside
+    // the claim-material step because that is where the embedded receipt is opened. The
+    // assertion follows the rule, not the step.
+    run.phase(Assertion::CrossField);
     // Spec §2.3.3: a trigger anchored at a smaller entry index than the record's introduction
     // is never effective — authority cannot predate the introduction that creates it.
     if introduction.entry_index >= ctx.subject_index {
@@ -5949,6 +6034,7 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, run: &mut Run, kind: &str) -> Result<()> {
             want: describe_record(Some(subject_record)),
         });
     }
+    run.phase(Assertion::ClaimMaterial);
 
     if subject_type == "correction" {
         // I-D §2.4.3: a correction carries ONE `dataset`, governing both `record` and
@@ -5963,6 +6049,7 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, run: &mut Run, kind: &str) -> Result<()> {
             &INTRODUCTION_TYPES,
             run,
         )?;
+        run.phase(Assertion::CrossField);
         // Spec §2.3.3: a correction's replacement must be introduced at an entry index no
         // greater than the correction's.
         if embedded.entry_index > ctx.subject_index {
@@ -5979,6 +6066,7 @@ fn verify_trigger(ctx: &ClaimCtx<'_>, run: &mut Run, kind: &str) -> Result<()> {
                 want: describe_record(Some(&replacement)),
             });
         }
+        run.phase(Assertion::ClaimMaterial);
     }
 
     // Scope is what makes a trigger meaningful at all; a scopeless one is malformed (§2.3.3).
@@ -6260,6 +6348,9 @@ fn verify_disposition(ctx: &ClaimCtx<'_>, run: &mut Run, trigger_kind: &'static 
     let material = ctx.material()?;
     let trigger = verify_embedded(ctx, "trigger", trigger_kind, &[trigger_kind], run)?;
 
+    // §7.6 again, reached from inside claim material: the embedded receipt's subject and entry
+    // index against the material that references it.
+    run.phase(Assertion::CrossField);
     // The propagation must name the trigger the embedded receipt proves (spec §2.3.4).
     if text(ctx.payload, "trigger")? != trigger.verdict.subject_statement_id {
         return Err(ReceiptError::EmbeddedSubjectMismatch {
@@ -6277,6 +6368,7 @@ fn verify_disposition(ctx: &ClaimCtx<'_>, run: &mut Run, trigger_kind: &'static 
         });
     }
 
+    run.phase(Assertion::ClaimMaterial);
     let leaf = material.get("disposition_leaf").ok_or_else(|| ctx.missing("disposition_leaf"))?;
     let leaf_record = (text(leaf, "dataset")?.to_owned(), text(leaf, "record")?.to_owned());
     if ctx.record_subject != Some(&leaf_record) {

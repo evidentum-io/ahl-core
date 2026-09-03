@@ -151,7 +151,7 @@
       "claim_type": "record-derived",
       "expect": "invalid",
       "file": "record-derived-wrong-path-must-fail.ahl",
-      "finding": "anchoring",
+      "finding": "claim-material",
       "reason": "inclusion path for batch output leaf did not verify against the anchored root",
       "rule": "receipt §3 — `leaf_path` must open `outputs_root`"
     },
@@ -182,7 +182,7 @@
       "claim_type": "record-derived",
       "expect": "invalid",
       "file": "record-derived-input-members-on-full-array-must-fail.ahl",
-      "finding": "structure",
+      "finding": "claim-material",
       "reason": "malformed receipt: `claim_material.input_members` is carried ONLY where `batch_leaf.inputs` is the input-set form; the full-array form of I-D §2.7 lists its inputs in the leaf and commits no `input_set_root` for a member to open (I-D §7.2)",
       "rule": "I-D §7.2 / §2.7 — `input_members` is carried only with the input-set form"
     },
@@ -260,7 +260,7 @@
       "claim_type": "trigger-effective",
       "expect": "invalid",
       "file": "trigger-effective-enumerated-with-later-checkpoint-must-fail.ahl",
-      "finding": "cross-field",
+      "finding": "governance",
       "reason": "enumerated governance currency together with `anchoring.later_checkpoint` cannot be evidenced under this format revision: receipt format §2.1 requires governance material covering through `later_checkpoint.tree_size`, while §4 fixes enumerated material at exactly [0, tree_size(anchoring.checkpoint)); no range satisfies both, so the coverage §2.1 mandates is absent and the receipt is refused rather than accepted on unproven governance",
       "rule": "receipt §2.1 vs §4 — enumerated currency cannot cover a later checkpoint, so the combination is refused rather than accepted on unproven governance"
     },
@@ -320,7 +320,7 @@
       "claim_type": "disposition-declared",
       "expect": "invalid",
       "file": "disposition-declared-wrong-path-must-fail.ahl",
-      "finding": "anchoring",
+      "finding": "claim-material",
       "reason": "inclusion path for disposition leaf did not verify against the anchored root",
       "rule": "receipt §3 — `leaf_path` must open the propagation's `affected_root`"
     },
@@ -475,7 +475,7 @@
       "claim_type": "governance-state",
       "expect": "invalid",
       "file": "governance-key-rotation-proof-checkpoint-missing-log-id-must-fail.ahl",
-      "finding": "structure",
+      "finding": "governance",
       "reason": "malformed receipt: checkpoint log_id: REQUIRED, a `sha256:` family string in lowercase hex",
       "rule": "I-D §7.1 — the rotation-proof checkpoint takes the receipt-borne shape, log_id included"
     },
@@ -531,7 +531,7 @@
       "claim_type": "governance-state",
       "expect": "invalid",
       "file": "governance-key-statement-missing-issued-at-must-fail.ahl",
-      "finding": "structure",
+      "finding": "governance",
       "reason": "malformed receipt: payload issued_at: the member is REQUIRED and MUST be a string (I-D §2.2)",
       "rule": "I-D §2.2 / §7.5.1 4b(K) — issued_at is a REQUIRED common payload field"
     },
@@ -539,7 +539,7 @@
       "claim_type": "governance-state",
       "expect": "invalid",
       "file": "governance-key-statement-malformed-valid-time-must-fail.ahl",
-      "finding": "structure",
+      "finding": "governance",
       "reason": "malformed receipt: payload valid_time: `not a timestamp` is not a valid RFC 3339 timestamp in field `valid_time`: the 'year' component could not be parsed",
       "rule": "I-D §2.2 / §7.5.1 4b(K) — valid_time must be RFC 3339 or a {from,to} object"
     },
@@ -547,7 +547,7 @@
       "claim_type": "governance-state",
       "expect": "invalid",
       "file": "governance-key-statement-unsigned-common-field-must-fail.ahl",
-      "finding": "envelope-validity",
+      "finding": "governance",
       "reason": "envelope signature at entry index 9 did not verify",
       "rule": "I-D §7.5.1 4b — phase 1 (signature) precedes phase 2 (type-specific validation) on enumerated key statements"
     },
