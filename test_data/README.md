@@ -60,14 +60,24 @@ both earlier phases" governs: the induction stops before that manifest, K stays 
 `governance` is `unverifiable` naming the entry index, and every check that would resolve a key
 at or after it is skipped rather than run against a superseded state — which is also 4f's own
 rule. A chain that rotates nothing is untouched. The same division applies to what the chain
-HOLDS rather than to what it establishes: a manifest version absent from a chain the induction
-walked in full is material the receipt owed and is `invalid`, while the same version absent
-because the induction stopped short is a capability gap — the content-binding finding that needed
-its descriptor is `unverifiable` resting on `governance`, never a defect of the artifact. **Each checkpoint's cosignatures are their
+HOLDS rather than to what it establishes: a manifest version the walk reached and does not hold,
+or one the chain does not carry at all, is material the receipt owed and is `invalid`, while a
+version the chain DOES carry at or after the stop is a capability gap — the content-binding
+finding that needed its descriptor is `unverifiable` resting on `governance`, never a defect of
+the artifact. §7.6's own rules about `subject.manifest` are on the other side of that line
+entirely and are never downgraded: that the named version is present in `governance.chain` and
+anchored strictly before the subject is read off the raw chain, at the entry index step 3 proved
+for each element, and is `invalid` on `cross-field` whether or not the induction stopped. Only
+the rule that asks which version was ACTIVE — a question the walk answers — is left unevaluated
+past a stop. **Each checkpoint's cosignatures are their
 own question.** A `local-policy` witness key the verifier does not hold leaves the cosignatures
 that NAME it unevaluated and nothing else — and an entry NO cosignature names is not a gap at
 all, since I-D §7.1's key obligation is conditional on use ("Every key USED in verification MUST
-appear in `keys`"): the cosignatures under keys that did resolve are
+appear in `keys`"). That conditionality is for `local-policy` alone: a `manifest-chain` entry is
+judged against the manifest version its BINDING names whether or not anything selects it, since
+"A `manifest-chain` key that matches no object in the manifest version its binding names, or
+that differs from the matching object in any compared member, is `invalid`" is a rule about the
+entry rather than about the checkpoint. What each checkpoint's cosignatures settle is: the cosignatures under keys that did resolve are
 verified, both the primary and the later checkpoint's log signatures are verified, and
 `assurance.continued_history` is still evaluated against `later_checkpoint`, `later_witnesses`
 and `consistency_path`. A later checkpoint that does not verify is `invalid` and is never hidden
