@@ -252,9 +252,38 @@ pub enum ReceiptError {
         got: String,
     },
 
-    /// A §3.1 resource limit was exhausted. Rejection, never degradation.
-    #[error("resource limit exhausted: {0}")]
+    /// A §7.8 FIXED limit was exceeded: the embedded-receipt nesting depth, or the number of
+    /// embedded receipts in the file.
+    ///
+    /// I-D §7.8: the fixed limits "are properties of the artifact, decided identically by every
+    /// verifier in every year, so a receipt exceeding either is `invalid`." Kept apart from
+    /// [`Self::BudgetExhausted`] for exactly that reason — the two classes of limit produce
+    /// different §7.7 results, and one variant for both would make the result depend on a
+    /// string.
+    #[error("fixed resource limit exceeded: {0}")]
     LimitExceeded(&'static str),
+
+    /// A VERIFIER-LOCAL budget was exhausted: the decoded-size budget, or the
+    /// verification-work budget (I-D §7.8).
+    ///
+    /// This is the I-D's `unverifiable` outcome, not `invalid`: "the artifact has not been
+    /// shown defective, and a verifier reporting `invalid` here would contradict a
+    /// better-resourced verifier's `verified` over the same bytes, which Section 7.7 forbids."
+    ///
+    /// Both members are carried because §7.8 requires both to be reported: "A verifier MUST
+    /// report WHICH budget was exhausted and the value that was in force, since `unverifiable`
+    /// without that is not actionable — the holder of the receipt cannot otherwise tell whether
+    /// the remedy is a larger budget or a smaller receipt."
+    #[error(
+        "verifier-local budget `{budget}` is exhausted; the value in force for this run is \
+         {in_force} (I-D §7.8: unverifiable, never invalid)"
+    )]
+    BudgetExhausted {
+        /// Which budget ran out, named as the verifier configures it.
+        budget: &'static str,
+        /// The value that was in force for this run.
+        in_force: u64,
+    },
 
     /// `subject.statement_id` or `subject.entry_id` disagrees with `envelope` (§5 step 1).
     #[error("`subject.{field}` does not match the carried envelope")]
@@ -999,6 +1028,12 @@ fn common_payload_fields(payload: &Value) -> Result<()> {
 // Budget
 // ---------------------------------------------------------------------------
 
+/// The verification-work budget, under the name I-D §7.8 requires a verifier to report it by.
+const WORK_BUDGET: &str = "verification work units";
+
+/// The decoded-size budget, under the name I-D §7.8 requires a verifier to report it by.
+const DECODED_SIZE_BUDGET: &str = "decoded size in bytes";
+
 /// Tracks the §3.1 budgets across a whole receipt tree, including embedded receipts.
 #[derive(Debug)]
 struct Budget {
@@ -1021,7 +1056,10 @@ impl Budget {
     const fn spend(&mut self, units: u64) -> Result<()> {
         self.work = self.work.saturating_add(units);
         if self.work > self.limits.max_work_units {
-            return Err(ReceiptError::LimitExceeded("verification work budget"));
+            return Err(ReceiptError::BudgetExhausted {
+                budget: WORK_BUDGET,
+                in_force: self.limits.max_work_units,
+            });
         }
         Ok(())
     }
@@ -3887,7 +3925,10 @@ pub fn verify_receipt(receipt: &Value, policy: &TrustPolicy) -> Result<Verdict> 
     check_receipt_versions(receipt)?;
     let encoded = jcs(receipt);
     if encoded.len() > policy.limits.max_decoded_bytes {
-        return Err(ReceiptError::LimitExceeded("decoded size budget"));
+        return Err(ReceiptError::BudgetExhausted {
+            budget: DECODED_SIZE_BUDGET,
+            in_force: policy.limits.max_decoded_bytes as u64,
+        });
     }
     let mut budget = Budget::new(policy.limits);
     let verdict = verify_nested(receipt, policy, &mut budget, 0)?;

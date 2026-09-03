@@ -1690,26 +1690,62 @@ fn an_unauthorized_verifier_cannot_satisfy_a_keyed_content_binding() {
     );
 }
 
+/// I-D §7.8's two classes of limit, and the two different outcomes they produce.
+///
+/// The FIXED limits — nesting depth 4, 64 embedded receipts — "are properties of the artifact,
+/// decided identically by every verifier in every year, so a receipt exceeding either is
+/// `invalid`". The VERIFIER-LOCAL budgets are the opposite: "Exhaustion of either budget yields
+/// `unverifiable`, never `invalid`", and the verifier "MUST report WHICH budget was exhausted
+/// and the value that was in force". Both fail closed either way.
 #[test]
-fn resource_limits_fail_closed_rather_than_degrading() {
+fn fixed_resource_limits_are_rejections_of_the_artifact() {
     let (_, receipt) = read_receipt("disposition-effective-valid.ahl");
 
-    for (limits, label) in [
-        (Limits { max_depth: 1, ..Limits::default() }, "nesting depth"),
-        (Limits { max_embedded: 1, ..Limits::default() }, "embedded receipts"),
-        (Limits { max_decoded_bytes: 1024, ..Limits::default() }, "decoded size"),
-        (Limits { max_work_units: 2, ..Limits::default() }, "verification work"),
+    for (limits, expected) in [
+        (Limits { max_depth: 1, ..Limits::default() }, "embedded-receipt nesting depth"),
+        (Limits { max_embedded: 1, ..Limits::default() }, "embedded receipts per file"),
     ] {
         let policy = TrustPolicy { limits, ..trust_policy() };
+        let error = verify_receipt(&receipt, &policy).expect_err("the fixed limit must fire");
         assert!(
-            matches!(verify_receipt(&receipt, &policy), Err(ReceiptError::LimitExceeded(_))),
-            "{label}: exhaustion must reject, not degrade (receipt §3.1)"
+            matches!(error, ReceiptError::LimitExceeded(what) if what == expected),
+            "{expected}: a fixed limit rejects, never degrades (I-D §7.8), got: {error}"
         );
     }
 
     // The nesting the corpus actually uses stays inside the normative limits.
     let verdict = verify_receipt(&receipt, &trust_policy()).expect("valid receipt");
     assert!(verdict.embedded_receipts <= 64);
+}
+
+#[test]
+fn an_exhausted_local_budget_names_the_budget_and_the_value_in_force() {
+    let (_, receipt) = read_receipt("disposition-effective-valid.ahl");
+
+    for (limits, budget, value) in [
+        (Limits { max_decoded_bytes: 1024, ..Limits::default() }, "decoded size in bytes", 1024),
+        (Limits { max_work_units: 2, ..Limits::default() }, "verification work units", 2),
+    ] {
+        let policy = TrustPolicy { limits, ..trust_policy() };
+        let error = verify_receipt(&receipt, &policy).expect_err("the budget must fire");
+        assert!(
+            matches!(
+                error,
+                ReceiptError::BudgetExhausted { budget: named, in_force }
+                    if named == budget && in_force == value
+            ),
+            "{budget}: exhaustion must name the budget and the value in force (I-D §7.8), \
+             got: {error}"
+        );
+        // The message a holder of the receipt reads carries both, which is what makes
+        // `unverifiable` actionable rather than a bare refusal.
+        let rendered = error.to_string();
+        assert!(rendered.contains(budget), "the message must name the budget: {rendered}");
+        assert!(
+            rendered.contains(&value.to_string()),
+            "the message must carry the value in force: {rendered}"
+        );
+    }
 }
 
 /// I-D §7.5 step 1 orders the version read ahead of the §7.8 limits, and the order is
@@ -1730,7 +1766,7 @@ fn an_unsupported_version_is_reported_ahead_of_the_size_budget() {
         ..trust_policy()
     };
     assert!(
-        matches!(verify_receipt(&valid, &starved), Err(ReceiptError::LimitExceeded(_))),
+        matches!(verify_receipt(&valid, &starved), Err(ReceiptError::BudgetExhausted { .. })),
         "the size budget must fire for a receipt this verifier does support"
     );
 
@@ -1753,8 +1789,9 @@ fn an_unsupported_version_is_reported_ahead_of_the_size_budget() {
 /// I-D §7.5 step 1: "Read `ahl_receipt_version` and act on it before any other check, including
 /// schema validation... Then parse the receipt, enforce the resource limits of Section 7.8."
 /// The depth cap is one of those limits, so a receipt tree that breaks both rules must report
-/// the version: `unverifiable` is a fixed property of the artifact, while the cap is a
-/// verifier-local configuration a differently-configured verifier would not hit at all.
+/// the version: the two are different §7.7 values — an unsupported revision is `unverifiable`,
+/// the fixed depth cap is `invalid` — and the step-1 order decides which of them a holder of
+/// the receipt is told about.
 #[test]
 fn an_embedded_receipts_version_is_read_before_the_depth_limit() {
     let (_, valid) = read_receipt("disposition-effective-valid.ahl");
@@ -1823,7 +1860,7 @@ fn work_cost(receipt: &Value, policy: &TrustPolicy) -> u64 {
             ..policy.clone()
         };
         match verify_receipt(receipt, &scoped) {
-            Err(ReceiptError::LimitExceeded("verification work budget")) => {}
+            Err(ReceiptError::BudgetExhausted { budget: "verification work units", .. }) => {}
             _ => return budget,
         }
     }
