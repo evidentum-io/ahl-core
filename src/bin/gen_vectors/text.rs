@@ -77,7 +77,7 @@ reaches is fixed rather than left to the order of the algorithm:
 | --- | --- | --- |
 | `adaptor-profile` (no profile held, one this build cannot interpret, a capability it does not define, a policy claiming one this build cannot parse) | `checkpoint-authentication`, `witnesses` — the profile document fixes the checkpoint serialization the signature is computed over — and, where the chain rotates a governance key set, `governance` too (see below) | structure, paths, the chain walk, envelope validity, claim material, content binding |
 | `governance` (the configured genesis anchor differs, the configured genesis key fingerprints do, or the induction stopped at a rotation it could not authenticate) | `envelope-validity`, `checkpoint-authentication`, `witnesses`, and the claim material of the authority-dependent types | structure, paths, the chain walk itself, claim-material shape checks, content binding |
-| `witnesses` (a `local-policy` witness key the verifier does not hold) | `cross-field`, since §7.6's `witnessed` rule is one of its rules | everything else, both checkpoint signatures included |
+| `witnesses` (a cosignature naming a `local-policy` witness key the verifier does not hold; an entry no cosignature names is not a gap) | `cross-field`, since §7.6's `witnessed` rule is one of its rules | everything else, both checkpoint signatures included |
 | `envelope-validity` (a declared-mode producer-key transition the mode does not carry) | the claim material of the authority-dependent types (§7.5.1 4e is applied only to envelopes valid under 4d) | everything else |
 | `content-binding` (an unimplemented canonicalization procedure, a dataset key not held) | nothing | everything else |
 
@@ -91,9 +91,15 @@ OUTGOING key state, and that proof rests on a checkpoint — so without the adap
 both earlier phases" governs: the induction stops before that manifest, K stays pre-rotation,
 `governance` is `unverifiable` naming the entry index, and every check that would resolve a key
 at or after it is skipped rather than run against a superseded state — which is also 4f's own
-rule. A chain that rotates nothing is untouched. **Each checkpoint's cosignatures are their
+rule. A chain that rotates nothing is untouched. The same division applies to what the chain
+HOLDS rather than to what it establishes: a manifest version absent from a chain the induction
+walked in full is material the receipt owed and is `invalid`, while the same version absent
+because the induction stopped short is a capability gap — the content-binding finding that needed
+its descriptor is `unverifiable` resting on `governance`, never a defect of the artifact. **Each checkpoint's cosignatures are their
 own question.** A `local-policy` witness key the verifier does not hold leaves the cosignatures
-that NAME it unevaluated and nothing else: the cosignatures under keys that did resolve are
+that NAME it unevaluated and nothing else — and an entry NO cosignature names is not a gap at
+all, since I-D §7.1's key obligation is conditional on use ("Every key USED in verification MUST
+appear in `keys`"): the cosignatures under keys that did resolve are
 verified, both the primary and the later checkpoint's log signatures are verified, and
 `assurance.continued_history` is still evaluated against `later_checkpoint`, `later_witnesses`
 and `consistency_path`. A later checkpoint that does not verify is `invalid` and is never hidden
