@@ -557,9 +557,8 @@ pub fn atl_checkpoint_blob(
 pub fn atl_checkpoint_time_nanos(value: &str) -> AhlResult<u64> {
     let invalid = || {
         AhlError::AtlCheckpoint(format!(
-            "checkpoint_time `{value}`: not the ATL adaptor's required rendering — exactly \
-             nine fractional-second digits and a literal `Z` (adaptor profile \
-             `ahl-adaptor-atl-v1` §6.3)"
+            "checkpoint_time `{value}`: not the required rendering for an ATL-shaped \
+             checkpoint — exactly nine fractional-second digits and a literal `Z`"
         ))
     };
     // "YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ" is exactly 30 ASCII bytes: a literal `.` at offset 19
@@ -604,8 +603,8 @@ pub fn atl_checkpoint_blob_from_json(checkpoint: &Value) -> AhlResult<[u8; 98]> 
         .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
         .ok_or_else(|| {
             invalid(
-                "`log_id` is not a `sha256:` family string in lowercase hex (adaptor profile \
-                 `ahl-adaptor-atl-v1` §6.2)"
+                "`log_id` is not a `sha256:` family string in lowercase hex, so it is not an \
+                 Origin ID an ATL-shaped checkpoint blob can carry"
                     .to_owned(),
             )
         })?;
@@ -627,8 +626,8 @@ pub fn atl_checkpoint_blob_from_json(checkpoint: &Value) -> AhlResult<[u8; 98]> 
         .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
         .ok_or_else(|| {
             invalid(
-                "`root_hash` is not a `sha256:` family string in lowercase hex (adaptor \
-                 profile `ahl-adaptor-atl-v1` §6.2)"
+                "`root_hash` is not a `sha256:` family string in lowercase hex, so it is not \
+                 a root an ATL-shaped checkpoint blob can carry"
                     .to_owned(),
             )
         })?;
@@ -677,31 +676,25 @@ pub fn reconcile_atl_checkpoint_raw(checkpoint: &Value, raw: &str) -> AhlResult<
     let invalid = |detail: String| AhlError::AtlCheckpoint(format!("raw: {detail}"));
 
     let encoded = raw.strip_prefix(BASE64_PREFIX).ok_or_else(|| {
-        invalid(
-            "`raw` MUST be `base64:<...>` (adaptor profile `ahl-adaptor-atl-v1` §6.4)".to_owned(),
-        )
+        invalid("`raw` MUST be `base64:<...>` for an ATL-shaped checkpoint framing".to_owned())
     })?;
     let bytes = B64
         .decode(encoded)
         .map_err(|source| invalid(format!("`raw` does not decode as base64: {source}")))?;
     let Ok(carried): core::result::Result<[u8; 98], _> = bytes.try_into() else {
         return Err(invalid(
-            "`raw` MUST decode to exactly 98 octets (adaptor profile `ahl-adaptor-atl-v1` §6.1)"
+            "`raw` MUST decode to exactly 98 octets for an ATL-shaped checkpoint framing"
                 .to_owned(),
         ));
     };
     if carried[0..18] != *b"ATL-Protocol-v1-CP" {
-        return Err(invalid(
-            "`raw`'s magic is not `ATL-Protocol-v1-CP` (adaptor profile `ahl-adaptor-atl-v1` \
-             §6.1)"
-                .to_owned(),
-        ));
+        return Err(invalid("`raw`'s magic is not `ATL-Protocol-v1-CP`".to_owned()));
     }
     let assembled = atl_checkpoint_blob_from_json(checkpoint)?;
     if carried != assembled {
         return Err(invalid(
             "`raw` does not equal the blob assembled from the JSON checkpoint members — the \
-             JSON members govern (adaptor profile `ahl-adaptor-atl-v1` §6.2, §6.4, §6.5)"
+             JSON members govern"
                 .to_owned(),
         ));
     }

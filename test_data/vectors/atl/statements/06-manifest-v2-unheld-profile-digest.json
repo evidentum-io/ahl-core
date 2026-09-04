@@ -1,5 +1,5 @@
 {
-  "entry_id": "sha256:e081cb857f24ff152ea82cd4c56bbd66ebc5a4b7760528faf5ce808c4ded2445",
+  "entry_id": "sha256:8e07bdb03176f1727b0c279b3b129ed34b0ce40a08ce5efaf71390d73687d2c1",
   "entry_index": 6,
   "envelope": {
     "payload": {
@@ -33,7 +33,7 @@
       "log": {
         "adaptor": {
           "hash": "sha256:bfe6b7acef3e50fc103ab893e09bf94cb3fb1818bdfc9b03df8404b008399f1d",
-          "id": "ahl-adaptor-atl-v1"
+          "id": "ahl-test-atl-leaf-v1"
         },
         "cadence_epoch": "2026-08-16T11:30:00Z",
         "checkpoint_cadence": "PT1H",
@@ -54,7 +54,7 @@
           "scoring-v1"
         ]
       },
-      "predecessor": "sha256:5b366e6e5539fcb1975ee728a1102bd33e527a0f36f690984b86732373d65b89",
+      "predecessor": "sha256:1115d3afd3edb87fdefb4c83b2eac8e5f4490c5dcb0c01329e2826648f9f2e40",
       "producer": "producer-1",
       "properties": {
         "reproducible_reconstruction": false
@@ -84,9 +84,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:Gu/67b28GrnI6v41SQ3vwwGAQsytq0RPNUOabo1ty3cMkmDGDQ0z5vHfoObNf7o5zLCiBchwtQlqkYaxPzkkAw=="
+        "sig": "base64:fykHcufAIu/UZTv5UDEGsOILjXHp4fZmZ9pk2JTEjUvtkTVYFqsqJ36MukgqID+1bqpU7TDcNlzI46+aDEjpAg=="
       }
     ]
   },
-  "statement_id": "sha256:50ce708e00a6fe04264683a7d5bfbc5217a7be79372d8b0f8d814c694f22da3b"
+  "statement_id": "sha256:5291771704a97a3c259c6549d8e66ad05ca5d9e02d1c58fc70a099ad32ce6081"
 }

@@ -1,27 +1,31 @@
-//! A second toy log, bound to adaptor profile `ahl-adaptor-atl-v1`.
+//! A second toy log, bound to the ATL-shaped adaptor profile `ahl-test-atl-leaf-v1`.
 //!
 //! The main corpus binds `ahl-test-log-v1`, whose log leaf is the anchored entry bytes. This
 //! one exists so the pieces that DIFFER under the ATL binding are exercised end to end rather
-//! than at the unit level: the two-digest leaf construction of adaptor §4.2, the origin-derived
-//! `log_id` of §7.1, the 98-byte checkpoint blob of §6.1 with the `raw` framing of §6.4, the
-//! range enumeration of §10.4-§10.5, and the consistency proofs of §8.3.
+//! than at the unit level: the two-digest leaf construction of its §3.1, the origin-derived
+//! `log_id` of §4, the 98-byte checkpoint blob of §5.1 with the `raw` framing of §5.4, the range
+//! enumeration of §9, and the consistency proofs of §8.
 //!
-//! # What this corpus pins, and what it deliberately does not
+//! # Which profile this corpus pins
 //!
-//! Adaptor §14 makes release a precondition for use: "Until this document is released as an
-//! immutable, openly published artifact at a stable location, its digest is not stable and no
-//! manifest may pin it." That obligation binds a corpus operator and a verifier cannot enforce
-//! it — a manifest that pins a draft digest is indistinguishable from one that pins a released
-//! one, and prose beside the pin is not something a policy loader reads.
+//! Not `ahl-adaptor-atl-v1`. That profile's own §14 makes identity a matter of bytes — "any
+//! change to this document, however small, produces a different hash and therefore a different
+//! profile. A changed profile MUST be published under a new id" — so no document a corpus could
+//! ship is that artifact, and publishing one under that id would be a conformance violation
+//! whatever the document said about itself and whatever a local policy held.
 //!
-//! So this crate ships NO copy of the unreleased profile, and this corpus pins nothing that
-//! could ever collide with the released artifact's digest. It pins the digest of the STAND-IN
-//! artifact at `test_data/profiles/ahl-adaptor-atl-v1.stand-in.md`, whose own first lines say
-//! what it is: different bytes from any revision of the profile, so a manifest pinning it
-//! resolves only against a policy holding it, and a manifest pinning the draft's digest — or the
-//! released artifact's — does not resolve here at all. The dispatch keys on the profile ID
-//! string, which is what names the serialization rules; the digest is what names the artifact,
-//! and a stand-in artifact is the honest thing to name while the real one is unreleased.
+//! What this corpus pins is `ahl-test-atl-leaf-v1`, a profile of its own with a document of its
+//! own at `test_data/profiles/ahl-test-atl-leaf-v1.md`. That document defines the leaf
+//! construction, the 98-byte checkpoint blob, the `raw` framing, the origin-derived log id, the
+//! tree geometry and the range form AS ITS OWN rules, and cites the ATL adaptor draft as the
+//! source of the shape while claiming nothing about being it. The serialization is the same,
+//! which is the point: the corpus exercises those rules under an identity it may publish.
+//!
+//! The verifier keys both ids onto one code path, so a receipt pinning `ahl-adaptor-atl-v1`
+//! against a policy holding that profile's released artifact verifies the same way. This crate
+//! ships no document for that id, so its own policy holds none, and a receipt pinning it here is
+//! `unverifiable` — the profile is not held (I-D §7.5 step 2), which is a gap in the verifier's
+//! configuration rather than a defect of the artifact.
 //!
 //! Adaptor §10 records that the published ATL server serves no enumeration interface, so the
 //! range material below is the material a mirror would serve — corpus material under core spec
@@ -39,7 +43,7 @@ use ahl_core::{
     consistency_proof, cosignature_bytes, entry_id, envelope, hash_hex, inclusion_proof, jcs,
     leaf_hash, log_leaf_bytes_for, parse_hash_hex, proof_path_hex, range_proof, sha256_hex,
     statement_id, tree_root, verify_consistency_proof, verify_envelope, verify_inclusion_proof,
-    verify_signature, TestKey, ATL_PROFILE_ID,
+    verify_signature, TestKey, TEST_ATL_PROFILE_ID,
 };
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -49,10 +53,10 @@ use crate::scenario::{
     manifest, signed, transform, write_jcs, write_json, write_text, Keys, DS_CUSTOMERS, DS_SCORES,
     PIPELINE, T0, WITNESS_1,
 };
-use crate::text::ATL_STAND_IN_DOC;
+use crate::text::TEST_ATL_PROFILE_DOC;
 
-/// Where the stand-in artifact is published, relative to `test_data/`.
-const STAND_IN_PATH: &str = "profiles/ahl-adaptor-atl-v1.stand-in.md";
+/// Where this corpus's own adaptor profile document is published, relative to `test_data/`.
+const PROFILE_PATH: &str = "profiles/ahl-test-atl-leaf-v1.md";
 
 /// The 16-byte ATL Data Tree UUID this corpus is bound to.
 ///
@@ -65,22 +69,22 @@ const TREE_UUID: [u8; 16] = [0x0A; 16];
 /// The checkpoint timestamp of the primary checkpoint, in Unix nanoseconds.
 ///
 /// `2026-08-16T12:00:00.123456789Z` — the corpus reference instant with a fractional part, so
-/// the §6.3 rendering rule ("exactly nine fractional digits") is exercised by a value that
+/// the §5.3 rendering rule ("exactly nine fractional digits") is exercised by a value that
 /// actually has nine significant ones. It sits inside `[cadence_epoch, cadence_epoch + PT1H]`,
 /// the window core spec §7.3 requires of the earliest checkpoint committing the genesis
 /// manifest. Later checkpoints advance by a whole second, keeping nine significant digits.
 const CHECKPOINT_NANOS: u64 = 1_786_881_600_123_456_789;
 
-/// A metadata digest that is NOT the one adaptor §4.2 pins, for the two negatives that prove the
+/// A metadata digest that is NOT the one the profile pins, for the two negatives that prove the
 /// constant is load-bearing.
 const WRONG_METADATA: &str = r#"{"ahl_adaptor":"not-this-profile"}"#;
 
 /// The bytes whose digest manifest version 2 pins the profile id at.
 ///
-/// It stands for any artifact a policy holding the stand-in does not hold — the released profile
-/// included, whatever its digest turns out to be. Deliberately not the draft's digest: this
-/// crate ships no copy of the draft, and hard-coding a digest of an unreleased document would
-/// pin a moving target in exactly the way §14 forbids.
+/// It stands for any artifact a policy holding this corpus's profile document does not hold. It
+/// is deliberately a marker rather than any real document: §14's identity rule makes a profile
+/// its bytes, so a corpus that hard-coded some other project's digest would be asserting
+/// something about that project's artifact.
 const UNHELD_ARTIFACT: &[u8] = b"an adaptor profile artifact this corpus does not hold";
 
 /// Entry-index labels, one per anchored envelope.
@@ -121,9 +125,9 @@ impl AtlAnchor {
 pub struct AtlCorpus {
     log_id: String,
     envelopes: Vec<Value>,
-    /// Digest of the STAND-IN artifact — what the genesis manifest pins.
-    stand_in_hash: String,
-    stand_in_document: Vec<u8>,
+    /// Digest of this corpus's own profile document — what the genesis manifest pins.
+    profile_hash: String,
+    profile_document: Vec<u8>,
     /// Digest of an artifact this corpus does not hold — what manifest v2 pins.
     unheld_hash: String,
     anchors: Vec<AtlAnchor>,
@@ -135,14 +139,14 @@ pub struct AtlCorpus {
 impl AtlCorpus {
     #[allow(clippy::too_many_lines)] // One linear scenario; splitting it would obscure the order.
     pub fn build(keys: &Keys, records: &Records, root: &Path) -> Self {
-        let (stand_in_hash, stand_in_document) = write_and_hash_stand_in(root);
+        let (profile_hash, profile_document) = write_and_hash_profile(root);
         let unheld_hash = sha256_hex(UNHELD_ARTIFACT);
         let log_id = atl_log_id(&TREE_UUID);
 
         // Entry 0: the genesis manifest. `scenario::manifest` builds the whole §7.2/§7.3 shape;
         // only the adaptor id differs, since the hash and the log id are already parameters.
-        let mut genesis = manifest(keys, &log_id, &stand_in_hash, 0, None);
-        genesis["log"]["adaptor"]["id"] = json!(ATL_PROFILE_ID);
+        let mut genesis = manifest(keys, &log_id, &profile_hash, 0, None);
+        genesis["log"]["adaptor"]["id"] = json!(TEST_ATL_PROFILE_ID);
         let env_0 = envelope(genesis, &keys.producer_1);
         let m1 = statement_id(&env_0).expect("well-formed envelope");
 
@@ -194,7 +198,7 @@ impl AtlCorpus {
         // held under that id whose HASH DIFFERS is a disagreement "decidable from the bytes in
         // hand", and the result is `invalid`.
         let mut v2 = manifest(keys, &log_id, &unheld_hash, 6, Some(&entry_id(&env_0)));
-        v2["log"]["adaptor"]["id"] = json!(ATL_PROFILE_ID);
+        v2["log"]["adaptor"]["id"] = json!(TEST_ATL_PROFILE_ID);
         v2["witnesses"][0]["keys"][0]["valid_from_index"] = json!(0);
         let env_6 = envelope(v2, &keys.producer_1);
 
@@ -215,7 +219,7 @@ impl AtlCorpus {
             })
             .collect::<Vec<_>>();
 
-        // The same entries under a metadata digest this profile does not pin. Adaptor §4.2: "An
+        // The same entries under a metadata digest this profile does not pin. Its §3.1: "An
         // entry whose ATL metadata is anything else is NOT an AHL entry under this profile and
         // MUST be rejected by an AHL verifier, even if it is a valid ATL entry." The checkpoint
         // over that tree is genuinely signed and genuinely cosigned, so nothing about it is
@@ -228,8 +232,8 @@ impl AtlCorpus {
         Self {
             log_id,
             envelopes,
-            stand_in_hash,
-            stand_in_document,
+            profile_hash,
+            profile_document,
             unheld_hash,
             anchors,
             wrong_metadata,
@@ -240,9 +244,9 @@ impl AtlCorpus {
         self.anchors.iter().find(|a| a.name == name).expect("named checkpoint")
     }
 
-    /// Authenticated range enumeration over `[from, to)` under `anchor` (adaptor §10.4-§10.5).
+    /// Authenticated range enumeration over `[from, to)` under `anchor` (profile §9).
     ///
-    /// The byte layout is the one the rest of this corpus uses; the LEAF HASHING is §4.2's,
+    /// The byte layout is the one the rest of this corpus uses; the LEAF HASHING is §3.1's,
     /// which is the whole of the difference and the reason this material exists.
     fn enumeration(&self, from: u64, to: u64, anchor: &AtlAnchor, leaves: &[Vec<u8>]) -> Value {
         let at = usize::try_from(anchor.tree_size()).expect("small tree size");
@@ -260,7 +264,7 @@ impl AtlCorpus {
         })
     }
 
-    /// An RFC 9162 consistency proof between two published tree sizes (adaptor §8.3).
+    /// An RFC 9162 consistency proof between two published tree sizes (profile §8).
     fn consistency_path(&self, from_size: u64, to_size: u64) -> Vec<String> {
         let leaves = atl_leaves(&self.envelopes);
         let proof = consistency_proof(&leaves, from_size, to_size).expect("published sizes");
@@ -313,7 +317,7 @@ impl AtlCorpus {
         // §3.2: `anchoring.adaptor` names the same pair the ACTIVE manifest's own `log.adaptor`
         // pins, so a receipt anchored under a checkpoint version 2 governs carries version 2's
         // pin — which is the whole point of the negative that uses it.
-        let pinned = if anchor.tree_size() > 6 { &self.unheld_hash } else { &self.stand_in_hash };
+        let pinned = if anchor.tree_size() > 6 { &self.unheld_hash } else { &self.profile_hash };
         // A checkpoint commits `[0, tree_size)`, so every path this receipt carries is a path in
         // the tree of THAT size — not in the largest tree the corpus has grown to since.
         let committed = &leaves[..usize::try_from(anchor.tree_size()).expect("small tree size")];
@@ -329,7 +333,7 @@ impl AtlCorpus {
                 "producer": [ key_entry(&keys.producer_1, None) ],
             },
             "anchoring": {
-                "adaptor": { "id": ATL_PROFILE_ID, "hash": pinned },
+                "adaptor": { "id": TEST_ATL_PROFILE_ID, "hash": pinned },
                 "checkpoint": anchor.checkpoint,
                 "inclusion_path": path(subject_index, committed),
                 "witnesses": [ anchor.witness_entry(keys) ],
@@ -356,18 +360,18 @@ impl AtlCorpus {
     /// published genesis anchor (I-D §7.5.1 4a), and this is a different log with a different
     /// genesis manifest. The two vector sets therefore carry their own `index.json` each, with
     /// the policy its outcomes assume beside it. What it holds under the profile id is the
-    /// STAND-IN artifact, never the unreleased profile.
+    /// document of `ahl-test-atl-leaf-v1`, which is the profile this corpus pins.
     pub fn trust_policy(&self, keys: &Keys) -> TrustPolicy {
         TrustPolicy {
             genesis_entry_id: entry_id(&self.envelopes[0]),
             genesis_key_ids: Some(std::iter::once(keys.producer_1.key_id()).collect()),
             adaptor_profiles: std::iter::once((
-                ATL_PROFILE_ID.to_owned(),
+                TEST_ATL_PROFILE_ID.to_owned(),
                 AdaptorProfile {
-                    document: self.stand_in_document.clone(),
+                    document: self.profile_document.clone(),
                     capabilities: AdaptorCapabilities {
-                        // What the BINDING defines: a binary checkpoint framing (§6.4) and a
-                        // consistency-proof serialization (§8.3). Serving consistency proofs and
+                        // What the PROFILE defines: a binary checkpoint framing (§5.4) and a
+                        // consistency-proof serialization (§8). Serving consistency proofs and
                         // the enumeration interface are deployment obligations the profile names
                         // as unmet on the published ATL stack; what a capability records is what
                         // the profile DEFINES, which is what decides whether a receipt's members
@@ -385,8 +389,8 @@ impl AtlCorpus {
     }
 
     /// Re-verify everything this corpus publishes, and abort on any mismatch.
-    // One linear pass over one corpus: the §14 pin, the §4.2 leaves, every checkpoint, the §8.2
-    // inclusion proofs, the §10.4 ranges and the §8.3 consistency proof. Splitting it would
+    // One linear pass over one corpus: the identity pin, the §3.1 leaves, every checkpoint, the §7
+    // inclusion proofs, the §9.1 ranges and the §8 consistency proof. Splitting it would
     // separate each assertion from the rule it restates.
     #[allow(clippy::too_many_lines)]
     pub fn self_check(&self, keys: &Keys) {
@@ -398,29 +402,29 @@ impl AtlCorpus {
             );
         }
 
-        // §14, restated as an assertion: what the genesis manifest pins is the STAND-IN's digest,
-        // and the stand-in says so in its own opening lines.
+        // The identity rule, as an assertion: what the genesis manifest pins is the digest of
+        // THIS profile's own document, under THIS profile's own id.
         assert_eq!(
             self.envelopes[0]["payload"]["log"]["adaptor"]["hash"],
-            json!(self.stand_in_hash),
-            "the genesis manifest must pin the stand-in artifact, never the unreleased profile"
+            json!(self.profile_hash),
+            "the genesis manifest must pin this corpus's own profile document"
         );
-        let opening = String::from_utf8_lossy(&self.stand_in_document);
+        let opening = String::from_utf8_lossy(&self.profile_document);
         assert!(
-            opening.starts_with("# STAND-IN artifact for adaptor profile `ahl-adaptor-atl-v1`"),
-            "the pinned artifact must announce itself as a stand-in in its first line"
+            opening.starts_with("# Adaptor profile `ahl-test-atl-leaf-v1`"),
+            "the pinned document must name the profile it defines in its first line"
         );
         assert!(
-            opening.contains("**This is not the profile.**"),
-            "the pinned artifact must say what it is not"
+            opening.contains("**This profile is not that profile**"),
+            "the pinned document must state its relationship to `ahl-adaptor-atl-v1`"
         );
-        assert_ne!(self.stand_in_hash, self.unheld_hash);
+        assert_ne!(self.profile_hash, self.unheld_hash);
 
-        // Adaptor §4.2: the leaf is `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`,
+        // Profile §3.1: the leaf is `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`,
         // and its first digest is the raw form of the AHL entry id — so the entry id stays
         // derivable from the entry bytes alone even though the leaf is not the entry bytes.
         for env in &self.envelopes {
-            let preimage = log_leaf_bytes_for(env, ATL_PROFILE_ID).expect("known profile");
+            let preimage = log_leaf_bytes_for(env, TEST_ATL_PROFILE_ID).expect("known profile");
             assert_eq!(preimage.len(), 64);
             assert_eq!(&preimage[..32], &parse_hash_hex(&entry_id(env)).expect("entry id")[..]);
             assert_eq!(&preimage[32..], &ahl_core::atl_metadata_hash()[..]);
@@ -445,7 +449,7 @@ impl AtlCorpus {
                 "{}: the checkpoint must commit the root of its own geometry",
                 anchor.name
             );
-            // §6.5: the signature is over the 98-byte blob assembled from the JSON members, and
+            // §5.5: the signature is over the 98-byte blob assembled from the JSON members, and
             // a carried `raw` must equal that blob byte for byte.
             let blob =
                 atl_checkpoint_blob_from_json(&anchor.checkpoint).expect("well-formed checkpoint");
@@ -474,13 +478,13 @@ impl AtlCorpus {
                 "{}: cosignature did not verify",
                 anchor.name
             );
-            // §7.1: `log_id` is `"sha256:" || hex(SHA-256(the 16-byte Data Tree UUID))`, and the
+            // §4: `log_id` is `"sha256:" || hex(SHA-256(the 16-byte Data Tree UUID))`, and the
             // blob binds those same 32 octets as its Origin ID.
             assert_eq!(&blob[18..50], &parse_hash_hex(&self.log_id).expect("log id")[..]);
         }
         assert_eq!(self.log_id, atl_log_id(&TREE_UUID));
 
-        // §8.2: inclusion, in ATL geometry, at every index of the largest published checkpoint.
+        // §7: inclusion, in ATL geometry, at every index of the largest published checkpoint.
         let root = tree_root(&leaves);
         for index in 0..self.envelopes.len() {
             let proof = inclusion_proof(&leaves, index).expect("index within the tree");
@@ -490,7 +494,7 @@ impl AtlCorpus {
             );
         }
 
-        // §10.4: every sub-range of the primary checkpoint opens its root, and a proof for the
+        // §9.1: every sub-range of the primary checkpoint opens its root, and a proof for the
         // wrong range does not.
         let cp5 = self.anchor("cp5");
         let hashes: Vec<_> = leaves[..5].iter().map(|leaf| leaf_hash(leaf)).collect();
@@ -510,7 +514,7 @@ impl AtlCorpus {
             }
         }
 
-        // §8.3: the consistency proof between the two published sizes verifies, and one for the
+        // §8: the consistency proof between the two published sizes verifies, and one for the
         // wrong pair does not.
         let path = consistency_proof(&leaves, 5, 6).expect("published sizes");
         let cp6_root =
@@ -555,15 +559,16 @@ impl AtlCorpus {
             &dir.join("log-tree.json"),
             &json!({
                 "description": "Log tree of the ATL-bound toy corpus. Leaf bytes are NOT the \
-                                anchored entry bytes: adaptor profile `ahl-adaptor-atl-v1` §4.2 \
+                                anchored entry bytes: adaptor profile `ahl-test-atl-leaf-v1` §3.1 \
                                 combines two digests, so the leaf preimage is \
                                 `SHA-256(JCS(envelope)) || METADATA_HASH` and the leaf hash is \
                                 `SHA-256(0x00 || that)`. The first digest is the raw form of the \
-                                AHL entry id. The profile id is pinned at the digest of the \
-                                STAND-IN artifact under `profiles/`, never at the unreleased \
-                                profile's — see that file's own opening lines.",
-                "adaptor": { "id": ATL_PROFILE_ID, "hash": self.stand_in_hash },
-                "adaptor_document": STAND_IN_PATH,
+                                AHL entry id. The profile pinned here is this corpus's own, \
+                                whose document is under `profiles/`; the serialization has the \
+                                same shape as `ahl-adaptor-atl-v1`'s and is defined there as its \
+                                own.",
+                "adaptor": { "id": TEST_ATL_PROFILE_ID, "hash": self.profile_hash },
+                "adaptor_document": PROFILE_PATH,
                 "log_id": self.log_id,
                 "tree_uuid": hex::encode(TREE_UUID),
                 "leaf_rule": "sha256(0x00 || sha256(JCS(envelope)) || METADATA_HASH)",
@@ -619,7 +624,7 @@ impl AtlCorpus {
         let mut vectors: Vec<AtlVector> = Vec::new();
 
         vectors.push((
-            "statement-anchored-atl-profile.ahl",
+            "statement-anchored-atl-leaf.ahl",
             self.receipt(
                 keys,
                 &declared(
@@ -628,24 +633,26 @@ impl AtlCorpus {
                     None,
                     "The same claim `statement-anchored-valid.ahl` makes over the main corpus, \
                      under the OTHER adaptor profile. Three serializations differ and nothing \
-                     else does. The log leaf is adaptor §4.2's two-digest construction, so the \
+                     else does. The log leaf is the profile's §3.1 two-digest construction, so the \
                      inclusion path here opens a root the main corpus's leaf rule would never \
-                     produce. The checkpoint is signed over §6.1's fixed 98-byte blob rather \
+                     produce. The checkpoint is signed over §5.1's fixed 98-byte blob rather \
                      than over `JCS(cp minus \"signature\")`, with `checkpoint_time` rendered to \
-                     exactly nine fractional digits (§6.3) because the blob binds the exact \
-                     nanosecond value. And the checkpoint carries `raw` (§6.4), which this \
+                     exactly nine fractional digits (§5.3) because the blob binds the exact \
+                     nanosecond value. And the checkpoint carries `raw` (§5.4), which this \
                      binding DEFINES, so it must parse to the same values as the JSON members — \
-                     the JSON members govern. `log_id` is origin-derived (§7.1): the 32 octets \
-                     it carries are the Origin ID the blob binds at offset 18. The profile id is \
-                     pinned at the digest of the STAND-IN artifact, never at the unreleased \
-                     profile's; see `profiles/ahl-adaptor-atl-v1.stand-in.md`.",
+                     the JSON members govern. `log_id` is origin-derived (§4): the 32 octets \
+                     it carries are the Origin ID the blob binds at offset 18. The profile is \
+                     this corpus's own `ahl-test-atl-leaf-v1`, pinned at the digest of its own \
+                     document under `profiles/`; its serialization has the same shape as \
+                     `ahl-adaptor-atl-v1`'s, which it cites as the source and claims nothing \
+                     about.",
                 ),
             ),
             None,
         ));
 
         vectors.push((
-            "record-ingested-atl-profile.ahl",
+            "record-ingested-atl-leaf.ahl",
             self.receipt(
                 keys,
                 &declared(
@@ -664,7 +671,7 @@ impl AtlCorpus {
         // --- enumerated governance in §10 geometry ------------------------------------
         let currency = self.enumeration(0, 5, cp5, &leaves);
         vectors.push((
-            "governance-state-atl-profile.ahl",
+            "governance-state-atl-leaf.ahl",
             self.receipt(
                 keys,
                 &AtlSpec {
@@ -679,15 +686,15 @@ impl AtlCorpus {
                     claim_material: json!({ "target_index": 1 }),
                     continued_history: false,
                     note: "Enumerated governance currency over exactly [0, 5), authenticated by \
-                           an adaptor §10.4 range proof whose CARRIED LEAVES are hashed by the \
-                           §4.2 construction. The byte layout of the proof is the one the rest \
-                           of this corpus uses — §10.5 makes that deliberate, \"so a single \
+                           a §9.1 range proof whose CARRIED LEAVES are hashed by the \
+                           §3.1 construction. The byte layout of the proof is the one the rest \
+                           of this corpus uses — §9.2 makes that deliberate, \"so a single \
                            range-proof implementation serves both\" — and the leaf hashing is \
                            the whole of the difference: a verifier that applied the other \
                            profile's leaf rule would recompute a root the checkpoint does not \
                            carry. §10 records that the published ATL server serves no \
                            enumeration interface, so this is the material a mirror would serve \
-                           (core spec §3.5), assembled here by construction. §10.6 also rules \
+                           (core spec §3.5), assembled here by construction. §9.3 also rules \
                            out typed-subset proofs under this binding, which is why the range is \
                            the full prefix rather than the governance statements alone.",
                 },
@@ -707,7 +714,7 @@ impl AtlCorpus {
         );
         let introduction_again = introduction.clone();
         vectors.push((
-            "trigger-effective-atl-profile.ahl",
+            "trigger-effective-atl-leaf.ahl",
             self.receipt(
                 keys,
                 &AtlSpec {
@@ -729,7 +736,7 @@ impl AtlCorpus {
                            the `customers` dataset authority the genesis manifest declares, and \
                            the competing range — the introduction-fixed [1, 5) — carries every \
                            other candidate the checkpoint commits. Both ranges are ATL range \
-                           proofs (§10.4), so this is the claim type that puts §4.2 leaf \
+                           proofs (§9.1), so this is the claim type that puts §3.1 leaf \
                            construction through the enumerated path rather than only through an \
                            inclusion path, and the embedded introduction puts it through an \
                            embedded receipt's own anchoring as well.",
@@ -752,13 +759,13 @@ impl AtlCorpus {
                 currency_material: json!({}),
                 claim_material: json!({}),
                 continued_history: true,
-                note: "`assurance.continued_history` is true, and adaptor §8.3 is what backs it: \
+                note: "`assurance.continued_history` is true, and adaptor §8 is what backs it: \
                        an RFC 9162 proof from cp5 to cp6, serialized as a JSON array of \
                        `sha256:<hex>` family strings, carried beside a `later_checkpoint` in ATL \
                        form. That later checkpoint is authenticated on its own terms — its own \
                        98-byte blob signature under the log key the manifest version active for \
                        ITS tree size declares (§7.5.1 4f), and its own cosignatures in \
-                       `anchoring.later_witnesses[]` rather than the primary checkpoint's. §8.3 \
+                       `anchoring.later_witnesses[]` rather than the primary checkpoint's. §8 \
                        records that the published ATL server serves no consistency-proof route, \
                        so a deployment must supply one; the proof here is generated from the \
                        corpus, which is what a mirror holding the entries would do.",
@@ -773,7 +780,7 @@ impl AtlCorpus {
         malformed_path["anchoring"]["consistency_path"][0] = json!("not-a-family-string");
         malformed_path["claim"]["note"] = json!(
             "MUST FAIL. One element of `anchoring.consistency_path` is not a `sha256:<hex>` \
-             family string. Adaptor §8.3 fixes the serialization as \"a JSON array of \
+             family string. Adaptor §8 fixes the serialization as \"a JSON array of \
              `sha256:<hex>` family strings in the order produced by the RFC 9162 algorithm\", so \
              an element outside that grammar is not a proof node a verifier may interpret — and \
              `assurance.continued_history` is true if and only if both members are present AND \
@@ -783,7 +790,7 @@ impl AtlCorpus {
             "statement-anchored-atl-consistency-path-malformed-must-fail.ahl",
             malformed_path,
             Some((
-                "adaptor `ahl-adaptor-atl-v1` §8.3 — a consistency proof is an array of \
+                "adaptor `ahl-test-atl-leaf-v1` §8 — a consistency proof is an array of \
                  `sha256:<hex>` family strings",
                 |e: &ReceiptError| {
                     matches!(e, ReceiptError::Malformed(detail)
@@ -811,7 +818,7 @@ impl AtlCorpus {
                     note: "MUST FAIL. Every entry, the checkpoint signature and the witness \
                            cosignature are genuine; the log tree is built with a metadata digest \
                            this profile does not pin, and the inclusion path is a correct path \
-                           in THAT geometry. Adaptor §4.2 fixes the metadata object and forbids \
+                           in THAT geometry. Adaptor §3.1 fixes the metadata object and forbids \
                            any other: \"An entry whose ATL metadata is anything else is not an \
                            AHL entry under this profile and MUST be rejected by an AHL verifier, \
                            even if it is a valid ATL entry.\" A verifier that read the constant \
@@ -821,7 +828,7 @@ impl AtlCorpus {
                 },
             ),
             Some((
-                "adaptor `ahl-adaptor-atl-v1` §4.2 — the ATL metadata digest is a fixed constant \
+                "adaptor `ahl-test-atl-leaf-v1` §3.1 — the ATL metadata digest is a fixed constant \
                  of the profile",
                 |e: &ReceiptError| {
                     matches!(e, ReceiptError::InclusionPathInvalid { what: "subject" })
@@ -853,12 +860,12 @@ impl AtlCorpus {
                     note: "MUST FAIL, and it is the enumerated half of the metadata rule. \
                            Everything outside the competing range is impeccable: cp5 is genuine, \
                            its `raw` reconciles, the subject's own inclusion path opens its root \
-                           under the §4.2 leaf rule, and the governance currency over [0, 5) is \
+                           under the §3.1 leaf rule, and the governance currency over [0, 5) is \
                            the honest one. The competing range [1, 5) is the one thing built the \
-                           wrong way — a correctly constructed §10.4 proof over leaves hashed \
+                           wrong way — a correctly constructed §9.1 proof over leaves hashed \
                            with a metadata digest the profile does not pin, declaring the same \
-                           tree size and the same range as the honest one. §10.4 fixes the leaf \
-                           hash of a carried entry as the §4.2 construction, so a verifier \
+                           tree size and the same range as the honest one. §9.1 fixes the leaf \
+                           hash of a carried entry as the §3.1 construction, so a verifier \
                            recomputes the carried envelopes' leaves with the pinned constant, \
                            consumes the proof's subtree hashes at the positions the recursion \
                            fixes, and gets a root cp5 does not carry. The range is a PROPER \
@@ -869,8 +876,8 @@ impl AtlCorpus {
                 },
             ),
             Some((
-                "adaptor `ahl-adaptor-atl-v1` §10.4 — a range proof's carried leaves are hashed \
-                 by the §4.2 construction",
+                "adaptor `ahl-test-atl-leaf-v1` §9.1 — a range proof's carried leaves are hashed \
+                 by the §3.1 construction",
                 |e: &ReceiptError| {
                     matches!(e, ReceiptError::RangeProofInvalid { what: "competing triggers", .. })
                 },
@@ -896,10 +903,10 @@ impl AtlCorpus {
         );
         wrong_digest["anchoring"]["adaptor"]["hash"] = json!(sha256_hex(b"not the artifact held"));
         vectors.push((
-            "statement-anchored-atl-profile-digest-must-fail.ahl",
+            "statement-anchored-atl-leaf-digest-must-fail.ahl",
             wrong_digest,
             Some((
-                "adaptor `ahl-adaptor-atl-v1` §14 / I-D §7.5 step 2 — the pinned digest must \
+                "adaptor `ahl-test-atl-leaf-v1` / I-D §7.5 step 2 — the pinned digest must \
                  match the artifact held",
                 |e: &ReceiptError| matches!(e, ReceiptError::AdaptorHashMismatch { .. }),
             )),
@@ -920,23 +927,21 @@ impl AtlCorpus {
                     currency_material: json!({}),
                     claim_material: json!({}),
                     continued_history: false,
-                    note: "MUST FAIL, and this is the one §14 is really about. Manifest version \
-                           2, anchored at entry 6, pins the SAME profile id at the digest of an \
-                           artifact this verifier does not hold — which is what a manifest \
-                           pinning the unreleased draft, or the artifact eventually released \
-                           under that id, looks like to a verifier holding the stand-in. The \
-                           manifest is genuinely signed, its lineage is correct, and cp7 is a \
-                           genuine checkpoint of this log; none of that helps. I-D §7.5 step 2 \
+                    note: "MUST FAIL. Manifest version 2, anchored at entry 4, pins the same \
+                           profile id at the digest of an artifact this verifier does not hold. \
+                           The manifest is genuinely signed, its lineage is correct, and cp5 is \
+                           a genuine checkpoint of this log; none of that helps. I-D §7.5 step 2 \
                            resolves the profile from local possession by {id, digest} before any \
                            carried material is verified, and a held artifact whose digest \
-                           differs is `invalid`. The corollary is the reason this corpus pins a \
-                           stand-in at all: a verifier cannot tell a test pin from a production \
-                           one, so the corpus must not create a pin that could be replayed as \
-                           one.",
+                           differs is `invalid`. That is also why a profile's identity is its \
+                           bytes: a document under an id, however labelled, is either the \
+                           artifact that id names or it is a different profile, which is the \
+                           rule this corpus follows in pinning one of its own rather than \
+                           anything belonging to `ahl-adaptor-atl-v1`.",
                 },
             ),
             Some((
-                "adaptor `ahl-adaptor-atl-v1` §14 / I-D §7.5 step 2 — a manifest pinning an \
+                "adaptor `ahl-test-atl-leaf-v1` / I-D §7.5 step 2 — a manifest pinning an \
                  artifact the verifier does not hold does not resolve",
                 |e: &ReceiptError| matches!(e, ReceiptError::AdaptorHashMismatch { .. }),
             )),
@@ -950,7 +955,7 @@ impl AtlCorpus {
                 None,
                 "MUST FAIL. `anchoring.checkpoint.raw` carries the 98 octets of a DIFFERENT \
                  checkpoint of the same log — correct magic, correct origin, correct root, and a \
-                 tree size the JSON members do not agree with. Adaptor §6.4 and I-D §7.5 step 2 \
+                 tree size the JSON members do not agree with. Adaptor §5.4 and I-D §7.5 step 2 \
                  fix the precedence: \"where `raw` is carried it MUST parse to the same values \
                  as the JSON members, the JSON members govern the comparison, and a mismatch is \
                  `invalid`\". The checkpoint's own signature still verifies, because it is \
@@ -963,7 +968,7 @@ impl AtlCorpus {
             "statement-anchored-atl-raw-mismatch-must-fail.ahl",
             raw_mismatch,
             Some((
-                "adaptor `ahl-adaptor-atl-v1` §6.4 / I-D §7.5 step 2 — a carried `raw` must \
+                "adaptor `ahl-test-atl-leaf-v1` §5.4 / I-D §7.5 step 2 — a carried `raw` must \
                  parse to the same values as the JSON members",
                 |e: &ReceiptError| {
                     matches!(e, ReceiptError::Malformed(detail)
@@ -1034,19 +1039,22 @@ impl AtlCorpus {
                     "genesis_entry_id": entry_id(&self.envelopes[0]),
                     "genesis_key_ids": [ keys.producer_1.key_id() ],
                     "adaptor_profiles": {
-                        ATL_PROFILE_ID: {
-                            "document": STAND_IN_PATH,
-                            "hash": self.stand_in_hash,
+                        TEST_ATL_PROFILE_ID: {
+                            "document": PROFILE_PATH,
+                            "hash": self.profile_hash,
                             "capabilities": { "checkpoint_raw": true, "consistency_proofs": true },
-                            "note": "The artifact held under this id is the STAND-IN at \
-                                     `document`, not the profile: `ahl-adaptor-atl-v1` is \
-                                     unreleased and its §14 says no manifest may pin it until it \
-                                     is published as an immutable artifact. The stand-in's own \
-                                     first lines say what it is; its digest is deliberately not \
-                                     the draft's and cannot be the released artifact's, so a \
-                                     manifest pinning either does not resolve against this \
-                                     policy — `statement-anchored-atl-unheld-manifest-pin-must-\
-                                     fail.ahl` is exactly that case.",
+                            "note": "The artifact held under this id is the document at \
+                                     `document`, which defines this profile's own \
+                                     serialization. Its shape is the one adaptor profile \
+                                     `ahl-adaptor-atl-v1` defines, cited there as the source; it \
+                                     is not that profile, and no artifact under that id is held \
+                                     by this policy at all. A receipt pinning \
+                                     `ahl-adaptor-atl-v1` is therefore `unverifiable` here — the \
+                                     profile is not held (I-D §7.5 step 2) — while a receipt \
+                                     pinning THIS id at a digest this document does not \
+                                     recompute to is `invalid`, which \
+                                     `statement-anchored-atl-unheld-manifest-pin-must-fail.ahl` \
+                                     shows.",
                         },
                     },
                     "dataset_keys": {},
@@ -1114,7 +1122,7 @@ struct AtlSpec<'a> {
 /// trip with the predicate over the rejection behind it.
 type AtlVector = (&'static str, Value, Option<(&'static str, fn(&ReceiptError) -> bool)>);
 
-/// Build and cosign one ATL checkpoint, with the §6.4 `raw` framing carried.
+/// Build and cosign one ATL checkpoint, with the §5.4 `raw` framing carried.
 fn signed_anchor(
     name: &'static str,
     log_id: &str,
@@ -1125,9 +1133,9 @@ fn signed_anchor(
 ) -> AtlAnchor {
     let mut checkpoint = atl_checkpoint(log_id, tree_size, root_hash, nanos, &keys.log_1)
         .expect("family strings over 32 octets");
-    // Adaptor §6.4: `raw` is the base64 of the same 98 octets the signature covers. It is a
+    // Adaptor §5.4: `raw` is the base64 of the same 98 octets the signature covers. It is a
     // convenience rather than a trust step — a verifier that reconstructs the blob from the
-    // parsed object per §6.5 obtains the same bytes — so it is carried precisely to be
+    // parsed object per §5.5 obtains the same bytes — so it is carried precisely to be
     // reconciled against them.
     let blob = atl_checkpoint_blob_from_json(&checkpoint).expect("well-formed checkpoint");
     checkpoint["raw"] =
@@ -1145,23 +1153,23 @@ fn wrong_size_raw(checkpoint: &Value) -> Value {
     json!(format!("base64:{}", base64::engine::general_purpose::STANDARD.encode(blob)))
 }
 
-/// Write the stand-in artifact, and return `(hash, bytes)` of what landed on disk.
+/// Write this corpus's profile document, and return `(hash, bytes)` of what landed on disk.
 ///
 /// The digest is recomputed from the file rather than from the constant, exactly as
 /// `write_and_hash_adaptor` does for the test profile: what a policy holds, and what a manifest
 /// pins, must both be the PUBLISHED artifact.
-fn write_and_hash_stand_in(root: &Path) -> (String, Vec<u8>) {
-    let path = root.join(STAND_IN_PATH);
-    write_text(&path, ATL_STAND_IN_DOC);
-    let bytes = std::fs::read(&path).expect("stand-in artifact just written");
+fn write_and_hash_profile(root: &Path) -> (String, Vec<u8>) {
+    let path = root.join(PROFILE_PATH);
+    write_text(&path, TEST_ATL_PROFILE_DOC);
+    let bytes = std::fs::read(&path).expect("profile document just written");
     (sha256_hex(&bytes), bytes)
 }
 
-/// Log-tree leaves under adaptor §4.2.
+/// Log-tree leaves under adaptor §3.1.
 fn atl_leaves(envelopes: &[Value]) -> Vec<Vec<u8>> {
     envelopes
         .iter()
-        .map(|env| log_leaf_bytes_for(env, ATL_PROFILE_ID).expect("known profile"))
+        .map(|env| log_leaf_bytes_for(env, TEST_ATL_PROFILE_ID).expect("known profile"))
         .collect()
 }
 
@@ -1180,7 +1188,7 @@ fn wrong_metadata_leaves(envelopes: &[Value]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// The bare inclusion path of one leaf, as a receipt carries it (adaptor §8.2).
+/// The bare inclusion path of one leaf, as a receipt carries it (adaptor §7).
 fn path(index: usize, leaves: &[Vec<u8>]) -> Vec<String> {
     let proof = inclusion_proof(leaves, index).expect("index within the tree");
     proof_path_hex(&proof)

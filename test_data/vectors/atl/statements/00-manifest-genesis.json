@@ -1,5 +1,5 @@
 {
-  "entry_id": "sha256:5b366e6e5539fcb1975ee728a1102bd33e527a0f36f690984b86732373d65b89",
+  "entry_id": "sha256:1115d3afd3edb87fdefb4c83b2eac8e5f4490c5dcb0c01329e2826648f9f2e40",
   "entry_index": 0,
   "envelope": {
     "payload": {
@@ -32,8 +32,8 @@
       "level": "L3",
       "log": {
         "adaptor": {
-          "hash": "sha256:79909b572dbd36added11a3087b04f0b81b09894be3c55b80825557f05d189cf",
-          "id": "ahl-adaptor-atl-v1"
+          "hash": "sha256:028ffd43b43a4e088bbb65ad9c6898fd173c59160772b48f157da7b62ace11c0",
+          "id": "ahl-test-atl-leaf-v1"
         },
         "cadence_epoch": "2026-08-16T11:30:00Z",
         "checkpoint_cadence": "PT1H",
@@ -83,9 +83,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:+8VAqnq+0cyTuloNHlth2C/qEAyCKdYfJSE2S6q7c/Od/ClF4df3lrMaWOTBm0RQD8ax4vNIF6qKp9PwufkPAg=="
+        "sig": "base64:nGu5IgygwobXkehaLDphEVCrDqun8qQgR+bOpsFZmrRoqgS1TuZ+f4uUXQ9ZPPPbKEldGZn4VnNy+tMXzuYOBQ=="
       }
     ]
   },
-  "statement_id": "sha256:c5937d8fc9fcf7994c08f389258c270e5a4fba2460da6ed68e5b5007658df817"
+  "statement_id": "sha256:82f00929110b9da342763dba4e74316aca6549c4295f02e1a609e256f27fad8c"
 }

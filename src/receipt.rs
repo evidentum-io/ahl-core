@@ -2692,7 +2692,7 @@ fn check_profile_supported(profile_id: &str) -> Result<()> {
 /// Reconcile a receipt-borne checkpoint's optional `raw` framing (I-D §7.1, §7.5 step 2:
 /// "WHERE `raw` is carried it MUST parse to the same values as the JSON members").
 ///
-/// Under `ahl-adaptor-atl-v1` that is the profile's own §6.4/§6.5 step 3: parse the 98 octets,
+/// Under an ATL-shaped profile that is its own `raw` rule: parse the 98 octets,
 /// require the `ATL-Protocol-v1-CP` magic, and compare byte for byte with the blob assembled
 /// from the JSON members — the JSON members govern, and a mismatch is `invalid`. Under a
 /// profile that defines no binary framing there is nothing to parse `raw` against, so its mere
@@ -2708,8 +2708,8 @@ fn reconcile_checkpoint_raw(checkpoint: &Value, profile_id: &str) -> Result<()> 
     }
     let raw = raw.as_str().ok_or_else(|| {
         ReceiptError::Malformed(
-            "checkpoint raw: MUST be a `base64:` family string (adaptor profile \
-             `ahl-adaptor-atl-v1` §6.4)"
+            "checkpoint raw: MUST be a `base64:` family string, the binary framing an \
+             ATL-shaped profile defines"
                 .to_owned(),
         )
     })?;

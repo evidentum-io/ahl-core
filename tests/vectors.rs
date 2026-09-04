@@ -6329,14 +6329,14 @@ fn every_atl_vector_reaches_its_recorded_result() {
 /// the checkpoint signing bytes, and the `raw` framing — and this asserts each is dispatched
 /// rather than assumed.
 #[test]
-fn the_atl_profile_is_dispatched_end_to_end() {
+fn the_atl_shaped_profile_is_dispatched_end_to_end() {
     let policy = atl_trust_policy();
-    let (_, receipt) = read_atl_receipt("statement-anchored-atl-profile.ahl");
+    let (_, receipt) = read_atl_receipt("statement-anchored-atl-leaf.ahl");
     let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
     assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
     assert_eq!(
         field_str(&receipt["anchoring"]["adaptor"], "id").expect("adaptor id"),
-        "ahl-adaptor-atl-v1"
+        "ahl-test-atl-leaf-v1"
     );
 
     let tree = read_json(&test_data().join("vectors").join("atl").join("log-tree.json"));
@@ -6371,7 +6371,7 @@ fn the_atl_profile_is_dispatched_end_to_end() {
     assert_eq!(
         field_str(&tree, "metadata_hash").expect("metadata_hash"),
         "sha256:bb4f98461f062d897980c9050f8f859c3b83c84486c5e6857262f6dfa97468a4",
-        "§4.2 pins the metadata digest as a constant of the profile"
+        "§3.1 pins the metadata digest as a constant of the profile"
     );
 
     // §6.1/§6.3/§6.5: the signature is over the 98-byte blob assembled from the JSON members,
@@ -6401,11 +6401,11 @@ fn the_atl_profile_is_dispatched_end_to_end() {
     assert_eq!(
         log_id,
         sha256_hex(&hex::decode(field_str(&tree, "tree_uuid").expect("tree_uuid")).expect("uuid")),
-        "§7.1: log_id = sha256: || hex(SHA-256(the 16-byte Data Tree UUID))"
+        "§4: log_id = sha256: || hex(SHA-256(the 16-byte Data Tree UUID))"
     );
 
     // §6.4: `raw` is carried, and it reconciles with the JSON members.
-    let raw = field_str(checkpoint, "raw").expect("§6.4 raw");
+    let raw = field_str(checkpoint, "raw").expect("§5.4 raw");
     reconcile_atl_checkpoint_raw(checkpoint, raw).expect("the carried raw must reconcile");
 
     // And the capability gap the profile's own release status makes real: a verifier that holds
@@ -6422,7 +6422,7 @@ fn the_atl_profile_is_dispatched_end_to_end() {
     assert_eq!(finding.rests_on, None, "the cause, not a derivation");
     assert!(matches!(
         verify_receipt(&receipt, &unheld),
-        Err(ReceiptError::AdaptorUnknown { id }) if id == "ahl-adaptor-atl-v1"
+        Err(ReceiptError::AdaptorUnknown { id }) if id == "ahl-test-atl-leaf-v1"
     ));
 
     // A policy that claims a capability the profile does define is not a misconfiguration:
@@ -6442,44 +6442,56 @@ fn the_atl_profile_is_dispatched_end_to_end() {
     ));
 }
 
-/// Adaptor §14: no manifest may pin the pre-release profile — not even a test one.
+/// A profile's identity is its bytes, so the corpus publishes one of its own.
 ///
-/// "Until this document is released as an immutable, openly published artifact at a stable
-/// location, its digest is not stable and no manifest may pin it." A verifier cannot enforce
-/// that: a manifest is a manifest, and prose beside a pin is not something a policy loader
-/// reads. So the corpus must not create a pin that could be replayed as a production one, and
-/// what it pins instead is a STAND-IN artifact that says so in its own first lines.
+/// `ahl-adaptor-atl-v1` §14: "Any change to this document, however small, produces a different
+/// hash and therefore a different profile. A changed profile MUST be published under a new id."
+/// No document a corpus could ship is that artifact, so nothing a corpus ships may be published
+/// under that id — a label saying "test only" changes nothing, and neither does the fact that a
+/// policy holding it is local. What the corpus pins instead is `ahl-test-atl-leaf-v1`, a profile
+/// with a document of its own that defines the same serialization as its own rules.
 #[test]
-fn the_atl_corpus_pins_a_stand_in_and_never_the_unreleased_profile() {
+fn the_atl_corpus_pins_its_own_profile_under_its_own_id() {
     let index = atl_index();
-    let held = field_str(&index["policy"]["adaptor_profiles"]["ahl-adaptor-atl-v1"], "document")
-        .expect("the artifact policy holds");
-    assert_eq!(held, "profiles/ahl-adaptor-atl-v1.stand-in.md");
-    let stand_in = std::fs::read(test_data().join(held)).expect("the stand-in is committed");
-    let pinned = sha256_hex(&stand_in);
-
-    // The artifact announces itself before it says anything a verifier acts on.
-    let text = String::from_utf8(stand_in).expect("UTF-8");
-    let opening: Vec<&str> = text.lines().take(6).collect();
-    assert!(
-        opening[0].starts_with("# STAND-IN artifact for adaptor profile `ahl-adaptor-atl-v1`"),
-        "first line: {:?}",
-        opening[0]
+    let profiles = index["policy"]["adaptor_profiles"].as_object().expect("adaptor profiles");
+    assert_eq!(
+        profiles.keys().collect::<Vec<_>>(),
+        vec!["ahl-test-atl-leaf-v1"],
+        "the corpus policy holds exactly one profile, and it is not the ATL binding"
     );
+    let held = field_str(&profiles["ahl-test-atl-leaf-v1"], "document").expect("held artifact");
+    assert_eq!(held, "profiles/ahl-test-atl-leaf-v1.md");
+    let document = std::fs::read(test_data().join(held)).expect("the document is committed");
+    let pinned = sha256_hex(&document);
+
+    // The document names the profile it defines, and states its relationship to the ATL binding
+    // rather than claiming to be it.
+    let text = String::from_utf8(document).expect("UTF-8");
     assert!(
-        opening.iter().any(|line| line.contains("**This is not the profile.**")),
-        "the opening lines must say what it is not: {opening:?}"
+        text.starts_with("# Adaptor profile `ahl-test-atl-leaf-v1`"),
+        "first line: {:?}",
+        text.lines().next()
     );
     for required in [
-        "its digest is not stable and no manifest may pin it",
-        "digest is deliberately NOT the draft's",
-        "verifies only against a policy that holds it",
+        "**This profile is not that profile**",
+        "is not a copy, revision, stand-in or\npre-release of it",
+        "any change to this file produces a\ndifferent hash and therefore a different profile",
     ] {
-        assert!(text.contains(required), "the stand-in must state: {required}");
+        assert!(text.contains(required), "the document must state: {required}");
+    }
+    // It defines the rules it exercises AS ITS OWN, so a verifier reading only it is complete.
+    for rule in [
+        "log leaf_hash(i) = SHA-256( 0x00 || SHA-256(JCS(envelope_i)) || METADATA_HASH )",
+        "METADATA_HASH = sha256:bb4f98461f062d897980c9050f8f859c3b83c84486c5e6857262f6dfa97468a4",
+        "ATL-Protocol-v1-CP",
+        "**exactly nine\nfractional digits**",
+        "the Origin ID is the SHA-256 over the bound log's",
+        "AHLRP1",
+    ] {
+        assert!(text.contains(rule), "the document must define: {rule}");
     }
 
-    // The genesis manifest of the ATL corpus pins exactly that digest, and so does every
-    // receipt over it except the one whose manifest deliberately pins something else.
+    // The genesis manifest pins that document's digest under that profile's id.
     let genesis = read_json(
         &test_data()
             .join("vectors")
@@ -6487,68 +6499,52 @@ fn the_atl_corpus_pins_a_stand_in_and_never_the_unreleased_profile() {
             .join("statements")
             .join("00-manifest-genesis.json"),
     );
-    assert_eq!(
-        field_str(&genesis["envelope"]["payload"]["log"]["adaptor"], "hash").expect("pinned hash"),
-        pinned,
-        "the genesis manifest pins the stand-in"
-    );
-    assert_eq!(
-        field_str(&genesis["envelope"]["payload"]["log"]["adaptor"], "id").expect("pinned id"),
-        "ahl-adaptor-atl-v1",
-        "the ID is the profile's — it is what names the serialization rules"
-    );
+    let adaptor = &genesis["envelope"]["payload"]["log"]["adaptor"];
+    assert_eq!(field_str(adaptor, "id").expect("pinned id"), "ahl-test-atl-leaf-v1");
+    assert_eq!(field_str(adaptor, "hash").expect("pinned hash"), pinned);
 
-    // This crate ships no copy of the unreleased profile at all.
-    assert!(
-        !test_data().join("adaptor").join("ahl-adaptor-atl-v1.md").exists(),
-        "the unreleased profile document must not be shipped with the corpus"
-    );
-
-    // And where the documentation checkout is present, the pinned digest is provably not the
-    // draft's. The check is skipped rather than failed where it is absent: the docs repository
-    // is not a build input of this crate, which is the whole point.
-    let draft = test_data()
-        .parent()
-        .expect("crate root")
-        .parent()
-        .expect("workspace root")
-        .join("docs-md")
-        .join("ahl-adaptor-atl-v1.md");
-    if let Ok(bytes) = std::fs::read(&draft) {
-        let draft_hash = sha256_hex(&bytes);
-        assert_ne!(pinned, draft_hash, "the pin must not be the draft's digest");
-
-        // A manifest pinning the draft's digest does not resolve against this policy either —
-        // the same rule, on the digest the review was actually worried about.
-        let policy = atl_trust_policy();
-        let (_, mut receipt) = read_atl_receipt("statement-anchored-atl-profile.ahl");
-        receipt["anchoring"]["adaptor"]["hash"] = json!(draft_hash);
+    // Nothing under the ATL binding's own id is shipped, anywhere.
+    for entry in std::fs::read_dir(test_data().join("profiles"))
+        .expect("profiles directory")
+        .chain(std::fs::read_dir(test_data().join("adaptor")).expect("adaptor directory"))
+    {
+        let name = entry.expect("directory entry").file_name().to_string_lossy().into_owned();
         assert!(
-            matches!(
-                verify_receipt(&receipt, &policy),
-                Err(ReceiptError::AdaptorHashMismatch { ref id }) if id == "ahl-adaptor-atl-v1"
-            ),
-            "a pin of the draft's digest must not resolve against a policy holding the stand-in"
-        );
-    } else {
-        println!(
-            "note: {} is absent, so the draft-digest comparison is skipped — the docs \
-             repository is not a build input of this crate",
-            draft.display()
+            !name.contains("ahl-adaptor-atl-v1"),
+            "no artifact may be published under the ATL binding's id: {name}"
         );
     }
 
-    // The vector that carries the same fact without needing any checkout: a MANIFEST pinning
-    // the id at an artifact the policy does not hold.
+    // A receipt pinning `ahl-adaptor-atl-v1` — at ANY digest — is refused by this policy, and
+    // the outcome is `unverifiable` rather than `invalid`: I-D §7.5 step 2 separates the two,
+    // and "if the verifier possesses NO profile under that id, it lacks a capability". The
+    // corpus holds no artifact under that id, so every such receipt is short of a capability
+    // rather than defective — a fact about this verifier's configuration, not about the receipt.
+    // A verifier that DID hold the released artifact would resolve the id and verify normally,
+    // which is why the build implements it.
     let policy = atl_trust_policy();
+    let (_, base) = read_atl_receipt("statement-anchored-atl-leaf.ahl");
+    for digest in [pinned.as_str(), &sha256_hex(b"some other artifact")] {
+        let mut receipt = base.clone();
+        receipt["anchoring"]["adaptor"]["id"] = json!("ahl-adaptor-atl-v1");
+        receipt["anchoring"]["adaptor"]["hash"] = json!(digest);
+        let report = verify_receipt_report(&receipt, &policy).expect("the run completes");
+        assert_eq!(report.result, Outcome::Unverifiable, "{:#?}", report.findings);
+        let finding = report.finding(Assertion::AdaptorProfile).expect("adaptor-profile finding");
+        assert_eq!(finding.outcome, Outcome::Unverifiable);
+        assert_eq!(finding.rests_on, None, "the cause, not a derivation");
+        assert!(matches!(
+            verify_receipt(&receipt, &policy),
+            Err(ReceiptError::AdaptorUnknown { ref id }) if id == "ahl-adaptor-atl-v1"
+        ));
+    }
+
+    // The neighbouring rule, which IS a defect: pinning THIS id at a digest the held document
+    // does not recompute to. `invalid`, "decidable from the bytes in hand" (§7.5 step 2).
     let (_, unheld) = read_atl_receipt("statement-anchored-atl-unheld-manifest-pin-must-fail.ahl");
     let manifest = &unheld["governance"]["chain"][1]["envelope"]["payload"];
-    assert_eq!(field_str(&manifest["log"]["adaptor"], "id").expect("id"), "ahl-adaptor-atl-v1");
-    assert_ne!(
-        field_str(&manifest["log"]["adaptor"], "hash").expect("hash"),
-        pinned,
-        "the negative's manifest must pin an artifact the policy does not hold"
-    );
+    assert_eq!(field_str(&manifest["log"]["adaptor"], "id").expect("id"), "ahl-test-atl-leaf-v1");
+    assert_ne!(field_str(&manifest["log"]["adaptor"], "hash").expect("hash"), pinned);
     let report = verify_receipt_report(&unheld, &policy).expect("the run completes");
     assert_eq!(report.result, Outcome::Invalid, "{:#?}", report.findings);
     assert_eq!(
@@ -6559,7 +6555,7 @@ fn the_atl_corpus_pins_a_stand_in_and_never_the_unreleased_profile() {
     );
 }
 
-/// Adaptor §10.4-§10.5 and §8.3 under the ATL binding, over receipts rather than helpers.
+/// Profile §9 and §8 over receipts rather than helpers.
 ///
 /// Round 1 left every ATL receipt `declared` with `continued_history: false`, so the §4.2 leaf
 /// construction never ran through the enumerated path and no ATL `later_checkpoint` was ever
@@ -6570,7 +6566,7 @@ fn atl_enumeration_and_continued_history_run_through_the_profile() {
 
     // Enumerated governance currency over exactly [0, tree_size(C)), authenticated by a §10.4
     // range proof whose carried leaves are §4.2's.
-    let (_, enumerated) = read_atl_receipt("governance-state-atl-profile.ahl");
+    let (_, enumerated) = read_atl_receipt("governance-state-atl-leaf.ahl");
     let report = verify_receipt_report(&enumerated, &policy).expect("the run completes");
     assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
     assert_eq!(enumerated["claim"]["assurance"]["governance"], json!("enumerated"));
@@ -6586,7 +6582,7 @@ fn atl_enumeration_and_continued_history_run_through_the_profile() {
 
     // A trigger proven effective over an ATL competing range — a PROPER sub-range, so the proof
     // actually carries subtree hashes.
-    let (_, trigger) = read_atl_receipt("trigger-effective-atl-profile.ahl");
+    let (_, trigger) = read_atl_receipt("trigger-effective-atl-leaf.ahl");
     let report = verify_receipt_report(&trigger, &policy).expect("the run completes");
     assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
     let competing = &trigger["claim_material"]["competing"]["corpus_range"];
@@ -6628,10 +6624,10 @@ fn atl_enumeration_and_continued_history_run_through_the_profile() {
         .expect("well-formed signature"),
         "the later checkpoint is signed over its OWN 98-byte blob"
     );
-    reconcile_atl_checkpoint_raw(later, field_str(later, "raw").expect("§6.4 raw"))
+    reconcile_atl_checkpoint_raw(later, field_str(later, "raw").expect("§5.4 raw"))
         .expect("the later checkpoint's raw must reconcile too");
     for element in strings(&anchoring["consistency_path"]) {
-        parse_hash_hex(&element).expect("§8.3: every element is a `sha256:<hex>` family string");
+        parse_hash_hex(&element).expect("§8: every element is a `sha256:<hex>` family string");
     }
 
     // And the negative: one element outside that grammar is not a proof node a verifier may
