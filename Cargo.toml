@@ -10,6 +10,16 @@ readme = "README.md"
 categories = ["cryptography", "data-structures"]
 keywords = ["provenance", "transparency-log", "merkle-tree", "test-vectors"]
 
+[features]
+default = []
+# A seam for the fuzz harness in `fuzz/`, and nothing else: it exposes the governance-statement
+# schema validation the I-D §7.5.1 walk runs, so a fuzz target can reach it directly. Reaching
+# it through a receipt is not possible for arbitrary bytes — §7.5 step 3 verifies each chain
+# hop's inclusion path against the checkpoint root before the walk runs, so any edit to a
+# carried payload is rejected as an unanchored hop long before its schema is read. Off by
+# default; the API it adds carries no stability promise.
+fuzzing = []
+
 [dependencies]
 # Anti-drift: JCS canonicalization, RFC 6962-style node hashing, and - normatively -
 # inclusion-proof verification come from the audited sibling implementation, pinned by rev.

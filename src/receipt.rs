@@ -5737,6 +5737,46 @@ pub fn verify_receipt_report(
     Ok(run.into_report(outcome, receipt))
 }
 
+/// Validate a governance statement payload — `manifest` or `key` — as the I-D §7.5.1
+/// governance walk validates one, with no chain context.
+///
+/// Available only under the `fuzzing` feature, and present for the fuzz harness in `fuzz/`:
+/// arbitrary bytes cannot reach this validation through [`verify_receipt_report`], because
+/// §7.5 step 3 verifies every chain hop's inclusion path against the checkpoint root before
+/// the walk reads any payload, so an edited payload is rejected as an unanchored hop first.
+/// It is not part of the crate's stable surface.
+///
+/// The walk reaches this validation only after phase 1 has verified the statement's envelope
+/// under the key state its predecessors establish. This function has no such state, so what it
+/// checks is FORM alone and nothing it returns is a statement about authenticity. For the same
+/// reason a `key` statement's `manifest` reference — which §2.2 requires to name the manifest
+/// version active at that statement's own entry index — resolves against an empty manifest
+/// set and always reports that no version is active; every check over the payload's own bytes
+/// runs ahead of it.
+///
+/// # Errors
+///
+/// Returns the [`ReceiptError`] variant naming the rule the payload failed.
+#[cfg(feature = "fuzzing")]
+pub fn validate_governance_payload(payload: &Value) -> Result<()> {
+    check_ahl_version(payload)?;
+    common_payload_fields(payload)?;
+    match statement_type(payload)? {
+        "manifest" => {
+            producer_key_objects(payload)?;
+            log_object(payload)?;
+            datasets_object(payload)?;
+            manifest_scope_fields(payload)?;
+            witnesses_object(payload)?;
+            Ok(())
+        }
+        "key" => validate_key_statement(payload, 0, &[], &BTreeMap::new()).map(|_| ()),
+        other => Err(ReceiptError::GovernanceChainInvalid(format!(
+            "`{other}` is not a governance statement type (I-D §7.5.1 4b)"
+        ))),
+    }
+}
+
 /// Verify an Evidence Receipt against locally configured policy.
 ///
 /// The single-value form of [`verify_receipt_report`], for callers that report one rejection
@@ -8076,6 +8116,39 @@ mod tests {
         tree_root, TestKey,
     };
     use std::collections::BTreeSet;
+
+    /// The `fuzzing` seam validates a governance payload's FORM: a `manifest` that satisfies
+    /// §6.2 passes, and one missing a §6.2 member is rejected as a schema failure rather than
+    /// reaching any check that needs chain context.
+    #[cfg(feature = "fuzzing")]
+    #[test]
+    fn the_governance_payload_seam_checks_schema_without_chain_context() {
+        use super::validate_governance_payload;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test_data/vectors/statements/00-manifest-genesis.json");
+        let vector: Value =
+            serde_json::from_slice(&std::fs::read(path).expect("committed vector")).expect("json");
+        let mut payload = vector["envelope"]["payload"].clone();
+        assert!(validate_governance_payload(&payload).is_ok());
+
+        payload.as_object_mut().expect("payload object").remove("level");
+        assert!(matches!(
+            validate_governance_payload(&payload),
+            Err(ReceiptError::ManifestSchemaInvalid { .. })
+        ));
+
+        // A payload of a type the walk never inducts is refused as a non-governance statement,
+        // not silently accepted.
+        assert!(validate_governance_payload(&json!({
+            "ahl_version": crate::AHL_VERSION,
+            "type": "ingestion",
+            "issued_at": "2026-08-16T12:00:00Z",
+            "producer": "producer-1",
+            "manifest": "sha256:00",
+        }))
+        .is_err());
+    }
 
     /// I-D §6.2: "Each manifest version's log and witness key objects replace the prior set in
     /// full" — a SET, not a sequence, so re-listing the same key objects in a different order
