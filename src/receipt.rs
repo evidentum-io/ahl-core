@@ -11,7 +11,7 @@
 //! [`Outcome::Invalid`], [`Outcome::Unverifiable`] — over the whole receipt, reduced from one
 //! [`Finding`] per required [`Assertion`]. Which assertion a rejection belongs to is the PHASE
 //! of the §7.5 algorithm that raised it; which assertions a capability gap reaches is
-//! [`prerequisites`], and the run carries on with the rest.
+//! `prerequisites`, and the run carries on with the rest.
 //!
 //! Not every non-verifying envelope is a defect of the receipt that carries it. §7.5.1 4d
 //! decides that by RELIANCE: the subject's envelope, an embedded receipt's subject and every
@@ -1752,7 +1752,7 @@ struct Run {
     scope: Option<Assertion>,
     /// The assertions of the receipt currently being verified that were settled `unverifiable`,
     /// and which the assertions depending on them therefore rest on (I-D §7.7; see
-    /// [`Run::pass`] and [`prerequisites`]).
+    /// [`Run::pass`] and `prerequisites`).
     ///
     /// Saved and restored around each embedded receipt, because the dependence is between the
     /// assertions of ONE receipt: an embedded receipt short of material says nothing about the
@@ -1935,7 +1935,7 @@ impl Run {
         self.pass_resting_on(assertion, &[]);
     }
 
-    /// As [`Self::pass`], with prerequisites the call site knows and [`prerequisites`] cannot:
+    /// As [`Self::pass`], with prerequisites the call site knows and `prerequisites` cannot:
     /// the claim material of an authority-dependent claim type rests on assertions the same
     /// step does not touch for any other type.
     fn pass_resting_on(&mut self, assertion: Assertion, also: &[Assertion]) {
@@ -2043,7 +2043,7 @@ impl Run {
         // A tolerated rejection is what its own check produced: a cause, never a derivation.
         self.record(settled, error.class(), Some(error.to_string()), None);
         self.deferred.push((settled, self.path.clone(), error));
-        // What this gap reaches is [`prerequisites`], and nothing else: I-D §7.7 wants the run
+        // What this gap reaches is `prerequisites`, and nothing else: I-D §7.7 wants the run
         // to carry on with every assertion that does not depend on the missing material.
         if !self.blocked.contains(&settled) {
             self.blocked.push(settled);
@@ -5713,7 +5713,7 @@ fn check_receipt_versions(receipt: &Value) -> Result<()> {
 /// `unverifiable` finding does not decide it — `invalid` still dominates — so the run carries
 /// on with every assertion that does not rest on the material it was short of, which is what
 /// lets a defect reached later dominate a capability gap reached earlier. What each gap
-/// reaches is [`prerequisites`], and an assertion resting on an unverifiable one is itself
+/// reaches is `prerequisites`, and an assertion resting on an unverifiable one is itself
 /// `unverifiable` with a detail naming that prerequisite. Two conditions end the run even so:
 /// an unsupported version, which §7.5 step 1 follows with "no further processing", and an
 /// exhausted verifier-local budget, which §7.8 requires to fail closed.
@@ -5905,7 +5905,7 @@ fn verify_nested(
     let anchoring_block = obj(receipt, "anchoring")?;
     // A capability gap here does not end the run (I-D §7.7): what the profile document fixes is
     // the checkpoint serialization, so the assertions that rest on it are exactly checkpoint
-    // authentication and the witness cosignatures over it ([`prerequisites`]). Step 3's paths,
+    // authentication and the witness cosignatures over it (`prerequisites`). Step 3's paths,
     // the governance induction, envelope validity, the cross-field rules, claim material and
     // the content binding are all decided without it, and are checked.
     let resolution = resolve_adaptor_profile(policy, anchoring_block, adaptor_id, adaptor);
@@ -6081,7 +6081,7 @@ fn verify_nested(
     run.phase(Assertion::EnvelopeValidity);
     // Recorded either way: where the check ran and held this is `verified`, and where it was
     // tolerated or skipped the finding already says `unverifiable` — [`Run::record`] keeps the
-    // dominating outcome, and [`prerequisites`] settles the skipped case as resting on
+    // dominating outcome, and `prerequisites` settles the skipped case as resting on
     // `governance`.
     let _ = envelope_valid;
     run.pass(Assertion::EnvelopeValidity);

@@ -195,7 +195,7 @@ pub fn load_dataset_key(root: &Path) -> Vec<u8> {
 /// Write the adaptor document, and return `(hash, bytes)` of what actually landed on disk —
 /// never the in-memory constant: the pinned hash, and the artifact a `TrustPolicy` holds, must
 /// both be the PUBLISHED document (spec §3 item 6; I-D §3.2, §7.5 step 2: a verifier
-/// "recompute[s] the digest over the artifact rather than trusting any value carried with it").
+/// "recompute\[s\] the digest over the artifact rather than trusting any value carried with it").
 pub fn write_and_hash_adaptor(root: &Path) -> (String, Vec<u8>) {
     let path = root.join("adaptor").join(format!("{ADAPTOR_ID}.md"));
     write_text(&path, ADAPTOR_DOC);
