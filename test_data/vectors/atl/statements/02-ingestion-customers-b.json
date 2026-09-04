@@ -1,12 +1,12 @@
 {
-  "entry_id": "sha256:b3e3637090e8fb54ad69cc2e8aa7d29cc61ba883623b958cd03a896d05018b59",
+  "entry_id": "sha256:ff98f1fd93daee1d106805640ca677c9caa224c2893b0b1beb22c8f1839470c1",
   "entry_index": 2,
   "envelope": {
     "payload": {
       "ahl_version": "0.4",
       "dataset": "customers",
       "issued_at": "2026-08-16T12:00:00Z",
-      "manifest": "sha256:5c8775d1791953fec252e48cfb95a20705d3276350592827da9431ccec510e0a",
+      "manifest": "sha256:c5937d8fc9fcf7994c08f389258c270e5a4fba2460da6ed68e5b5007658df817",
       "origin": "batch:2026-08-16/atl-01",
       "producer": "producer-1",
       "record": "hmac-sha256:4f561671377c6cb318881c5abda7ced5db0c59ae40b482e50c8402b8892617ad",
@@ -16,9 +16,9 @@
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:9w9P+XQ17cwhOhurgNnq2KCKKOAj5m25BylE6hXIDBdH2zwIY0mQJpiYxu3I6FZZzP5jauVQvEhBsZLWUZX4AQ=="
+        "sig": "base64:VOaS75qJ0OBI/sFdw15h0pZzLMVGwhw4ZeWk24w8lif0LX1hV+5J6McHqpckSc6wfiEX8VEytbVI4ZYTi8SIBw=="
       }
     ]
   },
-  "statement_id": "sha256:c054d29014ed0d646318358c58614ed397c85b09dbe6307021ab03a6f1e474bc"
+  "statement_id": "sha256:f32d2428e47ee6aeedf38ec30b16e4b2eb4da8cc0f792d5f7b8dd57b4ae28e92"
 }

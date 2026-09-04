@@ -7,12 +7,13 @@
           "checkpoint_raw": true,
           "consistency_proofs": true
         },
-        "hash": "sha256:020f3696ba598b3356cc96f80c987b167b50baae78294e90ac8c27878d39c4ab",
-        "release_status": "PRE-RELEASE. Adaptor §14 makes release a precondition for use: \"Until this document is released as an immutable, openly published artifact at a stable location, its digest is not stable and no manifest may pin it.\" The digest above is the CURRENT DRAFT's and is a TEST-ONLY pin, held so this corpus can exercise the profile's serialization; a production manifest MUST NOT pin the profile until that obligation is met, and the digest will change when it is."
+        "document": "profiles/ahl-adaptor-atl-v1.stand-in.md",
+        "hash": "sha256:79909b572dbd36added11a3087b04f0b81b09894be3c55b80825557f05d189cf",
+        "note": "The artifact held under this id is the STAND-IN at `document`, not the profile: `ahl-adaptor-atl-v1` is unreleased and its §14 says no manifest may pin it until it is published as an immutable artifact. The stand-in's own first lines say what it is; its digest is deliberately not the draft's and cannot be the released artifact's, so a manifest pinning either does not resolve against this policy — `statement-anchored-atl-unheld-manifest-pin-must-fail.ahl` is exactly that case."
       }
     },
     "dataset_keys": {},
-    "genesis_entry_id": "sha256:bce35bfb2efc97b4975a384e0bf3b2136a3a10504ab088ab894d3c3134c0697b",
+    "genesis_entry_id": "sha256:5b366e6e5539fcb1975ee728a1102bd33e527a0f36f690984b86732373d65b89",
     "genesis_key_ids": [
       "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
     ],
@@ -45,18 +46,26 @@
     {
       "claim_type": "statement-anchored",
       "expect": "invalid",
-      "file": "statement-anchored-atl-raw-mismatch-must-fail.ahl",
-      "finding": "adaptor-profile",
-      "reason": "malformed receipt: ATL checkpoint invalid: raw: `raw` does not equal the blob assembled from the JSON checkpoint members — the JSON members govern (adaptor profile `ahl-adaptor-atl-v1` §6.2, §6.4, §6.5)",
-      "rule": "adaptor `ahl-adaptor-atl-v1` §6.4 / I-D §7.5 step 2 — a carried `raw` must parse to the same values as the JSON members"
-    },
-    {
-      "claim_type": "statement-anchored",
-      "expect": "invalid",
       "file": "statement-anchored-atl-profile-digest-must-fail.ahl",
       "finding": "adaptor-profile",
       "reason": "adaptor profile `ahl-adaptor-atl-v1` is held, but its recomputed digest does not match the hash `anchoring.adaptor` pins",
       "rule": "adaptor `ahl-adaptor-atl-v1` §14 / I-D §7.5 step 2 — the pinned digest must match the artifact held"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-atl-unheld-manifest-pin-must-fail.ahl",
+      "finding": "adaptor-profile",
+      "reason": "adaptor profile `ahl-adaptor-atl-v1` is held, but its recomputed digest does not match the hash `anchoring.adaptor` pins",
+      "rule": "adaptor `ahl-adaptor-atl-v1` §14 / I-D §7.5 step 2 — a manifest pinning an artifact the verifier does not hold does not resolve"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-atl-raw-mismatch-must-fail.ahl",
+      "finding": "adaptor-profile",
+      "reason": "malformed receipt: ATL checkpoint invalid: raw: `raw` does not equal the blob assembled from the JSON checkpoint members — the JSON members govern (adaptor profile `ahl-adaptor-atl-v1` §6.2, §6.4, §6.5)",
+      "rule": "adaptor `ahl-adaptor-atl-v1` §6.4 / I-D §7.5 step 2 — a carried `raw` must parse to the same values as the JSON members"
     }
   ]
 }

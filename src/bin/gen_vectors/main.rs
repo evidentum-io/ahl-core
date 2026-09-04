@@ -48,7 +48,7 @@ fn main() {
     // differently, exercised end to end rather than at the unit level.
     let atl = atl::AtlCorpus::build(&keys, &corpus.records, &root);
     atl.self_check(&keys);
-    atl.write(&keys, &corpus.records, &root);
+    atl.write(&keys, &root);
 
     println!("test_data written to {}", root.display());
 }

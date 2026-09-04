@@ -291,7 +291,8 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 | Path | Contents |
 | --- | --- |
-| `adaptor/` | Both adaptor profile documents, content-addressed: `ahl-test-log-v1.md`, pinned by the main corpus's manifest versions, and `ahl-adaptor-atl-v1.md`, pinned by the ATL-bound corpus's — see the release note below |
+| `adaptor/` | The test adaptor profile document `ahl-test-log-v1.md`, content-addressed and pinned by every manifest version of the main corpus |
+| `profiles/` | `ahl-adaptor-atl-v1.stand-in.md` — the STAND-IN artifact the ATL-bound corpus pins under the profile id. It is NOT the profile, and its own first lines say so; the unreleased profile document is not shipped here at all |
 | `vectors/statements/` | The toy corpus's anchored envelopes, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
 | `vectors/checkpoints/` | Signed checkpoints at the tree sizes the scenarios need, each signed by the log key its active manifest version declares and cosigned by that version's witness — EXCEPT cp26 and cp56, deliberately signed and cosigned under the OUTGOING state for the I-D §7.1 rotation-anchoring proofs at manifest v2 (witness set) and manifest v4 (log key); see "Governance-key rotation" below |
@@ -554,11 +555,43 @@ trees the log never sees (batch outputs, input sets, dispositions) take plain le
 both, which adaptor §9 states expressly: an implementation "MUST NOT apply the payload/metadata
 leaf construction to them".
 
+### What this corpus pins, and why it is not the profile
+
+Adaptor §14 makes release a precondition for use: "Until this document is released as an
+immutable, openly published artifact at a stable location, its digest is not stable and no
+manifest may pin it." That obligation binds a corpus operator, and **a verifier cannot enforce
+it**: a manifest pinning a draft digest is byte-for-byte indistinguishable from one pinning a
+released digest, and prose beside the pin is not something a policy loader reads. A corpus that
+pinned the draft "for testing" would therefore be publishing a pin that could be lifted and
+replayed as a production one.
+
+So this crate ships **no copy of the unreleased profile**, and this corpus pins nothing that
+could ever collide with the released artifact's digest. What it pins is the STAND-IN artifact at
+`profiles/ahl-adaptor-atl-v1.stand-in.md`, whose own opening lines state that it is a stand-in,
+that its digest is deliberately not the draft's and cannot be the released artifact's, and that a
+manifest pinning it verifies only against a policy that holds it. The stand-in restates every
+serialization rule the vectors exercise, so a verifier reading only it is complete (core spec §3
+item 6). The dispatch keys on the profile **id**, which is what names those rules; the **digest**
+is what names the artifact, and while the real artifact is unreleased a stand-in is the honest
+thing to name.
+
+`statement-anchored-atl-unheld-manifest-pin-must-fail.ahl` is the rule as a vector. Entry 6 of
+the ATL log is a second manifest version pinning the same id at the digest of an artifact this
+policy does not hold — which is exactly what a manifest pinning the draft, or the eventual
+released artifact, looks like from here. It is genuinely signed, its lineage is correct, and cp7
+is a genuine checkpoint; none of that helps, because I-D §7.5 step 2 resolves the profile from
+local possession by `{id, digest}` before any carried material is verified and a held artifact
+whose digest differs is `invalid`. `tests/vectors.rs` asserts the same over the real draft
+digest where the documentation checkout is present, and skips cleanly where it is not — the docs
+repository is not a build input of this crate, which is the point.
+
+### The three serializations
+
 1.  **The log leaf** (adaptor §4.2). ATL combines two digests, so the leaf is
     `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)` where the metadata object is the
     fixed `{"ahl_adaptor":"ahl-adaptor-atl-v1"}` and the first digest is the raw form of the AHL
     entry id — which is what keeps the entry id derivable from the entry bytes alone. The
-    constant is recomputed in `lib.rs` rather than transcribed, and
+    constant is recomputed in `lib.rs` rather than transcribed.
     `statement-anchored-atl-metadata-hash-must-fail.ahl` is a genuinely signed, genuinely
     cosigned checkpoint over the same entries hashed with a metadata digest the profile does not
     pin: every signature verifies and the inclusion path is correct in THAT geometry, so only a
@@ -568,7 +601,7 @@ leaf construction to them".
     exactly nine fractional digits (§6.3) because the blob binds it. `log_id` is origin-derived
     (§7.1): its 32 octets ARE the Origin ID the blob carries at offset 18, so the corpus states
     the 16-byte Data Tree UUID it came from rather than treating the identifier as free-form.
-3.  **`checkpoint.raw`** (§6.4). This profile DEFINES a binary framing, so receipts under it MAY
+3.  **`checkpoint.raw`** (§6.4). This binding DEFINES a binary framing, so receipts under it MAY
     carry `raw` — and where they do it "MUST parse to the same values as the JSON members, the
     JSON members govern, and a mismatch is `invalid`".
     `statement-anchored-atl-raw-mismatch-must-fail.ahl` carries a well-formed blob of a
@@ -578,20 +611,14 @@ leaf construction to them".
     under it stays a profile limitation and a policy claiming `checkpoint_raw` for it is still a
     configuration error.
 
-`statement-anchored-atl-profile.ahl` and `record-ingested-atl-profile.ahl` are the positives.
-`statement-anchored-atl-profile-digest-must-fail.ahl` pins a digest the held document does not
-recompute to — §14 requires resolution by `{id, digest}` with the digest recomputed over the
-artifact, and I-D §7.5 step 2 makes that disagreement `invalid` rather than a capability gap.
-The gap itself — a verifier holding NO document under that id, which is `unverifiable` — is
+### The positives, and the rest of the negatives
+
+`statement-anchored-atl-profile.ahl` and `record-ingested-atl-profile.ahl` are the positives. `statement-anchored-atl-profile-digest-must-fail.ahl` pins a digest the held artifact
+does not recompute to — §14 requires resolution by `{id, digest}` with the digest recomputed over
+the artifact, and I-D §7.5 step 2 makes that disagreement `invalid` rather than a capability gap.
+The gap itself — a verifier holding NO artifact under that id, which is `unverifiable` — is
 exercised in `tests/vectors.rs`, since what decides it is the verifier's configuration rather
 than anything a portable vector can carry.
-
-**The ATL profile is PRE-RELEASE, and the pin here is test-only.** Adaptor §14: "Until this
-document is released as an immutable, openly published artifact at a stable location, its digest
-is not stable and no manifest may pin it." The digest this corpus pins is the CURRENT DRAFT's,
-held so the serialization can be exercised; a production manifest MUST NOT pin the profile until
-that release obligation is met, and the digest will change when it is. `receipts/atl/index.json`
-records the same caveat beside the pin.
 
 ## Regenerating
 
@@ -666,15 +693,205 @@ check.
 "#;
 
 /// `test_data/adaptor/ahl-test-log-v1.md` — the content-addressed adaptor profile.
-/// The ATL adaptor profile document, as published in the AHL documentation repository and
-/// committed here so the corpus is self-contained.
+/// The STAND-IN artifact the ATL-bound toy corpus pins under the id `ahl-adaptor-atl-v1`.
 ///
-/// It is carried verbatim rather than restated: adaptor §14 makes the profile digest the
-/// SHA-256 over the exact bytes of the artifact, "with no normalization of any kind", so any
-/// paraphrase would be a different profile. The generator writes these bytes back and pins
-/// their digest, which is the CURRENT DRAFT's — a test-only pin (§14: "no manifest may pin it"
-/// until release).
-pub const ATL_ADAPTOR_DOC: &str = include_str!("../../../test_data/adaptor/ahl-adaptor-atl-v1.md");
+/// Adaptor §14 makes release a precondition for use: "Until this document is released as an
+/// immutable, openly published artifact at a stable location, its digest is not stable and no
+/// manifest may pin it." A verifier cannot tell a test pin from a production one — a manifest is
+/// a manifest — so this crate ships NO copy of the unreleased draft and pins nothing that could
+/// ever collide with the released artifact's digest. What it pins is this file: an artifact that
+/// says, in its own first lines, that it is a stand-in, and that restates the serialization
+/// rules the corpus exercises so a verifier reading only it is complete.
+pub const ATL_STAND_IN_DOC: &str = r#"# STAND-IN artifact for adaptor profile `ahl-adaptor-atl-v1`
+
+**This is not the profile.** It is a test stand-in, shipped with the AHL conformance corpus so
+that the corpus can exercise the ATL binding's serialization before the profile itself is
+released. Read the three paragraphs below before anything else.
+
+1.  **The real profile is unreleased, and its digest is not stable.** `ahl-adaptor-atl-v1` §14:
+    "Until this document is released as an immutable, openly published artifact at a stable
+    location, its digest is not stable and no manifest may pin it." That obligation binds the
+    corpus operator, and a verifier cannot enforce it: a manifest that pins a draft digest is
+    indistinguishable from one that pins a released one, and prose alongside the pin is not
+    something a policy loader reads.
+
+2.  **This artifact's digest is deliberately NOT the draft's, and cannot be the released
+    artifact's.** These are different bytes from any revision of the profile document, and the
+    corpus pins the digest of THIS file. A manifest pinning `ahl-adaptor-atl-v1` at the digest of
+    the draft, or of the artifact eventually released under that id, does not resolve against a
+    verifier holding this stand-in: the held artifact differs, which I-D §7.5 step 2 makes
+    `invalid`. Nothing in this corpus can therefore be mistaken for, or replayed as, a pin of the
+    real profile.
+
+3.  **A manifest pinning this stand-in verifies only against a policy that holds it.** That is
+    the whole of what the corpus claims. When the profile is released, a corpus binding it will
+    pin the released artifact's digest and hold the released artifact; this file will not be part
+    of that arrangement.
+
+## What a verifier needs, restated
+
+Core spec §3 item 6 forbids verification from depending on knowledge outside the profile
+document, so the rules the corpus's ATL vectors exercise are restated here in full. They are the
+rules of `ahl-adaptor-atl-v1`; only the artifact identity differs.
+
+### Hashing and family strings
+
+SHA-256 throughout. `"sha256:<lowercase hex>"`, `"base64:<standard base64, with padding>"`.
+Public keys are `"base64:<raw 32-byte Ed25519 public key>"`; a key id is
+`"sha256:<hex of SHA-256 over the raw 32-byte public key>"`; signatures are
+`"base64:<raw 64-byte Ed25519 signature>"`.
+
+### Entry encoding and the log leaf
+
+An anchored entry is `JCS(envelope)`, the I-D §2.1 statement envelope. Statement id is
+`"sha256:" || hex(SHA-256(JCS(payload)))` and entry id is `"sha256:" || hex(SHA-256(JCS(envelope)))`.
+
+The log tree does NOT hash the entry bytes directly. A leaf combines two digests:
+
+```
+log leaf_hash(i) = SHA-256( 0x00 || SHA-256(JCS(envelope_i)) || METADATA_HASH )
+```
+
+The first digest is the raw form of the AHL entry id. `METADATA_HASH` is a FIXED constant of the
+profile: the SHA-256 of the JCS form of the metadata object
+
+```
+{"ahl_adaptor":"ahl-adaptor-atl-v1"}
+```
+
+which is 36 bytes, giving
+
+```
+METADATA_HASH = sha256:bb4f98461f062d897980c9050f8f859c3b83c84486c5e6857262f6dfa97468a4
+```
+
+An entry whose metadata is anything else is not an AHL entry under this binding and MUST be
+rejected. Pinning the constant is what keeps a leaf a pure function of the signed envelope:
+metadata is operator-supplied and covered by no AHL signature.
+
+Log leaves are in entry-index order and are never sorted.
+
+Interior nodes are `node_hash(l, r) = SHA-256(0x01 || l || r)`, and the root over `n > 1` leaf
+hashes splits at `k`, the largest power of two strictly less than `n`.
+
+**The asymmetry stops at the log tree.** Batch output trees, input-set trees and disposition
+trees are AHL constructs the log never sees: their leaf bytes are `JCS(leaf object)` and their
+leaf hash is `SHA-256(0x00 || bytes)`. An implementation MUST NOT apply the payload/metadata leaf
+construction to them.
+
+### `log_id`
+
+`log_id` = `"sha256:" || hex(Origin ID)`, where the Origin ID is the SHA-256 over the 16-byte
+Data Tree UUID. A verifier never needs the UUID: the Origin ID is what the checkpoint blob binds
+and what the manifest pins.
+
+### Checkpoints
+
+A checkpoint is signed as a fixed 98-byte blob:
+
+| offset | size | field | encoding |
+| --- | --- | --- | --- |
+| 0 | 18 | magic | ASCII `ATL-Protocol-v1-CP` |
+| 18 | 32 | Origin ID | raw SHA-256 of the Tree UUID |
+| 50 | 8 | tree size | u64 little-endian |
+| 58 | 8 | timestamp | u64 little-endian, Unix nanoseconds |
+| 66 | 32 | root hash | raw SHA-256 Merkle root |
+
+The AHL checkpoint object maps field by field: `log_id` from the Origin ID, `tree_size`
+identically, `root_hash` from the root, `checkpoint_time` as the RFC 3339 rendering of the
+nanosecond value, plus `key_id` and `signature`, and optionally `raw`.
+
+`checkpoint_time` MUST be the UTC rendering with EXACTLY NINE fractional digits and the `Z`
+suffix — `1767225600123456789` renders as `2026-01-01T00:00:00.123456789Z`. This is not
+cosmetic: the blob binds the exact nanosecond value, so any rendering that loses precision
+reconstructs different bytes and the signature will not verify over them.
+
+To verify: recover the raw origin, the u64 tree size, the u64 nanosecond timestamp and the raw
+root; assemble the 98 bytes; resolve the signing key by `key_id` against the manifest version
+active for this checkpoint's `tree_size`, recomputing the key id from the carried public key; and
+verify the Ed25519 signature over the 98 bytes.
+
+### `checkpoint.raw`
+
+This binding DEFINES a binary checkpoint framing, so a receipt MAY carry
+`anchoring.checkpoint.raw` as `"base64:" || base64(the 98 bytes)`. Where it is carried, a
+verifier MUST parse it and MUST reject the receipt unless the magic is exactly
+`ATL-Protocol-v1-CP` and the bytes equal the blob assembled from the JSON members. The JSON
+members govern the comparison and a mismatch is `invalid`. `raw` is a convenience, not a trust
+step.
+
+### Witness cosignatures
+
+A witness cosigns the signed checkpoint object, bound to its own identity:
+
+```
+cosignature = Ed25519( JCS( { "checkpoint": <signed checkpoint object>,
+                              "witness_id": "<witness id>" } ) )
+```
+
+carried as `{ "witness_id", "key_id", "cosignature", "cosigned_at" }`.
+
+### Inclusion proofs
+
+A list of sibling hashes leaf to root, serialized as a JSON array of `"sha256:<hex>"` family
+strings and carried bare; the leaf index comes from `subject.entry_index` or
+`governance.chain[].entry_index` and the tree size from the checkpoint. Verification is the
+RFC 6962 recomputation of the root, with the log leaf built per the rule above.
+
+### Consistency proofs
+
+RFC 9162 Section 2.1.4 proofs between two tree sizes of the same Origin ID, serialized as a JSON
+array of `"sha256:<hex>"` family strings in the order the algorithm produces, carried as
+`anchoring.consistency_path` beside `anchoring.later_checkpoint`. An element that is not a
+`sha256:<hex>` family string is a rejection. `assurance.continued_history` is true if and only if
+both members are present and verify.
+
+### Authenticated range enumeration
+
+Given a checkpoint `C` over `N` entries, a range `[i, j)` with `0 <= i < j <= N` and an ordered
+list of `j - i` envelopes, the proof is the minimal set of RFC 6962 subtree hashes covering
+everything outside the range, over the standard decomposition of `[0, N)`:
+
+```
+recompute(offset, size):
+    let end = offset + size
+    if end <= i or offset >= j:      return the next unconsumed proof node
+    if offset >= i and end <= j:     return root of the carried leaf hashes for [offset, end)
+    k = largest power of two strictly less than size
+    return node_hash( recompute(offset, k), recompute(offset + k, size - k) )
+```
+
+Verification rejects unless `0 <= i < j <= N`; unless exactly `j - i` envelopes are carried with
+`entry_index` values `i, i+1, ..., j-1` in that order; if the node list is exhausted early; or
+unless every node is consumed. It accepts if and only if `recompute(0, N)` equals `C.root_hash`.
+**The leaf hash of a carried entry is the two-digest construction above**, not the plain leaf
+hashing of the non-log trees.
+
+`range_proof.adaptor_form` is `"base64:" || base64(bytes)` with all integers big-endian:
+
+| offset | size | field |
+| --- | --- | --- |
+| 0 | 6 | magic, ASCII `AHLRP1` |
+| 6 | 8 | `tree_size` (u64) |
+| 14 | 8 | `from_index` (u64) |
+| 22 | 8 | `to_index` (u64) |
+| 30 | 4 | `node_count` (u32) |
+| 34 | 32 x `node_count` | subtree hashes, raw 32-byte SHA-256 values, in consumption order |
+
+Total length is `34 + 32 * node_count`; any other length is a rejection, as is a proof whose
+`tree_size`, `from_index` or `to_index` disagrees with the enclosing range object or with the
+checkpoint. The byte layout is identical to the one the rest of this corpus uses; only the leaf
+hashing differs.
+
+This binding provides **no typed-subset proofs**, so enumerated governance currency MUST carry
+the full entry range.
+
+### What is not defined here
+
+Availability, cadence enforcement, operator conduct, incorporation time, and every deployment
+obligation the real profile records as unmet on the published ATL stack. None of them is a rule a
+receipt is verified against, and none of them is exercised by this corpus.
+"#;
 
 pub const ADAPTOR_DOC: &str = r#"# Adaptor profile `ahl-test-log-v1`
 

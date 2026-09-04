@@ -259,7 +259,8 @@ two different bindings, which is the case receipt key binding is tolerant for.
 
 | Path | Contents |
 | --- | --- |
-| `adaptor/` | Both adaptor profile documents, content-addressed: `ahl-test-log-v1.md`, pinned by the main corpus's manifest versions, and `ahl-adaptor-atl-v1.md`, pinned by the ATL-bound corpus's — see the release note below |
+| `adaptor/` | The test adaptor profile document `ahl-test-log-v1.md`, content-addressed and pinned by every manifest version of the main corpus |
+| `profiles/` | `ahl-adaptor-atl-v1.stand-in.md` — the STAND-IN artifact the ATL-bound corpus pins under the profile id. It is NOT the profile, and its own first lines say so; the unreleased profile document is not shipped here at all |
 | `vectors/statements/` | The toy corpus's anchored envelopes, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
 | `vectors/checkpoints/` | Signed checkpoints at the tree sizes the scenarios need, each signed by the log key its active manifest version declares and cosigned by that version's witness — EXCEPT cp26 and cp56, deliberately signed and cosigned under the OUTGOING state for the I-D §7.1 rotation-anchoring proofs at manifest v2 (witness set) and manifest v4 (log key); see "Governance-key rotation" below |
@@ -522,11 +523,43 @@ trees the log never sees (batch outputs, input sets, dispositions) take plain le
 both, which adaptor §9 states expressly: an implementation "MUST NOT apply the payload/metadata
 leaf construction to them".
 
+### What this corpus pins, and why it is not the profile
+
+Adaptor §14 makes release a precondition for use: "Until this document is released as an
+immutable, openly published artifact at a stable location, its digest is not stable and no
+manifest may pin it." That obligation binds a corpus operator, and **a verifier cannot enforce
+it**: a manifest pinning a draft digest is byte-for-byte indistinguishable from one pinning a
+released digest, and prose beside the pin is not something a policy loader reads. A corpus that
+pinned the draft "for testing" would therefore be publishing a pin that could be lifted and
+replayed as a production one.
+
+So this crate ships **no copy of the unreleased profile**, and this corpus pins nothing that
+could ever collide with the released artifact's digest. What it pins is the STAND-IN artifact at
+`profiles/ahl-adaptor-atl-v1.stand-in.md`, whose own opening lines state that it is a stand-in,
+that its digest is deliberately not the draft's and cannot be the released artifact's, and that a
+manifest pinning it verifies only against a policy that holds it. The stand-in restates every
+serialization rule the vectors exercise, so a verifier reading only it is complete (core spec §3
+item 6). The dispatch keys on the profile **id**, which is what names those rules; the **digest**
+is what names the artifact, and while the real artifact is unreleased a stand-in is the honest
+thing to name.
+
+`statement-anchored-atl-unheld-manifest-pin-must-fail.ahl` is the rule as a vector. Entry 6 of
+the ATL log is a second manifest version pinning the same id at the digest of an artifact this
+policy does not hold — which is exactly what a manifest pinning the draft, or the eventual
+released artifact, looks like from here. It is genuinely signed, its lineage is correct, and cp7
+is a genuine checkpoint; none of that helps, because I-D §7.5 step 2 resolves the profile from
+local possession by `{id, digest}` before any carried material is verified and a held artifact
+whose digest differs is `invalid`. `tests/vectors.rs` asserts the same over the real draft
+digest where the documentation checkout is present, and skips cleanly where it is not — the docs
+repository is not a build input of this crate, which is the point.
+
+### The three serializations
+
 1.  **The log leaf** (adaptor §4.2). ATL combines two digests, so the leaf is
     `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)` where the metadata object is the
     fixed `{"ahl_adaptor":"ahl-adaptor-atl-v1"}` and the first digest is the raw form of the AHL
     entry id — which is what keeps the entry id derivable from the entry bytes alone. The
-    constant is recomputed in `lib.rs` rather than transcribed, and
+    constant is recomputed in `lib.rs` rather than transcribed.
     `statement-anchored-atl-metadata-hash-must-fail.ahl` is a genuinely signed, genuinely
     cosigned checkpoint over the same entries hashed with a metadata digest the profile does not
     pin: every signature verifies and the inclusion path is correct in THAT geometry, so only a
@@ -536,7 +569,7 @@ leaf construction to them".
     exactly nine fractional digits (§6.3) because the blob binds it. `log_id` is origin-derived
     (§7.1): its 32 octets ARE the Origin ID the blob carries at offset 18, so the corpus states
     the 16-byte Data Tree UUID it came from rather than treating the identifier as free-form.
-3.  **`checkpoint.raw`** (§6.4). This profile DEFINES a binary framing, so receipts under it MAY
+3.  **`checkpoint.raw`** (§6.4). This binding DEFINES a binary framing, so receipts under it MAY
     carry `raw` — and where they do it "MUST parse to the same values as the JSON members, the
     JSON members govern, and a mismatch is `invalid`".
     `statement-anchored-atl-raw-mismatch-must-fail.ahl` carries a well-formed blob of a
@@ -546,20 +579,14 @@ leaf construction to them".
     under it stays a profile limitation and a policy claiming `checkpoint_raw` for it is still a
     configuration error.
 
-`statement-anchored-atl-profile.ahl` and `record-ingested-atl-profile.ahl` are the positives.
-`statement-anchored-atl-profile-digest-must-fail.ahl` pins a digest the held document does not
-recompute to — §14 requires resolution by `{id, digest}` with the digest recomputed over the
-artifact, and I-D §7.5 step 2 makes that disagreement `invalid` rather than a capability gap.
-The gap itself — a verifier holding NO document under that id, which is `unverifiable` — is
+### The positives, and the rest of the negatives
+
+`statement-anchored-atl-profile.ahl` and `record-ingested-atl-profile.ahl` are the positives. `statement-anchored-atl-profile-digest-must-fail.ahl` pins a digest the held artifact
+does not recompute to — §14 requires resolution by `{id, digest}` with the digest recomputed over
+the artifact, and I-D §7.5 step 2 makes that disagreement `invalid` rather than a capability gap.
+The gap itself — a verifier holding NO artifact under that id, which is `unverifiable` — is
 exercised in `tests/vectors.rs`, since what decides it is the verifier's configuration rather
 than anything a portable vector can carry.
-
-**The ATL profile is PRE-RELEASE, and the pin here is test-only.** Adaptor §14: "Until this
-document is released as an immutable, openly published artifact at a stable location, its digest
-is not stable and no manifest may pin it." The digest this corpus pins is the CURRENT DRAFT's,
-held so the serialization can be exercised; a production manifest MUST NOT pin the profile until
-that release obligation is met, and the digest will change when it is. `receipts/atl/index.json`
-records the same caveat beside the pin.
 
 ## Regenerating
 
