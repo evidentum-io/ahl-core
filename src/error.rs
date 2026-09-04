@@ -169,8 +169,8 @@ pub enum AhlError {
     #[error("range proof invalid: {0}")]
     RangeProof(String),
 
-    /// An `ahl-adaptor-atl-v1` checkpoint blob (§6.1) or its `checkpoint_time` rendering
-    /// (§6.3) was malformed, or a carried `raw` blob did not match the one assembled from a
+    /// An ATL-shaped checkpoint blob (adaptor §6.1; emitted for every profile
+    /// [`crate::is_atl_shaped`] names) or its `checkpoint_time` rendering (§6.3) was malformed, or a carried `raw` blob did not match the one assembled from a
     /// checkpoint's JSON members (§6.4, §6.5).
     #[error("ATL checkpoint invalid: {0}")]
     AtlCheckpoint(String),

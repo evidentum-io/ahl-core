@@ -6,7 +6,7 @@
     "root_hash": "sha256:fb00ea07ca1fa768b74e56005b165a3223f0763840c2780471c3f3501a0fadda",
     "tree_size": 28
   },
-  "description": "Revocation closure `descendant-enlargement-past-declared-checkpoint` over the 28-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
+  "description": "Revocation closure `descendant-enlargement-past-declared-checkpoint` over the 57-entry toy corpus (core spec §5.1, §5.3), evaluated at the checkpoint committing the trigger.",
   "expected_affected": [
     {
       "dataset": "scores",

@@ -18,14 +18,17 @@ use ahl_core::receipt::{
     verify_receipt, verify_receipt_report, AdaptorCapabilities, AdaptorProfile, Outcome,
     ReceiptError, TrustPolicy,
 };
-use ahl_core::{checkpoint_signing_bytes, entry_id, envelope, field_str, statement_id, TestKey};
+use ahl_core::{
+    checkpoint_signing_bytes, cosignature_bytes, entry_id, envelope, field_str, statement_id,
+    TestKey,
+};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use crate::corpus::{Anchor, Corpus};
+use crate::corpus::{rotation, Anchor, Corpus, ROTATIONS};
 use crate::scenario::{
     signed, write_jcs, write_json, Keys, ADAPTOR_ID, CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, T0,
-    WITNESS_1,
+    WITNESS_1, WITNESS_2,
 };
 
 /// What a receipt vector asserts about its own verification outcome.
@@ -260,7 +263,7 @@ impl Spec<'_> {
             subject_block["manifest"] = manifest.clone();
         }
 
-        let (witness_key, _) = keys.witness_for(anchor.manifest_index);
+        let (witness_key, witness_id) = keys.witness_for(anchor.manifest_index);
         let producer_keys =
             self.producer_keys.clone().unwrap_or_else(|| producer_key_block(self, corpus, keys));
 
@@ -271,8 +274,8 @@ impl Spec<'_> {
             "subject": subject_block,
             "envelope": subject,
             "keys": {
-                "log": [ key_entry(&keys.log_1, None, anchor.manifest_index) ],
-                "witness": [ key_entry(witness_key, Some(anchor.witness_id), anchor.manifest_index) ],
+                "log": [ key_entry(keys.log_for(anchor.manifest_index), None, anchor.manifest_index) ],
+                "witness": [ key_entry(witness_key, Some(witness_id), anchor.manifest_index) ],
                 "producer": producer_keys,
             },
             "anchoring": {
@@ -298,31 +301,38 @@ impl Spec<'_> {
         });
         // I-D §7.1: "REQUIRED IF AND ONLY IF the carried chain contains a governance-key
         // rotation... The member is ABSENT where the chain rotates neither set" — never present
-        // as an empty array. This corpus rotates exactly once, at manifest v2 (entry 25), so
-        // any chain carrying it needs exactly this one element, and no other chain carries the
-        // member at all.
-        if self.chain.contains(&25) {
-            receipt["governance"]["rotation_proofs"] = json!([corpus.rotation_proof_element(keys)]);
+        // as an empty array — and where it is present it carries "one element per rotation, in
+        // ascending `manifest_entry_index` order". This corpus rotates twice: the witness set at
+        // manifest v2 (entry 25) and the log checkpoint-signing key at manifest v4 (entry 55).
+        let rotations: Vec<u64> = ROTATIONS
+            .into_iter()
+            .filter(|(index, _, _)| self.chain.contains(&usize::try_from(*index).expect("index")))
+            .map(|(index, _, _)| index)
+            .collect();
+        if !rotations.is_empty() {
+            receipt["governance"]["rotation_proofs"] = json!(rotations
+                .iter()
+                .map(|index| corpus.rotation_proof_element(keys, *index))
+                .collect::<Vec<_>>());
             // I-D §7.1: "Every key used in verification MUST appear in `keys` with its source
             // and its binding", and under the rotation-proof transition exception "the
             // corresponding `keys.log[]` and `keys.witness[]` entries carry `manifest-chain`
-            // bindings naming that predecessor version". This corpus's one rotation is manifest
-            // v2 at entry 25, whose predecessor is the genesis manifest at entry 0, so a
-            // receipt carrying that rotation lists the OUTGOING log key and the OUTGOING
-            // witness bound at 0 — alongside the entries for its own checkpoint, which bind to
-            // manifest v2. The log key is physically the same key in both, listed twice under
-            // two different bindings, which is exactly the case receipt key binding tolerates.
-            if anchor.manifest_index != 0 {
-                let (outgoing_witness, outgoing_witness_id) = keys.witness_for(0);
-                receipt["keys"]["log"].as_array_mut().expect("keys.log array").push(key_entry(
-                    &keys.log_1,
-                    None,
-                    0,
-                ));
-                receipt["keys"]["witness"]
-                    .as_array_mut()
-                    .expect("keys.witness array")
-                    .push(key_entry(outgoing_witness, Some(outgoing_witness_id), 0));
+            // bindings naming that predecessor version". So each rotation adds the OUTGOING log
+            // key and the OUTGOING witness, bound to the manifest version active immediately
+            // before the rotating one — which may be the same physical key the anchoring
+            // checkpoint uses, listed a second time under a different binding, exactly the case
+            // receipt key binding is tolerant for.
+            for index in rotations {
+                let (_, _, outgoing) = rotation(index);
+                let (outgoing_witness, outgoing_witness_id) = keys.witness_for(outgoing);
+                push_key_entry(
+                    &mut receipt["keys"]["log"],
+                    key_entry(keys.log_for(outgoing), None, outgoing),
+                );
+                push_key_entry(
+                    &mut receipt["keys"]["witness"],
+                    key_entry(outgoing_witness, Some(outgoing_witness_id), outgoing),
+                );
             }
         }
         receipt
@@ -364,6 +374,18 @@ fn producer_key_block(spec: &Spec<'_>, corpus: &Corpus, keys: &Keys) -> Vec<Valu
         block.push(key_entry(&keys.producer_2, None, index));
     }
     block
+}
+
+/// Add a `keys` entry unless the block already carries the identical one.
+///
+/// One physical key can legitimately appear more than once under different bindings, and a
+/// rotation whose outgoing state is the anchoring checkpoint's own would otherwise produce two
+/// byte-identical entries — which is not a second binding, only a repeat.
+fn push_key_entry(block: &mut Value, entry: Value) {
+    let list = block.as_array_mut().expect("keys block is an array");
+    if !list.contains(&entry) {
+        list.push(entry);
+    }
 }
 
 /// A `keys` block entry (receipt format §2.2).
@@ -416,13 +438,20 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
     let cp34 = corpus.anchor("cp34");
     let cp35 = corpus.anchor("cp35");
     let cp37 = corpus.anchor("cp37");
-    let cp38 = corpus.anchor("cp38");
     let cp40 = corpus.anchor("cp40");
     let cp43 = corpus.anchor("cp43");
+    let cp38 = corpus.anchor("cp38");
     let cp44 = corpus.anchor("cp44");
     let cp45 = corpus.anchor("cp45");
     let cp46 = corpus.anchor("cp46");
-    let cp47 = corpus.anchor("cp47");
+    let cp50 = corpus.anchor("cp50");
+    let cp56 = corpus.anchor("cp56");
+    let cp57 = corpus.anchor("cp57");
+    let cp51 = corpus.anchor("cp51");
+    let cp52 = corpus.anchor("cp52");
+    let cp53 = corpus.anchor("cp53");
+    let cp54 = corpus.anchor("cp54");
+    let cp55 = corpus.anchor("cp55");
     let customers = |record: &String| Some((DS_CUSTOMERS.to_owned(), record.clone()));
     let scores = |record: &String| Some((DS_SCORES.to_owned(), record.clone()));
 
@@ -1096,9 +1125,9 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             .collect();
         Spec {
             claim_type: "record-derived",
-            subject_index: 37,
-            anchor: cp38,
-            chain: vec![0, 25],
+            subject_index: 50,
+            anchor: cp51,
+            chain: vec![0, 25, 46],
             record_subject: scores(output),
             competing: "not-checked",
             content_binding: "none",
@@ -2006,6 +2035,129 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Accept,
     });
 
+    // I-D §7.5.1 4d, on a propagation prefix: "an entry of a propagation prefix" is named among
+    // the carried envelopes a receipt does NOT rest on, and §2.1 adds that a void entry is
+    // "never traversed by closure". The two vectors below are the same claim over two prefixes
+    // that differ by exactly one envelope's signature.
+    let f_trigger = |note: &str| {
+        Spec {
+            claim_type: "trigger-effective",
+            subject_index: 29,
+            anchor: cp34,
+            chain: vec![0, 25],
+            record_subject: customers(&r.c_f),
+            competing: "enumerated",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 34, cp34),
+            claim_material: json!({
+                "introduction": introduction(20, &r.c_f, cp34),
+                "checkpoint_C": cp34.checkpoint,
+                "competing": { "corpus_range": corpus.enumeration(20, 34, cp34) },
+            }),
+            producer_keys: Some(vec![
+                key_entry(&keys.producer_1, None, 25),
+                key_entry(&keys.producer_2, None, 28),
+            ]),
+            note: note.to_owned(),
+        }
+        .build(corpus, keys)
+    };
+    let f_prefix_roots: Vec<&String> = vec![
+        &corpus.batch_root,
+        &corpus.wide_outputs_root,
+        &corpus.input_set_root,
+        &corpus.challenge_affected_root,
+    ];
+
+    out.push(Vector {
+        file: "propagation-complete-void-prefix-entry.ahl",
+        receipt: Spec {
+            claim_type: "propagation-complete",
+            subject_index: 44,
+            anchor: cp45,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 45, cp45),
+            claim_material: json!({
+                "corpus_checkpoint": cp38.checkpoint,
+                "corpus_prefix": corpus.enumeration(0, 38, cp45),
+                "trees": trees_block(&f_prefix_roots, false),
+                "trigger": f_trigger(
+                    "Embedded trigger-effective proof for the retraction of record F at entry \
+                     29, bounded by cp34.",
+                ),
+            }),
+            producer_keys: None,
+            note: "The propagation at entry 44 anchors the affected set of the retraction of \
+                   record F at entry 29, complete at its own declared checkpoint D — cp38, tree \
+                   size 38. That prefix REACHES entry 37: a derivation of a `scores` record \
+                   from H, which is itself the derived record the trigger reaches, carrying a \
+                   `sig` no key produced. I-D §2.1 makes it void and §7.5.1 4d says what a void \
+                   entry costs a receipt that does not rest on it — \"an entry of a propagation \
+                   prefix\" is named there among the carried envelopes reliance excludes: it is \
+                   \"never effective and never traversed\", so the closure recomputed here has \
+                   one member and not two, and the disposition tree the producer anchored agrees \
+                   with it. Positions are preserved rather than dropped — an entry index IS a \
+                   position in the prefix — and the prefix's own root is recomputed over the \
+                   CARRIED bytes, since voiding is about traversal and not about what the log \
+                   anchored. Its entry index is reported as an informative item beside the four \
+                   other void entries in range, and the result is `verified`. \
+                   `propagation-complete-void-prefix-entry-control-must-fail.ahl` is the same \
+                   claim over a prefix that reaches the verifying copy of that derivation."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    out.push(Vector {
+        file: "propagation-complete-void-prefix-entry-control-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "propagation-complete",
+            subject_index: 45,
+            anchor: cp46,
+            chain: vec![0, 25],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 46, cp46),
+            claim_material: json!({
+                "corpus_checkpoint": cp44.checkpoint,
+                "corpus_prefix": corpus.enumeration(0, 44, cp46),
+                "trees": trees_block(&f_prefix_roots, false),
+                "trigger": f_trigger(
+                    "Embedded trigger-effective proof for the retraction of record F at entry \
+                     29, bounded by cp34.",
+                ),
+            }),
+            producer_keys: None,
+            note: "MUST FAIL, and it is the control that makes \
+                   `propagation-complete-void-prefix-entry.ahl` mean something. The propagation \
+                   at entry 45 anchors the SAME affected set for the SAME trigger, and declares \
+                   D at cp44 instead of cp38. Entry 43 is inside that prefix: byte for byte the \
+                   payload anchored at entry 37, genuinely signed this time, so §2.1's \
+                   first-wins rule leaves it governing — a void entry never becomes a governing \
+                   statement and so occupies no statement id. The closure recomputable at this D \
+                   therefore has two members, the anchored disposition tree still has one, and \
+                   the completeness claim is `invalid` on `claim-material`. The only difference \
+                   between the two receipts' prefixes is which envelope over that payload they \
+                   reach, which is what shows the exclusion at cp38 to be the signature's doing \
+                   rather than an artifact of prefix length."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "spec §5.3 / receipt §3 — the anchored affected set must equal the closure \
+                   recomputed at D",
+            matches: |e| matches!(e, ReceiptError::ClosureMismatch(_)),
+        },
+    });
+
     out.push(Vector {
         file: "propagation-complete-missing-leaf-must-fail.ahl",
         receipt: propagation_complete(
@@ -2237,7 +2389,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    only VERIFYING manifest and key entries in that range\", so the void \
                    manifest at 39 is not an omission from `governance.chain[]` however much it \
                    looks like one. Four void entries are reported as informative items (§7.7) — \
-                   32, 33, 38, 39 — and the governance claim stands."
+                   32, 33, 37, 38, 39 — and the governance claim stands."
                 .to_owned(),
         }
         .build(corpus, keys),
@@ -2273,8 +2425,119 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                    verifying copy at 41 is inducted and its effect applied. A verifier that \
                    claimed the statement id when it voided the first copy would skip the second \
                    as a duplicate, leave `producer-2` retired, and reject this receipt's subject \
-                   envelope. Four void entries are reported as informative items — 32, 33, 38 \
-                   and 39 — and none of them changes the result."
+                   envelope. Five void entries are reported as informative items — 32, 33, \
+                   37, 38 and 39 — and none of them changes the result."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    // I-D §2.1's own case, end to end: ONE manifest version under three signature sets, so one
+    // statement id over three entry ids. The chain carries the governing copy at entry 46 and
+    // the verifying duplicate at 47; the duplicate governs nothing and is still verified, since
+    // §7.5 step 4 says "verify EVERY CARRIED ENVELOPE".
+    let duplicate_manifest_keys = || Some(vec![key_entry(&keys.producer_1, None, 46)]);
+    out.push(Vector {
+        file: "statement-anchored-duplicate-manifest.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 49,
+            anchor: cp50,
+            chain: vec![0, 25, 46, 47],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: duplicate_manifest_keys(),
+            note: "Manifest version 3 is anchored THREE times — entries 46, 47 and 48 — because \
+                   the statement id digests the payload alone while the entry id digests the \
+                   envelope, so one payload under three signature sets is one statement with \
+                   three entry ids. Entry 46 carries `producer-1`'s signature, entry 47 that \
+                   signature and `producer-2`'s beside it. I-D §2.1: \"the envelope with the \
+                   smallest entry index governs and later ones are void\", so entry 46 is the \
+                   version this receipt's subject resolves through and entry 47 applies no \
+                   effect, consumes no rotation proof and never becomes the version a \
+                   `subject.manifest` reference names. It is still a `governance.chain[]` \
+                   element, which I-D §7.5.1 4d counts among the envelopes a receipt RESTS ON, \
+                   so it is verified at its own entry index under the completed key state — and \
+                   because it VERIFIES, it produces no finding and no informative item: an \
+                   informative item reports a void entry the run inspected and found wanting, \
+                   which this is not. The subject at entry 49 is an ordinary ingestion bound to \
+                   version 3."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Accept,
+    });
+
+    out.push(Vector {
+        file: "statement-anchored-duplicate-manifest-unsigned-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 49,
+            anchor: cp50,
+            chain: vec![0, 25, 46, 48],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: duplicate_manifest_keys(),
+            note: "MUST FAIL. The same chain as `statement-anchored-duplicate-manifest.ahl` with \
+                   the third envelope of manifest version 3 in place of the second: entry 48 \
+                   carries the identical payload with a `sig` no key produced. Being void under \
+                   §2.1 does not exempt it — §7.5 step 4 requires every carried envelope to \
+                   verify, and §7.5.1 4d puts a `governance.chain[]` element among the three \
+                   kinds of envelope a receipt rests on, so a failure there is `invalid` rather \
+                   than the informative item a non-relied void entry earns. The governing copy \
+                   at entry 46 is present and verifies, and that is deliberately not enough: a \
+                   verifier that skipped a duplicate WHOLE, instead of skipping only its effect, \
+                   would accept an unsigned envelope the receipt itself presents as its lineage."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5 step 4 / §7.5.1 4d — a void duplicate chain hop is still a carried \
+                   envelope the receipt rests on",
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 48 }),
+        },
+    });
+
+    // The same duplicate under ENUMERATED currency, where §7.5.1 4c asks a different question:
+    // not which copy governs, but whether the chain shows every manifest the range reveals.
+    out.push(Vector {
+        file: "governance-state-duplicate-manifest.ahl",
+        receipt: Spec {
+            claim_type: "governance-state",
+            subject_index: 46,
+            anchor: cp50,
+            chain: vec![0, 25, 46, 47],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "enumerated",
+            currency_material: corpus.enumeration(0, 50, cp50),
+            claim_material: json!({ "target_index": 46 }),
+            producer_keys: Some(vec![
+                key_entry(&keys.producer_1, None, 25),
+                key_entry(&keys.producer_2, None, 41),
+            ]),
+            note: "Manifest version 3 is the governance state at its own entry index, proven \
+                   over a range that carries the version TWICE. The two questions §7.5.1 asks \
+                   about a duplicate are answered differently on purpose. The induction (4b) \
+                   claims the statement id once, at the smallest entry index, so entry 47 \
+                   applies no effect. Completeness (4c) asks whether `governance.chain[]` shows \
+                   every manifest the range reveals, and both envelopes ARE manifests the range \
+                   reveals and both verify, so both must be carried — a chain that showed only \
+                   the governing copy would be short of an entry the enumeration proves is \
+                   there. The third envelope at entry 48 does not verify, so §7.4's rule that \
+                   \"a void entry is not a governance statement and its absence from the chain \
+                   is not an omission\" exempts it, and it is reported as an informative item \
+                   with the five other void entries the range reaches."
                 .to_owned(),
         }
         .build(corpus, keys),
@@ -2288,16 +2551,16 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
-            anchor: cp44,
-            chain: vec![0, 25],
+            anchor: cp52,
+            chain: vec![0, 25, 46, 47],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 44, cp44),
+            currency_material: corpus.enumeration(0, 52, cp52),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
-            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 43: an \
+            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 51: an \
                    INGESTION, genuinely signed by `producer-1`, declaring `ahl_version: \
                    \"0.5\"`. I-D §7.1 settles what that is worth: a carried statement's \
                    unsupported `ahl_version` \"is `unverifiable` as for any carried statement\", \
@@ -2329,8 +2592,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "statement-anchored",
             subject_index: 26,
-            anchor: cp46,
-            chain: vec![0, 25, 44],
+            anchor: cp54,
+            chain: vec![0, 25, 46, 52],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -2339,13 +2602,13 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             claim_material: json!({}),
             producer_keys: None,
             note: "MUST NOT VERIFY, and not for a defect. The chain carries three hops: the \
-                   genesis manifest, version 2 at entry 25, and the manifest at entry 44 — \
+                   genesis manifest, version 2 at entry 25, and the manifest at entry 52 — \
                    genuinely signed by `producer-1`, and declaring `ahl_version: \"0.5\"`. I-D \
                    §7.5.1 4b: such a hop \"is not inducted, K is unestablished at and after its \
                    index, the governance finding is `unverifiable`\". The walk therefore stops \
-                   at entry 44 having ESTABLISHED the prefix state — genesis and version 2 — \
+                   at entry 52 having ESTABLISHED the prefix state — genesis and version 2 — \
                    which is what the subject at entry 26 is verified against, and every check \
-                   that would need a key at or after 44 rests on `governance` instead. The \
+                   that would need a key at or after 52 rests on `governance` instead. The \
                    hop VERIFIES, which is what the rule is about — \"A VERIFYING purported \
                    governance entry\" — so phase 1 has already passed by the time the revision \
                    is acted on, and what an unsupported one costs is this finding rather than \
@@ -2368,8 +2631,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "statement-anchored",
             subject_index: 26,
-            anchor: cp47,
-            chain: vec![0, 25, 46],
+            anchor: cp55,
+            chain: vec![0, 25, 46, 54],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
@@ -2377,8 +2640,8 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
             currency_material: json!({}),
             claim_material: json!({}),
             producer_keys: None,
-            note: "MUST NOT VERIFY, for a DEFECT. The last hop is the manifest at entry 46: \
-                   well formed, declaring `ahl_version: \"0.5\"` exactly as the hop at entry 44 \
+            note: "MUST NOT VERIFY, for a DEFECT. The last hop is the manifest at entry 54: \
+                   well formed, declaring `ahl_version: \"0.5\"` exactly as the hop at entry 52 \
                    does, and carrying a signature that does not verify. I-D §7.5.1 4b orders \
                    these two rules: \"A `governance.chain[]` element is different: the receipt \
                    presents it as its own lineage, so its phase-1 failure is `invalid`\", and \
@@ -2393,7 +2656,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Reject {
             rule: "I-D §7.5.1 4b — a chain element's phase-1 failure is invalid, whatever \
                    revision it declares",
-            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 46 }),
+            matches: |e| matches!(e, ReceiptError::EnvelopeSignatureInvalid { entry_index: 54 }),
         },
     });
 
@@ -2404,16 +2667,16 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
-            anchor: cp45,
-            chain: vec![0, 25],
+            anchor: cp53,
+            chain: vec![0, 25, 46, 47],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 45, cp45),
+            currency_material: corpus.enumeration(0, 53, cp53),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
-            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 44: a manifest \
+            note: "MUST NOT VERIFY, and not for a defect. The range reaches entry 52: a manifest \
                    version genuinely signed by `producer-1`, absent from `governance.chain[]`, \
                    and declaring `ahl_version: \"0.5\"`. A verifier that checked completeness \
                    before revision would call that absence an omission and report `invalid` — a \
@@ -2438,17 +2701,17 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: Spec {
             claim_type: "governance-state",
             subject_index: 25,
-            anchor: cp46,
-            chain: vec![0, 25],
+            anchor: cp54,
+            chain: vec![0, 25, 46, 47],
             record_subject: None,
             competing: "not-checked",
             content_binding: "none",
             currency_mode: "enumerated",
-            currency_material: corpus.enumeration(0, 46, cp46),
+            currency_material: corpus.enumeration(0, 54, cp54),
             claim_material: json!({ "target_index": 26 }),
             producer_keys: None,
             note: "MUST NOT VERIFY, and not for a defect. The range reaches the `key` statement \
-                   at entry 45: genuinely signed by `producer-1`, and declaring \
+                   at entry 53: genuinely signed by `producer-1`, and declaring \
                    `ahl_version: \"0.5\"`. I-D §7.5.1 4b: \"A VERIFYING purported \
                    governance entry that declares an `ahl_version` this revision does not define \
                    is neither: it is not inducted, K is unestablished at and after its index, \
@@ -2716,20 +2979,24 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         receipt: rotation_proof_case(
             &governance_state_valid,
             |proofs| {
-                // This corpus's LOG key never itself rotates (only the witness set does), so
-                // there is no genuine second log key to substitute; witness-1's key/signature
-                // stand in for "a key outside the outgoing log set", which is exactly what the
-                // check below rejects — a checkpoint whose signer is not in that set, INCOMING
-                // key included.
+                // A key from OUTSIDE the outgoing log set that is not the incoming one either.
+                // `governance-key-rotation-proof-incoming-log-key-must-fail.ahl` covers the
+                // incoming key itself, over the log rotation at manifest entry index 55; this
+                // vector is kept beside it because the two substitutions are different facts —
+                // one rules out any non-member of the outgoing set, the other rules out
+                // specifically the key the rotation installs.
                 proofs[0]["checkpoint"]["key_id"] = json!(keys.witness_1.key_id());
                 proofs[0]["checkpoint"]["signature"] = json!(keys.witness_1.sign(
                     &checkpoint_signing_bytes(&proofs[0]["checkpoint"]).expect("checkpoint")
                 ));
             },
             "MUST FAIL. The element's `checkpoint` is re-signed by a key that is not a log key \
-             of the OUTGOING state at manifest entry index 25 — the exact substitution I-D \
-             §7.1 rules out: \"a checkpoint signed by the INCOMING key... is exactly the key \
-             an attacker installs, whereas the exception accepts only the key being retired\".",
+             of the OUTGOING state at manifest entry index 25. What it rules out is any \
+             non-member of that set; the INCOMING key specifically — \"exactly the key an \
+             attacker installs, whereas the exception accepts only the key being retired\" (I-D \
+             §7.1) — is ruled out by \
+             `governance-key-rotation-proof-incoming-log-key-must-fail.ahl`, over the log \
+             rotation at entry 55, where the corpus has a genuine second log key to substitute.",
         ),
         expect: Expect::Reject {
             rule: "I-D §7.1 — the rotation-proof checkpoint must verify under a log key of the \
@@ -2861,6 +3128,160 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
         expect: Expect::Reject {
             rule: "I-D §7.1 — a rotation proof's keys bind to the OUTGOING manifest version",
             matches: |e| matches!(e, ReceiptError::KeyNotBound { entry_index: 25, .. }),
+        },
+    });
+
+    // --- the LOG checkpoint-signing key rotation (manifest v4, entry 55) ---------------
+    // I-D §7.1 detects a governance-key rotation by comparing a manifest's log key objects and
+    // its witness key objects, as sets, with its predecessor's. Manifest v2 rotates the WITNESS
+    // set; manifest v4 rotates the LOG set and nothing else, so a chain carrying both needs two
+    // `rotation_proofs[]` elements in ascending `manifest_entry_index` order, each proving its
+    // own manifest's anchoring under the state that manifest retires.
+    let log_rotation_valid = Spec {
+        claim_type: "statement-anchored",
+        subject_index: 56,
+        anchor: cp57,
+        chain: vec![0, 25, 46, 55],
+        record_subject: None,
+        competing: "not-checked",
+        content_binding: "none",
+        currency_mode: "declared",
+        currency_material: json!({}),
+        claim_material: json!({}),
+        producer_keys: None,
+        note: "Manifest version 4, at entry 55, replaces `log-1` with `log-2` in `log.keys` and \
+               changes nothing else — the witness set and the producer snapshot are version 3's. \
+               That makes it a governance-key rotation on the LOG side, and I-D §7.5.1 4b(M) \
+               asks for the same thing it asks of the witness rotation at entry 25: a \
+               `governance.rotation_proofs[]` element proving the rotating manifest's own \
+               anchoring under the state it retires. Its checkpoint is cp56 — tree size 56, so \
+               it commits entry 55 — signed by the OUTGOING log key `log-1` and cosigned under \
+               the OUTGOING witness set, which is the ordinary artifact §7.1 describes: an \
+               operator that anchors the rotating manifest and keeps signing under the retiring \
+               key until cutover. The chain carries two rotations, so the member carries two \
+               elements in ascending `manifest_entry_index` order, and `keys.log[]` lists \
+               `log-1` three times under three bindings — the genesis version for the first \
+               rotation's outgoing state, version 3 for the second's, and version 4's `log-2` \
+               for this receipt's own checkpoint cp57. §7.5.1 4f is what makes cp57 resolve to \
+               `log-2`: the signing key comes from the manifest version active for the \
+               checkpoint's own tree size, not from whichever version the receipt happens to \
+               anchor its subject under."
+            .to_owned(),
+    }
+    .build(corpus, keys);
+    out.push(Vector {
+        file: "statement-anchored-log-key-rotation.ahl",
+        receipt: log_rotation_valid.clone(),
+        expect: Expect::Accept,
+    });
+
+    out.push(Vector {
+        file: "governance-key-rotation-proof-incoming-log-key-must-fail.ahl",
+        receipt: rotation_proof_case(
+            &log_rotation_valid,
+            |proofs| {
+                proofs[1]["checkpoint"]["key_id"] = json!(keys.log_2.key_id());
+                proofs[1]["checkpoint"]["signature"] = json!(keys.log_2.sign(
+                    &checkpoint_signing_bytes(&proofs[1]["checkpoint"]).expect("checkpoint")
+                ));
+            },
+            "MUST FAIL. The rotation proof for manifest v4 is re-signed by `log-2` — the \
+             INCOMING log key, the one this very rotation installs. I-D §7.1: \"a checkpoint \
+             signed by the INCOMING key... is exactly the key an attacker installs, whereas the \
+             exception accepts only the key being retired\". This is the genuine form of that \
+             substitution: the corpus now has a second log key, so the check no longer has to \
+             stand in a witness key for one.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — the rotation-proof checkpoint must verify under a log key of the \
+                   OUTGOING state",
+            matches: |e| {
+                matches!(e, ReceiptError::RotationProofInvalid { manifest_entry_index: 55, .. })
+            },
+        },
+    });
+
+    out.push(Vector {
+        file: "governance-key-rotation-proofs-out-of-order-must-fail.ahl",
+        receipt: rotation_proof_case(
+            &log_rotation_valid,
+            |proofs| proofs.as_array_mut().expect("rotation_proofs array").swap(0, 1),
+            "MUST FAIL. The two elements are correct in every member and carried in the wrong \
+             order: the rotation at entry 55 first, the one at entry 25 second. I-D §7.1 fixes \
+             the order — \"one element per rotation, in ascending `manifest_entry_index` \
+             order\" — because the induction consumes the NEXT unconsumed element when it \
+             detects a rotation, so an out-of-order pair offers each rotation the other's proof.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — rotation_proofs[] elements are in ascending manifest_entry_index \
+                   order",
+            matches: |e| {
+                matches!(e, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, .. })
+            },
+        },
+    });
+
+    out.push(Vector {
+        file: "governance-key-rotation-proof-incoming-witness-must-fail.ahl",
+        receipt: rotation_proof_case(
+            &log_rotation_valid,
+            |proofs| {
+                let cp26 = &proofs[0]["checkpoint"];
+                proofs[0]["witnesses"] = json!([ {
+                    "witness_id": WITNESS_2,
+                    "key_id": keys.witness_2.key_id(),
+                    "cosignature": keys.witness_2.sign(&cosignature_bytes(cp26, WITNESS_2)),
+                    "cosigned_at": T0,
+                } ]);
+            },
+            "MUST FAIL. The witness-set rotation at entry 25 is cosigned by witness-2 — the \
+             INCOMING witness, the one that rotation installs — with a genuine cosignature over \
+             the right checkpoint. I-D §7.1 requires at least one element to verify under a \
+             witness key of the OUTGOING state, and the outgoing state here is the genesis \
+             manifest, which declares witness-1 alone. A cosignature by a witness the outgoing \
+             manifest does not declare attests nothing about the handover, so it is passed over \
+             rather than refused, and the element then has no qualifying cosignature at all.",
+        ),
+        expect: Expect::Reject {
+            rule: "I-D §7.1 — AT L3, a rotation-proof element needs a cosignature under the \
+                   OUTGOING witness set",
+            matches: |e| {
+                matches!(e, ReceiptError::RotationProofInvalid { manifest_entry_index: 25, detail }
+                    if detail.contains("none did"))
+            },
+        },
+    });
+
+    out.push(Vector {
+        file: "statement-anchored-outgoing-log-key-after-rotation-must-fail.ahl",
+        receipt: Spec {
+            claim_type: "statement-anchored",
+            subject_index: 49,
+            anchor: cp56,
+            chain: vec![0, 25, 46, 55],
+            record_subject: None,
+            competing: "not-checked",
+            content_binding: "none",
+            currency_mode: "declared",
+            currency_material: json!({}),
+            claim_material: json!({}),
+            producer_keys: None,
+            note: "MUST FAIL. cp56 is a real, correctly signed checkpoint of this log — it is \
+                   the very checkpoint the rotation proof for manifest v4 carries — and it is \
+                   signed by `log-1`, the OUTGOING key. Its tree size is 56, so the manifest \
+                   version active for it is v4 at entry 55, which declares `log-2` alone. I-D \
+                   §7.5.1 4f resolves a checkpoint's signing key from the version active for \
+                   ITS OWN tree size, so `log-1` binds to nothing here and the checkpoint cannot \
+                   be authenticated. That a checkpoint is genuine, and even required elsewhere \
+                   in the same receipt, is not a licence to anchor a subject under it after the \
+                   key it carries has been retired."
+                .to_owned(),
+        }
+        .build(corpus, keys),
+        expect: Expect::Reject {
+            rule: "I-D §7.5.1 4f — a checkpoint's log key comes from the manifest version \
+                   active for its own tree size",
+            matches: |e| matches!(e, ReceiptError::KeyNotBound { .. }),
         },
     });
 

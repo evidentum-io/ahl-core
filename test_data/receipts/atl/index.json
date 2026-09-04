@@ -1,0 +1,105 @@
+{
+  "description": "Evidence Receipt vectors over the ATL-bound toy corpus (`vectors/atl/`), with the I-D §7.7 result a conformant verifier must reach. They carry their own index because a trust policy names ONE published genesis anchor (I-D §7.5.1 4a) and this is a second log with a genesis manifest of its own.",
+  "policy": {
+    "adaptor_profiles": {
+      "ahl-test-atl-leaf-v1": {
+        "capabilities": {
+          "checkpoint_raw": true,
+          "consistency_proofs": true
+        },
+        "document": "profiles/ahl-test-atl-leaf-v1.md",
+        "hash": "sha256:028ffd43b43a4e088bbb65ad9c6898fd173c59160772b48f157da7b62ace11c0",
+        "note": "The artifact held under this id is the document at `document`, which defines this profile's own serialization. Its shape is the one adaptor profile `ahl-adaptor-atl-v1` defines, cited there as the source; it is not that profile, and no artifact under that id is held by this policy at all. A receipt pinning `ahl-adaptor-atl-v1` is therefore `unverifiable` here — the profile is not held (I-D §7.5 step 2) — while a receipt pinning THIS id at a digest this document does not recompute to is `invalid`, which `statement-anchored-atl-unheld-manifest-pin-must-fail.ahl` shows."
+      }
+    },
+    "dataset_keys": {},
+    "genesis_entry_id": "sha256:1115d3afd3edb87fdefb4c83b2eac8e5f4490c5dcb0c01329e2826648f9f2e40",
+    "genesis_key_ids": [
+      "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
+    ],
+    "limits": {
+      "max_decoded_bytes": 8388608,
+      "max_work_units": 100000
+    }
+  },
+  "vectors": [
+    {
+      "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "statement-anchored",
+      "expect": "verified",
+      "file": "statement-anchored-atl-leaf.ahl"
+    },
+    {
+      "boundary": "the subject ingestion introduced the named record into the corpus; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "record-ingested",
+      "expect": "verified",
+      "file": "record-ingested-atl-leaf.ahl"
+    },
+    {
+      "boundary": "the manifest and key state active at the target index is exactly the presented chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "governance-state",
+      "expect": "verified",
+      "file": "governance-state-atl-leaf.ahl"
+    },
+    {
+      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "trigger-effective",
+      "expect": "verified",
+      "file": "trigger-effective-atl-leaf.ahl"
+    },
+    {
+      "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; the log's history continued to be append-only through the later checkpoint carried, which is not evidence that every checkpoint the cadence required was published; record content not verified",
+      "claim_type": "statement-anchored",
+      "expect": "verified",
+      "file": "statement-anchored-atl-continued-history.ahl"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-atl-consistency-path-malformed-must-fail.ahl",
+      "finding": "structure",
+      "reason": "malformed receipt: `anchoring.consistency_path[0]` is not a `sha256:` family string in lowercase hex (I-D §2.1, §7.1)",
+      "rule": "adaptor `ahl-test-atl-leaf-v1` §8 — a consistency proof is an array of `sha256:<hex>` family strings"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-atl-metadata-hash-must-fail.ahl",
+      "finding": "anchoring",
+      "reason": "inclusion path for subject did not verify against the anchored root",
+      "rule": "adaptor `ahl-test-atl-leaf-v1` §3.1 — the ATL metadata digest is a fixed constant of the profile"
+    },
+    {
+      "claim_type": "trigger-effective",
+      "expect": "invalid",
+      "file": "trigger-effective-atl-metadata-hash-must-fail.ahl",
+      "finding": "claim-material",
+      "reason": "range proof for competing triggers did not verify: recomputed root differs from the checkpoint root",
+      "rule": "adaptor `ahl-test-atl-leaf-v1` §9.1 — a range proof's carried leaves are hashed by the §3.1 construction"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-atl-leaf-digest-must-fail.ahl",
+      "finding": "adaptor-profile",
+      "reason": "adaptor profile `ahl-test-atl-leaf-v1` is held, but its recomputed digest does not match the hash `anchoring.adaptor` pins",
+      "rule": "adaptor `ahl-test-atl-leaf-v1` / I-D §7.5 step 2 — the pinned digest must match the artifact held"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-atl-unheld-manifest-pin-must-fail.ahl",
+      "finding": "adaptor-profile",
+      "reason": "adaptor profile `ahl-test-atl-leaf-v1` is held, but its recomputed digest does not match the hash `anchoring.adaptor` pins",
+      "rule": "adaptor `ahl-test-atl-leaf-v1` / I-D §7.5 step 2 — a manifest pinning an artifact the verifier does not hold does not resolve"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-atl-raw-mismatch-must-fail.ahl",
+      "finding": "adaptor-profile",
+      "reason": "malformed receipt: ATL checkpoint invalid: raw: `raw` does not equal the blob assembled from the JSON checkpoint members — the JSON members govern",
+      "rule": "adaptor `ahl-test-atl-leaf-v1` §5.4 / I-D §7.5 step 2 — a carried `raw` must parse to the same values as the JSON members"
+    }
+  ]
+}

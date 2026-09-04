@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+mod atl;
 mod corpus;
 mod receipts;
 mod scenario;
@@ -42,6 +43,13 @@ fn main() {
     corpus.self_check(&keys);
     corpus.write(&root, &keys);
     receipts::write_all(&corpus, &keys, &root, &dataset_key);
+
+    // A second toy log, bound to the ATL-shaped test profile `ahl-test-atl-leaf-v1` — the
+    // pieces such a profile serializes differently, exercised end to end rather than at the
+    // unit level. The crate ships no artifact under `ahl-adaptor-atl-v1` (adaptor §14).
+    let atl = atl::AtlCorpus::build(&keys, &corpus.records, &root);
+    atl.self_check(&keys);
+    atl.write(&keys, &root);
 
     println!("test_data written to {}", root.display());
 }

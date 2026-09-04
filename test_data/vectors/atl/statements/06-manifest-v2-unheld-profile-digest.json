@@ -1,0 +1,92 @@
+{
+  "entry_id": "sha256:8e07bdb03176f1727b0c279b3b129ed34b0ce40a08ce5efaf71390d73687d2c1",
+  "entry_index": 6,
+  "envelope": {
+    "payload": {
+      "ahl_version": "0.4",
+      "datasets": {
+        "customers": {
+          "authority": {
+            "key_ids": [
+              "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
+            ],
+            "producer": "producer-1"
+          },
+          "canonicalization": "jcs",
+          "commitment_mode": "keyed",
+          "key_access": "authorized-verifiers-only"
+        },
+        "scores": {
+          "canonicalization": "jcs",
+          "commitment_mode": "plain",
+          "key_access": "not-applicable"
+        }
+      },
+      "issued_at": "2026-08-16T12:00:00Z",
+      "keys": [
+        {
+          "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
+          "pubkey": "base64:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
+        }
+      ],
+      "level": "L3",
+      "log": {
+        "adaptor": {
+          "hash": "sha256:bfe6b7acef3e50fc103ab893e09bf94cb3fb1818bdfc9b03df8404b008399f1d",
+          "id": "ahl-test-atl-leaf-v1"
+        },
+        "cadence_epoch": "2026-08-16T11:30:00Z",
+        "checkpoint_cadence": "PT1H",
+        "keys": [
+          {
+            "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
+            "pubkey": "base64:7UkoxijRwsbq6QM4kFmVYSlZJzpcY/k2NsFGFKyHN9E=",
+            "valid_from_index": 0
+          }
+        ],
+        "log_id": "sha256:d66fef87c0f962f116952b4fc318d76686d5625b8d43cf22d608bb20f79638ae",
+        "operator": "log-operator-1",
+        "witness_grace_period": "PT15M"
+      },
+      "pipelines": {
+        "exclude": [],
+        "include": [
+          "scoring-v1"
+        ]
+      },
+      "predecessor": "sha256:1115d3afd3edb87fdefb4c83b2eac8e5f4490c5dcb0c01329e2826648f9f2e40",
+      "producer": "producer-1",
+      "properties": {
+        "reproducible_reconstruction": false
+      },
+      "retention": {
+        "statements": "P10Y"
+      },
+      "type": "manifest",
+      "valid_time": "2026-08-16T12:00:00Z",
+      "windows": {
+        "anchoring": "PT24H",
+        "propagation": "P30D"
+      },
+      "witnesses": [
+        {
+          "keys": [
+            {
+              "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
+              "pubkey": "base64:iodf/x6zhFFXes1a/uQFRWVo3XyJ4JCGOgVXvHr0nxc=",
+              "valid_from_index": 0
+            }
+          ],
+          "witness_id": "witness-2"
+        }
+      ]
+    },
+    "signatures": [
+      {
+        "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
+        "sig": "base64:fykHcufAIu/UZTv5UDEGsOILjXHp4fZmZ9pk2JTEjUvtkTVYFqsqJ36MukgqID+1bqpU7TDcNlzI46+aDEjpAg=="
+      }
+    ]
+  },
+  "statement_id": "sha256:5291771704a97a3c259c6549d8e66ad05ca5d9e02d1c58fc70a099ad32ce6081"
+}

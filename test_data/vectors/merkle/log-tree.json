@@ -228,10 +228,10 @@
       "name": "36-retraction-cross-dataset-record"
     },
     {
-      "entry_id": "sha256:0c19b754c987eb9fb2419e685a0c99515063d06b22d6455616236f99035e48a4",
+      "entry_id": "sha256:237a093f5975040bb3e0011279fee7f378c6801e28da54dc1f08504083b7f949",
       "entry_index": 37,
-      "leaf_hash": "sha256:6104fdce7de406525b550ed31f04b5b26c1f4b9f8e7b1e67d2dc77988a01e45a",
-      "name": "37-derivation-batch-defective-input-sets"
+      "leaf_hash": "sha256:3af5bffdd88b1be4e07abc16d714662d2edc26f31324dfde40d92c7851da6d28",
+      "name": "37-invalid-signature-derivation-k-from-h"
     },
     {
       "entry_id": "sha256:b98f69ab5b440822ddcb4bd86979acdb4fbb01e3e3f0d1d80895f297bbe7f53f",
@@ -264,28 +264,88 @@
       "name": "42-ingestion-customers-g-under-producer-2"
     },
     {
-      "entry_id": "sha256:f946abfcf12687f26b316fe66f940c47bae5476b132f2541f9ac0118deaddc83",
+      "entry_id": "sha256:05330bf550c5898ec094e530dc6c9042b933f22ef49cf8b2a0c2e8fa8a44d0a3",
       "entry_index": 43,
-      "leaf_hash": "sha256:22bf98090f013ae8b94ec6f418bdca001017f33f5f98a6d002caa04452897c74",
-      "name": "43-ingestion-foreign-revision"
+      "leaf_hash": "sha256:58e3d4e85276aa3f15682da6ffcf0e73873f4c39af0e24d7a3f4ed2910e154a5",
+      "name": "43-derivation-k-from-h-verifying-copy"
     },
     {
-      "entry_id": "sha256:ccbc994a935ba9dbc3c7c4a26691369637b7bcf52a3b273c4820f4227d5c4601",
+      "entry_id": "sha256:04fd9a4c79a45b8d948d0c79ab6cfff4642535293a7c49c56680c7ce60abf848",
       "entry_index": 44,
-      "leaf_hash": "sha256:af336c13f47d14e3431b62d3e1ecee93fb9317496d8b673efaca25ed0c9b0fcd",
-      "name": "44-manifest-foreign-revision"
+      "leaf_hash": "sha256:d15843353342b11668e805cc56922bf2f80e6151156328af5c9d6f1960cb347a",
+      "name": "44-propagation-over-f-retraction-at-cp38"
     },
     {
-      "entry_id": "sha256:9007fbc2e7d75a183e7a1673671c673b91984212e494a3dd9b7f0a68b3b98f3f",
+      "entry_id": "sha256:c7969d3f25c90211adb0158f905b6af2297adefd8b160226c49a24a91202b529",
       "entry_index": 45,
-      "leaf_hash": "sha256:c767d77373b8285f90f2cf71f6db2b0f5ce52d5b3e0cf5b01bc0cea1ee738c4f",
-      "name": "45-key-add-foreign-revision"
+      "leaf_hash": "sha256:ae24513f78dcc4653a4b6de681d16f0a10ed23a47e13d30ca8ddf15a0d5be548",
+      "name": "45-propagation-over-f-retraction-at-cp44"
     },
     {
-      "entry_id": "sha256:21a68fffdb56a8e0f0037d69da8c78934b777aa9d8ebddab1021692405640401",
+      "entry_id": "sha256:87a0a226a666652a06ddab10b0b34562d2522b592e045897dcbb798f75b4b6e6",
       "entry_index": 46,
-      "leaf_hash": "sha256:751b4057527d5708515ee6924fa9801d5746d69a346e658114bbb321ffb1cf86",
-      "name": "46-manifest-foreign-revision-unsigned"
+      "leaf_hash": "sha256:711af9333310a0b7b6a96f2af03d8446ddc9f4b3613357b21b699ac7d2fe4c04",
+      "name": "46-manifest-v3-resnapshot-producer-2"
+    },
+    {
+      "entry_id": "sha256:0c01f829c5389c2530af6bb826b92e03436ffe3a03946b30487a7c5332090733",
+      "entry_index": 47,
+      "leaf_hash": "sha256:c33cecd0eb8d987c700e101460c9f3b1fe8aaaaf5f5106751956a6133f75678a",
+      "name": "47-manifest-v3-second-envelope"
+    },
+    {
+      "entry_id": "sha256:9fbfe59d9891bba87e9828d76d05063136b730b974150bee4451f29a17f0f7f5",
+      "entry_index": 48,
+      "leaf_hash": "sha256:11a4918afde491aad39caf16eb5ee760f9277324b79208027c1eec317bb81bdd",
+      "name": "48-invalid-signature-manifest-v3-third-envelope"
+    },
+    {
+      "entry_id": "sha256:0fd007e3fa03c64121659bbb434a183f81cfe737d83fb438955e82f73cc45051",
+      "entry_index": 49,
+      "leaf_hash": "sha256:7f7ea77cf28fd5a9e4e9996169dddf35709c79cfc25cea04116c6dce124b57e5",
+      "name": "49-ingestion-customers-i-under-v3"
+    },
+    {
+      "entry_id": "sha256:db5776c52f527e43cd5c067b264dc30afddad9c71aebafb956f8e53b2931bcdc",
+      "entry_index": 50,
+      "leaf_hash": "sha256:c6ea551085fb496cd20cf605b161c14c8cd3c9adf82cca1078fe74f0b3dbda2b",
+      "name": "50-derivation-batch-defective-input-sets"
+    },
+    {
+      "entry_id": "sha256:82597889315e84dea19ea1c2a89bf9402c056f8051491197cbaad3972b3e9832",
+      "entry_index": 51,
+      "leaf_hash": "sha256:355c3f3ae0bc94808d5611195734b1434869724ff1c4e44251b6db5ee923119e",
+      "name": "51-ingestion-foreign-revision"
+    },
+    {
+      "entry_id": "sha256:6b42b4921097dc8cb03053bbd3a35479eefd883d713fe05dd5ebe1daa90dffba",
+      "entry_index": 52,
+      "leaf_hash": "sha256:9596fcd066bc24e3cb2055dc6a6b976263e892f6626f13d7260cecafe20e6e6a",
+      "name": "52-manifest-foreign-revision"
+    },
+    {
+      "entry_id": "sha256:b4b4fcf339503400ade1b381d0233e19e9e40750779f40102b51c11994e7cca3",
+      "entry_index": 53,
+      "leaf_hash": "sha256:53670b06308d9b11134eaaad9860830d752c2a6c66afe5e610975e998c575b3c",
+      "name": "53-key-add-foreign-revision"
+    },
+    {
+      "entry_id": "sha256:145b53af49b0b591eb98e2d645e050865a73a441613ee8ebe287c23e9e57d4da",
+      "entry_index": 54,
+      "leaf_hash": "sha256:b5c4da3a7dc02dacf23fbca56931a85b2289538a624a091932b6cdb44f9eb796",
+      "name": "54-manifest-foreign-revision-unsigned"
+    },
+    {
+      "entry_id": "sha256:fb3b6c426950fda4a24822fe3030510907d8d9ce5219454d74403c5f2ec1d0f2",
+      "entry_index": 55,
+      "leaf_hash": "sha256:4c985720a66a880632edeeced268d25a82709fa06072476695c5b8b2f37294f3",
+      "name": "55-manifest-v4-rotate-log-key"
+    },
+    {
+      "entry_id": "sha256:fabf5f9c0fa1bd177f0f6dac793962afd9ded2cba25ca14643d6597836074357",
+      "entry_index": 56,
+      "leaf_hash": "sha256:c7a75696f67baab95146daa2d10d3078a0c4d1f62c5817491952f1c516b4980b",
+      "name": "56-ingestion-customers-j-under-v4"
     }
   ],
   "inclusion": {
@@ -371,38 +431,73 @@
     },
     {
       "name": "cp38",
-      "root": "sha256:e9804ec0807a015231fb76b3b58741463df716d2f403e901bf5825ec38ce04cf",
+      "root": "sha256:6a65f8f650778f161d4c353d13b3f4cade0ed91ddee0e02f6875c1f7d86ba131",
       "tree_size": 38
     },
     {
       "name": "cp40",
-      "root": "sha256:14d422f20a71f0d72b3ffedbb7f337cc9ece5ea00b37811ffd3700b07c9e142c",
+      "root": "sha256:b9324e8798412275b6b9c62511329b23c80b06b4f46a221709a944cf87f13509",
       "tree_size": 40
     },
     {
       "name": "cp43",
-      "root": "sha256:9d690ae8affd183cea7a4eedcb4398e0f5aed64988f03d14089871789ddb7264",
+      "root": "sha256:cb3cfb8d4bd92095b492faea01e0a0d0fdd0b7c039ed18ae534391b340d65c9d",
       "tree_size": 43
     },
     {
       "name": "cp44",
-      "root": "sha256:a29fb12c7f2ff1f40f430e0eb636aab293f602153c19d0c2073effca49d0152e",
+      "root": "sha256:b95e55d953f2e78b2f7dd7a79c63286212985ab28488606478386af3849e3c9f",
       "tree_size": 44
     },
     {
       "name": "cp45",
-      "root": "sha256:183b8478855660b12dd51319da0635bfb21db97995bf8c9e6963919f7c8fe7cf",
+      "root": "sha256:ce32d4aed18014e73cdc5b43509a3071c66df26fd0a259e55f9d23a4e4f947e3",
       "tree_size": 45
     },
     {
       "name": "cp46",
-      "root": "sha256:f7229d54f3a44a6eec2497adca4b70f207d0fe6deb5ab000d8a9770ad30c1d83",
+      "root": "sha256:3d5a9a73ca11c229a5957df5c5191f20698fe2230bdb176c6e155401873d9089",
       "tree_size": 46
     },
     {
-      "name": "cp47",
-      "root": "sha256:b1645030d490104f4efa3831b80b38e0010ebf47257878100178e1dd4844fb73",
-      "tree_size": 47
+      "name": "cp50",
+      "root": "sha256:56bcef8888ecf052eafce61b91bf10962c72d955fc246da1b86de29bd548b5b6",
+      "tree_size": 50
+    },
+    {
+      "name": "cp51",
+      "root": "sha256:7759e26ed656a7436968af1a5d20886640c5eea6398c8d5f0f1533e3a759e978",
+      "tree_size": 51
+    },
+    {
+      "name": "cp52",
+      "root": "sha256:d3be76970d9ca51fc58e25aabcf0ec03fa52dde16189f83e3f7b2b04c9e5cdc8",
+      "tree_size": 52
+    },
+    {
+      "name": "cp53",
+      "root": "sha256:6c59ccadc5f597942d8960ad25af13dfdb460d9936c2bf169fd06ea34163cbc1",
+      "tree_size": 53
+    },
+    {
+      "name": "cp54",
+      "root": "sha256:8b52d154b2c1fc95fbb90b6bcc2c5069b516dacec7be692714cdb34eaa6c47ef",
+      "tree_size": 54
+    },
+    {
+      "name": "cp55",
+      "root": "sha256:bba7ddd2e467d5e4c5e3bec631a56345451bb1cd5773552f2dc9095ea8156941",
+      "tree_size": 55
+    },
+    {
+      "name": "cp56",
+      "root": "sha256:abb4b57ed4af9f9efc46bcef04d5376b64c8df9ef0ea8b34c60ea42d1e589e52",
+      "tree_size": 56
+    },
+    {
+      "name": "cp57",
+      "root": "sha256:441c22b12909e9a49d388f6868c0b0356bd6ab8de85f227136d915c0bf2b7949",
+      "tree_size": 57
     }
   ]
 }

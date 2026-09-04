@@ -1,9 +1,9 @@
 {
-  "entry_id": "sha256:21a68fffdb56a8e0f0037d69da8c78934b777aa9d8ebddab1021692405640401",
-  "entry_index": 46,
+  "entry_id": "sha256:9fbfe59d9891bba87e9828d76d05063136b730b974150bee4451f29a17f0f7f5",
+  "entry_index": 48,
   "envelope": {
     "payload": {
-      "ahl_version": "0.5",
+      "ahl_version": "0.4",
       "datasets": {
         "customers": {
           "authority": {
@@ -27,6 +27,10 @@
         {
           "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
           "pubkey": "base64:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
+        },
+        {
+          "key_id": "sha256:6a3803d5f059902a1c6dafbc9ba4729212f7caac08634cc3ae76b27529f03827",
+          "pubkey": "base64:gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q="
         }
       ],
       "level": "L3",
@@ -74,7 +78,7 @@
             {
               "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
               "pubkey": "base64:iodf/x6zhFFXes1a/uQFRWVo3XyJ4JCGOgVXvHr0nxc=",
-              "valid_from_index": 46
+              "valid_from_index": 25
             }
           ],
           "witness_id": "witness-2"
@@ -88,6 +92,6 @@
       }
     ]
   },
-  "note": "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against `signatures[0].key_id`'s real public key, and the payload declares `ahl_version: \"0.5\"` besides. As a `governance.chain[]` element this is `invalid` on the signature (I-D §7.5.1 4b), not `unverifiable` on the revision. See statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl.",
-  "statement_id": "sha256:17dc78cbb1c6e283f3251b0f9636aecdd5fdd589ccb5c97a51328531d8fb9429"
+  "note": "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against `signatures[0].key_id`'s real public key. It is the third envelope over manifest version 3's payload — one statement id, three entry ids — so it governs nothing under I-D §2.1 either way. See statement-anchored-duplicate-manifest-unsigned-must-fail.ahl.",
+  "statement_id": "sha256:6e176e6746177b8559a7952c2d9af920dc7f4485543b629386617c16fd38388d"
 }

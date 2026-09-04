@@ -1,4 +1,4 @@
-//! The 28-entry toy corpus and every non-receipt vector file it produces.
+//! The toy corpus and every non-receipt vector file it produces.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -18,23 +18,25 @@ use serde_json::{json, Value};
 
 use crate::scenario::{
     leaf_bytes, manifest, payload, signed, transform, write_json, Keys, ADAPTOR_ID,
-    CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, LEAF_FORMAT, LOG_OPERATOR, LOG_SEED, PIPELINE, T0,
-    T_EARLY, T_OPEN_FROM, T_PAST_FROM, T_PAST_TO, T_REKEY, T_RETRACTION, WITNESS_1, WITNESS_2,
+    CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, LEAF_FORMAT, LOG_OPERATOR, LOG_ROTATION_INDEX,
+    LOG_SEED, PIPELINE, T0, T_EARLY, T_OPEN_FROM, T_PAST_FROM, T_PAST_TO, T_REKEY, T_RETRACTION,
+    WITNESS_1, WITNESS_2, WITNESS_ROTATION_INDEX,
 };
 
 /// The corpus prefix over which closure recomputation is defined.
 ///
-/// Entry 37 anchors a batch whose three input-set trees deliberately break one I-D §2.7 tree
+/// Entry 50 anchors a batch whose three input-set trees deliberately break one I-D §2.7 tree
 /// rule each. Closure traversal opens every committed tree it reaches and validates it against
-/// those rules before reading an edge from it, so a walk reaching entry 37 fails by §2.7 —
+/// those rules before reading an edge from it, so a walk reaching entry 50 fails by §2.7 —
 /// which is precisely what the `record-derived-input-set-*-must-fail.ahl` vectors prove, and
 /// the same shape of consequence the non-verifying envelopes at entries 32 and 33 have for
-/// enumerated claims. Every closure scenario this corpus publishes stops at tree size 28 or
-/// below; this constant names the boundary for the walks that would otherwise run to the end.
-pub const CONFORMING_TREE_PREFIX: usize = 37;
+/// enumerated claims. The batch sits at this index rather than earlier so that a propagation
+/// prefix may reach the void derivation at entry 37 without meeting it; this constant names the
+/// boundary for every walk that would otherwise run to the end of the corpus.
+pub const CONFORMING_TREE_PREFIX: usize = 50;
 
 /// Entry-index labels, one per anchored envelope.
-pub const NAMES: [&str; 47] = [
+pub const NAMES: [&str; 57] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
@@ -72,21 +74,52 @@ pub const NAMES: [&str; 47] = [
     "34-ingestion-customers-e-stale-manifest",
     "35-correction-a-to-cross-dataset-replacement",
     "36-retraction-cross-dataset-record",
-    "37-derivation-batch-defective-input-sets",
+    "37-invalid-signature-derivation-k-from-h",
     "38-invalid-signature-key-add",
     "39-invalid-signature-manifest",
     "40-key-retire-producer-2-again",
     "41-key-add-producer-2-verifying-copy",
     "42-ingestion-customers-g-under-producer-2",
-    "43-ingestion-foreign-revision",
-    "44-manifest-foreign-revision",
-    "45-key-add-foreign-revision",
-    "46-manifest-foreign-revision-unsigned",
+    "43-derivation-k-from-h-verifying-copy",
+    "44-propagation-over-f-retraction-at-cp38",
+    "45-propagation-over-f-retraction-at-cp44",
+    "46-manifest-v3-resnapshot-producer-2",
+    "47-manifest-v3-second-envelope",
+    "48-invalid-signature-manifest-v3-third-envelope",
+    "49-ingestion-customers-i-under-v3",
+    "50-derivation-batch-defective-input-sets",
+    "51-ingestion-foreign-revision",
+    "52-manifest-foreign-revision",
+    "53-key-add-foreign-revision",
+    "54-manifest-foreign-revision-unsigned",
+    "55-manifest-v4-rotate-log-key",
+    "56-ingestion-customers-j-under-v4",
 ];
+
+/// The governance-key rotations this corpus anchors, as
+/// `(rotating manifest entry index, the checkpoint that proves it, the OUTGOING manifest
+/// version's entry index)`.
+///
+/// I-D §7.5.1 4b(M) proves a rotating manifest's own anchoring under the state it retires, so
+/// each proof checkpoint is signed by a log key of the OUTGOING set and cosigned under the
+/// OUTGOING witness set — which is why cp26 and cp56 are the two checkpoints whose declared
+/// active manifest version is deliberately the version before their tree size's own.
+///
+/// Manifest v2 (entry 25) rotates the WITNESS set; manifest v4 (entry 55) rotates the LOG
+/// checkpoint-signing key. The two are separate so that each vector isolates one side.
+pub const ROTATIONS: [(u64, &str, u64); 2] = [(25, "cp26", 0), (55, "cp56", 46)];
+
+/// The [`ROTATIONS`] row for a rotating manifest version's entry index.
+pub fn rotation(manifest_index: u64) -> (u64, &'static str, u64) {
+    ROTATIONS
+        .into_iter()
+        .find(|(index, _, _)| *index == manifest_index)
+        .expect("a rotating manifest version of this corpus")
+}
 
 /// A signed checkpoint plus its witness cosignature, as the corpus publishes them.
 pub struct Anchor {
-    pub name: &'static str,
+    pub name: String,
     pub checkpoint: Value,
     pub witness_id: &'static str,
     pub cosignature: String,
@@ -163,7 +196,15 @@ pub struct Records {
     pub c_e: String,
     pub h: String,
     pub z: String,
-    /// Outputs of the entry-37 batch. Each leaf commits an input-set tree that breaks exactly
+    /// Output of the derivation anchored twice at entries 37 and 43 — once with an envelope
+    /// that does not verify, once genuinely signed. It is a consumer of `h`, so it joins the
+    /// affected set of a trigger on `c_f` exactly when the copy that carries it is traversed.
+    pub k: String,
+    /// Subject of the duplicate-manifest vectors, ingested under manifest v3.
+    pub c_i: String,
+    /// Subject of the log-key-rotation vectors, ingested under manifest v4.
+    pub c_j: String,
+    /// Outputs of the entry-50 batch. Each leaf commits an input-set tree that breaks exactly
     /// one of the I-D §2.7 tree rules, so a receipt carrying that tree's complete leaf set is
     /// rejected by the rule it breaks rather than by a membership path.
     pub x_unsorted: String,
@@ -875,66 +916,38 @@ impl Corpus {
             &keys.producer_1,
         );
 
-        // --- entry 37: a batch whose leaves commit input-set trees that break §2.7 --------
-        // I-D §2.7 states one set of tree rules, "identical for every AHL tree — outputs, input
-        // sets, and dispositions": leaves sorted by `record` in ascending UTF-8 byte order of
-        // the canonical commitment string, commitment strings that are family strings under
-        // §2.1 ("one failing the rules there is rejected"), and no duplicate leaves. Membership
-        // paths cannot reach any of that, because the producer who chooses the leaf order
-        // chooses the tree: a set assembled in some other order opens its own root perfectly
-        // well and is still not an AHL tree. So the trees below have to be genuinely built and
-        // genuinely anchored — one leaf each of the batch's outputs tree commits one of them —
-        // rather than mutated into a receipt, where the altered `input_set_root` would break
-        // the outputs path before the rule under test was reached.
+        // --- entry 37: a derivation whose envelope does NOT verify -----------------------
+        // The consumer of H that a trigger on F would otherwise reach. I-D §2.1 makes a
+        // non-verifying envelope VOID and §7.5.1 4d adds that a void entry is "never traversed
+        // by closure", so a propagation prefix that reaches this index recomputes an affected
+        // set WITHOUT the record it would have introduced. Entry 43 anchors the same payload
+        // genuinely signed, which is what shows the exclusion is the signature's doing and not
+        // the payload's.
         //
-        // The outputs tree itself is well formed. Only the three input-set trees are not, and
-        // each breaks exactly one rule, so the negative built on it fails by that rule alone.
-        let defective_input = |record: &str, role: &str| json!({ "dataset": DS_CUSTOMERS, "record": record, "role": role, "statement": id_2 });
-        // Rule broken: ascending order. Both records are canonical and distinct; the leaves are
-        // committed in descending order.
-        let mut unsorted_input_leaves = record_sorted(vec![
-            defective_input(&r.c_a2, "feature"),
-            defective_input(&r.c_b, "reference"),
-        ])
-        .expect("distinct input records");
-        unsorted_input_leaves.reverse();
-        let unsorted_input_root = hash_hex(&tree_root(&leaf_bytes(&unsorted_input_leaves)));
-        // Rule broken: no duplicate. One record appears twice under two roles, so the leaves
-        // differ as bytes while the sort key repeats.
-        let duplicate_input_leaves =
-            vec![defective_input(&r.c_b, "feature"), defective_input(&r.c_b, "reference")];
-        let duplicate_input_root = hash_hex(&tree_root(&leaf_bytes(&duplicate_input_leaves)));
-        // Rule broken: the commitment string is not a family string under §2.1.
-        let noncanonical_input_leaves = vec![defective_input("not-a-commitment", "feature")];
-        let noncanonical_input_root = hash_hex(&tree_root(&leaf_bytes(&noncanonical_input_leaves)));
-        let defective_leaves = record_sorted(vec![
-            json!({
-                "dataset": DS_SCORES, "record": r.x_unsorted,
-                "inputs": { "input_set_root": unsorted_input_root, "input_set_count": 2 },
-            }),
-            json!({
-                "dataset": DS_SCORES, "record": r.x_duplicate,
-                "inputs": { "input_set_root": duplicate_input_root, "input_set_count": 2 },
-            }),
-            json!({
-                "dataset": DS_SCORES, "record": r.x_noncanonical,
-                "inputs": { "input_set_root": noncanonical_input_root, "input_set_count": 1 },
-            }),
-        ])
-        .expect("distinct batch outputs");
-        let defective_outputs_root = hash_hex(&tree_root(&leaf_bytes(&defective_leaves)));
-        let env_37 = signed(
+        // Its position is load-bearing. Every propagation prefix is walked in full, and the
+        // batch below (now entry 50) commits input-set trees that break the §2.7 tree rules by
+        // construction, so a prefix reaching THAT index cannot be opened at all. Anchoring the
+        // void derivation before it — and the batch past every propagation this corpus declares
+        // — is what makes the rule reachable end to end rather than only in a unit test.
+        let derivation_k_payload = payload(
             "derivation",
             &m2,
+            json!(T0),
             json!({
                 "pipeline": PIPELINE,
-                "outputs_root": defective_outputs_root,
-                "outputs_count": defective_leaves.len(),
-                "leaf_format": LEAF_FORMAT,
+                "outputs": [ { "dataset": DS_SCORES, "record": r.k, "locator": "urn:ahl-test:scores/K" } ],
+                "inputs": [ {
+                    "dataset": DS_SCORES, "record": r.h,
+                    "role": "feature", "statement": statement_id(&env_21).expect("well-formed"),
+                } ],
                 "transform": transform(),
             }),
-            &keys.producer_1,
         );
+        let mut env_37 = envelope(derivation_k_payload.clone(), &keys.producer_1);
+        env_37["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
 
         // --- entries 38-40: the reliance-rule material (I-D §2.1, §7.5.1 4b and 4d) -------
         // A log anchors opaque bytes and validates none, so a purported governance statement
@@ -1023,34 +1036,250 @@ impl Corpus {
         let env_42 =
             signed("ingestion", &m2, ingest(&r.h, "2026-08-18/customers-07"), &keys.producer_2);
 
-        // --- entry 43: a VERIFYING NON-GOVERNANCE statement of a revision this document does
+        // --- entry 43: the SAME derivation payload as entry 37, genuinely signed ----------
+        // The control for the void copy above. Its payload is byte for byte entry 37's, so the
+        // two share one statement id and differ only in whether the envelope verifies; §2.1's
+        // first-wins rule is about GOVERNING statements, which a void entry never becomes, so
+        // this copy governs and its edge H -> K is traversed by any prefix that reaches it.
+        let env_43 = envelope(derivation_k_payload, &keys.producer_1);
+
+        // The anchored prefix so far, in entry-index order. Two propagation statements declare
+        // their own corpus checkpoint D over slices of it: [0, 38) reaches the VOID copy of the
+        // derivation and [0, 44) reaches the verifying one, so the two closures differ by
+        // exactly the record that copy introduces.
+        let head: Vec<Value> = vec![
+            env_0.clone(),
+            env_1.clone(),
+            env_2.clone(),
+            env_3.clone(),
+            env_4.clone(),
+            env_5.clone(),
+            env_6.clone(),
+            env_7.clone(),
+            env_8.clone(),
+            env_9.clone(),
+            env_10.clone(),
+            env_11.clone(),
+            env_12.clone(),
+            env_13.clone(),
+            env_14.clone(),
+            env_15.clone(),
+            env_16.clone(),
+            env_17.clone(),
+            env_18.clone(),
+            env_19.clone(),
+            env_20.clone(),
+            env_21.clone(),
+            env_22.clone(),
+            env_23.clone(),
+            env_24.clone(),
+            env_25.clone(),
+            env_26.clone(),
+            env_27.clone(),
+            env_28.clone(),
+            env_29.clone(),
+            env_30.clone(),
+            env_31.clone(),
+            env_32.clone(),
+            env_33.clone(),
+            env_34.clone(),
+            env_35.clone(),
+            env_36.clone(),
+            env_37.clone(),
+            env_38.clone(),
+            env_39.clone(),
+            env_40.clone(),
+            env_41.clone(),
+            env_42.clone(),
+            env_43.clone(),
+        ];
+        let root_38 = hash_hex(&tree_root(&leaf_bytes(&head[..38])));
+        let root_44 = hash_hex(&tree_root(&leaf_bytes(&head)));
+
+        // --- entry 44: a propagation over the F retraction at entry 29, declaring D = cp38 --
+        // The retraction of F at entry 29 is the trigger that governs F at every tree size this
+        // scenario uses: entry 22's earlier authorized retraction is superseded by it, entry 23
+        // is a challenge, and the two candidates at 32 and 33 are void. Its closure is the
+        // single derived record H (entry 21). The void derivation at entry 37 would have added
+        // K on top of it; because that envelope does not verify, the affected set anchored here
+        // is exactly {H}, and the disposition tree is the one entry 24 already committed for
+        // the same one-record set.
+        let env_44 = signed(
+            "propagation",
+            &m2,
+            json!({
+                "trigger": statement_id(&env_29).expect("well-formed envelope"),
+                "corpus_checkpoint": { "log_id": log_id, "tree_size": 38, "root_hash": root_38 },
+                "affected_root": challenge_affected_root,
+                "affected_count": challenge_dispositions.len(),
+                "complete_relative_to_manifest": true,
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entry 45: the same claim declared at D = cp44, where the copy at 43 verifies ----
+        // Identical in every member except the declared checkpoint: the affected set it anchors
+        // is still {H}, while the closure recomputable at [0, 44) is {H, K}. The propagation is
+        // genuinely signed and genuinely anchored — a log validates nothing — and a receipt over
+        // it must be refused for incompleteness, which is what makes the exclusion at entry 44
+        // a fact about the void envelope rather than about the size of the prefix.
+        let env_45 = signed(
+            "propagation",
+            &m2,
+            json!({
+                "trigger": statement_id(&env_29).expect("well-formed envelope"),
+                "corpus_checkpoint": { "log_id": log_id, "tree_size": 44, "root_hash": root_44 },
+                "affected_root": challenge_affected_root,
+                "affected_count": challenge_dispositions.len(),
+                "complete_relative_to_manifest": true,
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entries 46-48: ONE manifest version, THREE anchored envelopes -----------------
+        // I-D §2.1: "A producer MUST NOT anchor two envelopes bearing the same statement id. If
+        // duplicates nevertheless occur, the envelope with the smallest entry index governs and
+        // later ones are void." The statement id digests the PAYLOAD alone while the entry id
+        // digests the ENVELOPE, so one payload under three different signature sets is one
+        // statement anchored three times, with three distinct entry ids — reachable by a real
+        // producer, and the shape the first-wins rule exists for.
+        //
+        // The payload is manifest version 3: predecessor v2, the same log and witness key
+        // objects v2 declares (so it rotates no governance key), and a producer snapshot that
+        // re-states `producer-2` — the key entry 41 put back in force. That snapshot is what
+        // lets the second envelope below carry a genuine `producer-2` signature at its own
+        // entry index.
+        let mut manifest_v3 = manifest(keys, &log_id, adaptor_hash, 46, Some(&entry_id(&env_25)));
+        manifest_v3["keys"] =
+            json!([keys.producer_1.producer_key_object(), keys.producer_2.producer_key_object()]);
+        manifest_v3["witnesses"][0]["keys"][0]["valid_from_index"] = json!(WITNESS_ROTATION_INDEX);
+        let m3 = sha256_hex(&jcs(&manifest_v3));
+
+        // Entry 46 — signed by `producer-1` alone. The smallest entry index, so this is the
+        // envelope that governs.
+        let env_46 = envelope(manifest_v3.clone(), &keys.producer_1);
+
+        // Entry 47 — the same payload co-signed by `producer-1` and `producer-2`. A second,
+        // genuinely valid envelope over one statement: void as a GOVERNING statement, and still
+        // a carried envelope §7.5 step 4 requires to verify.
+        let v3_sig_1 = keys.producer_1.sign(&jcs(&manifest_v3));
+        let v3_sig_2 = keys.producer_2.sign(&jcs(&manifest_v3));
+        let mut env_47_map = serde_json::Map::new();
+        env_47_map.insert("payload".to_owned(), manifest_v3.clone());
+        env_47_map.insert(
+            "signatures".to_owned(),
+            json!([
+                { "key_id": keys.producer_1.key_id(), "sig": v3_sig_1 },
+                { "key_id": keys.producer_2.key_id(), "sig": v3_sig_2 },
+            ]),
+        );
+        let env_47 = Value::Object(env_47_map);
+
+        // Entry 48 — the same payload again, with a `sig` no key produced. Void as a governing
+        // statement for the same reason as entry 47, and `invalid` wherever a receipt presents
+        // it as its own lineage: a `governance.chain[]` element is one of the three envelopes a
+        // receipt RESTS ON (§7.5.1 4d), so its phase-1 failure is a defect of the receipt.
+        let mut env_48 = envelope(manifest_v3, &keys.producer_1);
+        env_48["signatures"][0]["sig"] = json!(format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
+        ));
+
+        // --- entry 49: an ingestion under manifest v3, the subject of the duplicate vectors --
+        let env_49 =
+            signed("ingestion", &m3, ingest(&r.c_i, "2026-08-20/customers-09"), &keys.producer_1);
+
+        // --- entry 50: a batch whose leaves commit input-set trees that break §2.7 --------
+        // I-D §2.7 states one set of tree rules, "identical for every AHL tree — outputs, input
+        // sets, and dispositions": leaves sorted by `record` in ascending UTF-8 byte order of
+        // the canonical commitment string, commitment strings that are family strings under
+        // §2.1 ("one failing the rules there is rejected"), and no duplicate leaves. Membership
+        // paths cannot reach any of that, because the producer who chooses the leaf order
+        // chooses the tree: a set assembled in some other order opens its own root perfectly
+        // well and is still not an AHL tree. So the trees below have to be genuinely built and
+        // genuinely anchored — one leaf each of the batch's outputs tree commits one of them —
+        // rather than mutated into a receipt, where the altered `input_set_root` would break
+        // the outputs path before the rule under test was reached.
+        //
+        // The outputs tree itself is well formed. Only the three input-set trees are not, and
+        // each breaks exactly one rule, so the negative built on it fails by that rule alone.
+        // The batch is anchored at the tail so that no propagation prefix this corpus declares
+        // has to open a tree that cannot be opened ([`CONFORMING_TREE_PREFIX`]).
+        let defective_input = |record: &str, role: &str| json!({ "dataset": DS_CUSTOMERS, "record": record, "role": role, "statement": id_2 });
+        // Rule broken: ascending order. Both records are canonical and distinct; the leaves are
+        // committed in descending order.
+        let mut unsorted_input_leaves = record_sorted(vec![
+            defective_input(&r.c_a2, "feature"),
+            defective_input(&r.c_b, "reference"),
+        ])
+        .expect("distinct input records");
+        unsorted_input_leaves.reverse();
+        let unsorted_input_root = hash_hex(&tree_root(&leaf_bytes(&unsorted_input_leaves)));
+        // Rule broken: no duplicate. One record appears twice under two roles, so the leaves
+        // differ as bytes while the sort key repeats.
+        let duplicate_input_leaves =
+            vec![defective_input(&r.c_b, "feature"), defective_input(&r.c_b, "reference")];
+        let duplicate_input_root = hash_hex(&tree_root(&leaf_bytes(&duplicate_input_leaves)));
+        // Rule broken: the commitment string is not a family string under §2.1.
+        let noncanonical_input_leaves = vec![defective_input("not-a-commitment", "feature")];
+        let noncanonical_input_root = hash_hex(&tree_root(&leaf_bytes(&noncanonical_input_leaves)));
+        let defective_leaves = record_sorted(vec![
+            json!({
+                "dataset": DS_SCORES, "record": r.x_unsorted,
+                "inputs": { "input_set_root": unsorted_input_root, "input_set_count": 2 },
+            }),
+            json!({
+                "dataset": DS_SCORES, "record": r.x_duplicate,
+                "inputs": { "input_set_root": duplicate_input_root, "input_set_count": 2 },
+            }),
+            json!({
+                "dataset": DS_SCORES, "record": r.x_noncanonical,
+                "inputs": { "input_set_root": noncanonical_input_root, "input_set_count": 1 },
+            }),
+        ])
+        .expect("distinct batch outputs");
+        let defective_outputs_root = hash_hex(&tree_root(&leaf_bytes(&defective_leaves)));
+        let env_50 = signed(
+            "derivation",
+            &m3,
+            json!({
+                "pipeline": PIPELINE,
+                "outputs_root": defective_outputs_root,
+                "outputs_count": defective_leaves.len(),
+                "leaf_format": LEAF_FORMAT,
+                "transform": transform(),
+            }),
+            &keys.producer_1,
+        );
+
+        // --- entry 51: a VERIFYING NON-GOVERNANCE statement of a revision this document does
         // not define. §7.1: a carried statement's unsupported `ahl_version` "is `unverifiable` as
         // for any carried statement" — a finding, never the end of the run, and never a defect,
         // since a verifier of that revision could read it. Anchored BELOW the two governance
         // statements that follow, so a range can reach it without reaching them.
         let mut foreign_ingestion_payload =
-            payload("ingestion", &m2, json!(T0), ingest(&r.z, "2026-08-19/customers-08"));
+            payload("ingestion", &m3, json!(T0), ingest(&r.z, "2026-08-19/customers-08"));
         foreign_ingestion_payload["ahl_version"] = json!("0.5");
-        let env_43 = envelope(foreign_ingestion_payload, &keys.producer_1);
+        let env_51 = envelope(foreign_ingestion_payload, &keys.producer_1);
 
-        // --- entry 44: a VERIFYING `manifest` of a revision this document does not define ---
-        // The manifest analogue of entry 45 below, and it takes a different path through the
+        // --- entry 52: a VERIFYING `manifest` of a revision this document does not define ---
+        // The manifest analogue of entry 53 below, and it takes a different path through the
         // verifier: a manifest is not selected for the induction by `enumerated_key_statements`,
         // so what meets it is I-D §7.5.1 4c's completeness check — which must read its revision
         // before calling its absence from `governance.chain[]` an omission.
         let mut foreign_manifest_payload =
-            manifest(keys, &log_id, adaptor_hash, 44, Some(&entry_id(&env_25)));
+            manifest(keys, &log_id, adaptor_hash, 52, Some(&entry_id(&env_25)));
         foreign_manifest_payload["ahl_version"] = json!("0.5");
-        let env_44 = envelope(foreign_manifest_payload, &keys.producer_1);
+        let env_52 = envelope(foreign_manifest_payload, &keys.producer_1);
 
-        // --- entry 45: a VERIFYING `key` statement of a revision this document does not define
+        // --- entry 53: a VERIFYING `key` statement of a revision this document does not define
         // The other half of 4b's rule: "A VERIFYING purported governance entry that declares an
         // `ahl_version` this revision does not define is neither: it is not inducted, K is
         // unestablished at and after its index, the governance finding is `unverifiable`."
         // Genuinely signed by `producer-1`, so the signature is not what stops it.
         let mut foreign_key_payload = payload(
             "key",
-            &m2,
+            &m3,
             json!(T0),
             json!({
                 "action": "add",
@@ -1062,9 +1291,9 @@ impl Corpus {
             }),
         );
         foreign_key_payload["ahl_version"] = json!("0.5");
-        let env_45 = envelope(foreign_key_payload, &keys.producer_1);
+        let env_53 = envelope(foreign_key_payload, &keys.producer_1);
 
-        // --- entry 46: a foreign-revision `manifest` whose signature does NOT verify --------
+        // --- entry 54: a foreign-revision `manifest` whose signature does NOT verify --------
         // The two halves of 4b's governance-entry rule meet here. A `governance.chain[]` element
         // "is different: the receipt presents it as its own lineage, so its phase-1 failure is
         // `invalid`", and the foreign-revision rule that follows opens with "A VERIFYING
@@ -1074,20 +1303,43 @@ impl Corpus {
         // soften that to a capability gap. Anchored, like the rest, past every other vector's
         // range.
         let mut foreign_unsigned_payload =
-            manifest(keys, &log_id, adaptor_hash, 46, Some(&entry_id(&env_25)));
+            manifest(keys, &log_id, adaptor_hash, 54, Some(&entry_id(&env_25)));
         foreign_unsigned_payload["ahl_version"] = json!("0.5");
-        let mut env_46 = envelope(foreign_unsigned_payload, &keys.producer_1);
-        env_46["signatures"][0]["sig"] = json!(format!(
+        let mut env_54 = envelope(foreign_unsigned_payload, &keys.producer_1);
+        env_54["signatures"][0]["sig"] = json!(format!(
             "base64:{}",
             base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64])
         ));
+
+        // --- entry 55: the manifest version that rotates the LOG checkpoint-signing key ----
+        // I-D §7.1 compares a manifest's log key objects with its predecessor's AS SETS: this
+        // version drops `log-1` and declares `log-2` alone, which is a governance-key rotation
+        // on the log side and nothing else — the witness set and the producer snapshot are
+        // v3's, unchanged. §7.5.1 4b(M) therefore requires a `governance.rotation_proofs[]`
+        // element proving this manifest's own anchoring under the OUTGOING key state: a
+        // checkpoint signed by `log-1` and cosigned under the witness set v3 declares.
+        // Checkpoints from tree size 56 onward — the first size at which this version is
+        // active — are signed by `log-2` instead (§7.5.1 4f resolves the key from the version
+        // active for the checkpoint's own tree size).
+        let mut manifest_v4 =
+            manifest(keys, &log_id, adaptor_hash, LOG_ROTATION_INDEX, Some(&entry_id(&env_46)));
+        manifest_v4["keys"] =
+            json!([keys.producer_1.producer_key_object(), keys.producer_2.producer_key_object()]);
+        manifest_v4["witnesses"][0]["keys"][0]["valid_from_index"] = json!(WITNESS_ROTATION_INDEX);
+        let m4 = sha256_hex(&jcs(&manifest_v4));
+        let env_55 = envelope(manifest_v4, &keys.producer_1);
+
+        // --- entry 56: an ingestion under manifest v4, the subject of the rotation vectors ---
+        let env_56 =
+            signed("ingestion", &m4, ingest(&r.c_j, "2026-08-21/customers-10"), &keys.producer_1);
 
         let envelopes = vec![
             env_0, env_1, env_2, env_3, env_4, env_5, env_6, env_7, env_8, env_9, env_10, env_11,
             env_12, env_13, env_14, env_15, env_16, env_17, env_18, env_19, env_20, env_21, env_22,
             env_23, env_24, env_25, env_26, env_27, env_28, env_29, env_30, env_31, env_32, env_33,
             env_34, env_35, env_36, env_37, env_38, env_39, env_40, env_41, env_42, env_43, env_44,
-            env_45, env_46,
+            env_45, env_46, env_47, env_48, env_49, env_50, env_51, env_52, env_53, env_54, env_55,
+            env_56,
         ];
 
         let mut trees = TreeMaterial::new();
@@ -1129,54 +1381,55 @@ impl Corpus {
             (34, 25),
             (35, 25),
             (37, 25),
+            // cp38 covers [0, 38): it reaches the VOID derivation at entry 37 and is the
+            // checkpoint D the propagation at entry 44 declares.
             (38, 25),
             // cp40 covers [0, 40): it reaches the two purported governance statements at
-            // entries 38 and 39, whose envelopes do not verify, and stops short of the
-            // foreign-revision `key` statement at entry 40.
+            // entries 38 and 39, whose envelopes do not verify.
             (40, 25),
             // cp43 reaches the re-add at entry 41 and the subject at 42, and stops short of the
-            // two foreign-revision statements.
+            // verifying copy of the void derivation at entry 43.
             (43, 25),
-            // cp44 reaches the foreign-revision INGESTION at entry 43 — a carried statement of
+            // cp44 covers [0, 44): it reaches that verifying copy, and is the checkpoint D the
+            // propagation at entry 45 declares.
+            (44, 25),
+            // cp45 and cp46 are the anchoring checkpoints of those two propagations.
+            (45, 25),
+            (46, 25),
+            // cp50 covers [0, 50): the three envelopes of manifest version 3 (entries 46-48)
+            // and the ingestion under it at entry 49, stopping short of the defective batch.
+            // Manifest v3 is the version ACTIVE from tree size 47 onward.
+            (50, 46),
+            // cp51 reaches the defective-input-set batch at entry 50.
+            (51, 46),
+            // cp52 reaches the foreign-revision INGESTION at entry 51 — a carried statement of
             // a revision this document does not define, and not a governance statement — and
             // stops short of the two governance statements that follow it.
-            (44, 25),
-            // cp45 reaches the foreign-revision MANIFEST at entry 44.
-            (45, 25),
-            // cp46 reaches the foreign-revision `key` statement at entry 45 as well.
-            (46, 25),
-            // cp47 reaches the unsigned foreign-revision manifest at entry 46.
-            (47, 25),
+            (52, 46),
+            // cp53 reaches the foreign-revision MANIFEST at entry 52.
+            (53, 46),
+            // cp54 reaches the foreign-revision `key` statement at entry 53 as well.
+            (54, 46),
+            // cp55 reaches the unsigned foreign-revision manifest at entry 54.
+            (55, 46),
+            // cp56: manifest_index 46 is the same deliberate exception cp26 carries, for the
+            // LOG-key rotation at entry 55. It covers [0, 56), so it commits the rotating
+            // manifest itself, and it is signed by the OUTGOING log key `log-1` and cosigned
+            // under the OUTGOING witness set — which is what I-D §7.5.1 4b(M) requires of a
+            // rotation proof, and what 4f forbids of an ordinary anchoring checkpoint at this
+            // tree size.
+            (56, 46),
+            // cp57 is the first checkpoint under manifest v4: signed by the INCOMING log key.
+            (57, LOG_ROTATION_INDEX),
         ]
         .into_iter()
         .map(|(size, manifest_index)| {
             let root = hash_hex(&tree_root(&log_leaves[..at(size)]));
-            let cp = checkpoint(&log_id, size, &root, T0, &keys.log_1);
+            let cp = checkpoint(&log_id, size, &root, T0, keys.log_for(manifest_index));
             let (key, witness_id) = keys.witness_for(manifest_index);
             let cosignature = key.sign(&cosignature_bytes(&cp, witness_id));
             Anchor {
-                name: match size {
-                    8 => "cp8",
-                    13 => "cp13",
-                    20 => "cp20",
-                    24 => "cp24",
-                    25 => "cp25",
-                    26 => "cp26",
-                    28 => "cp28",
-                    29 => "cp29",
-                    30 => "cp30",
-                    32 => "cp32",
-                    34 => "cp34",
-                    35 => "cp35",
-                    37 => "cp37",
-                    38 => "cp38",
-                    40 => "cp40",
-                    43 => "cp43",
-                    44 => "cp44",
-                    45 => "cp45",
-                    46 => "cp46",
-                    _ => "cp47",
-                },
+                name: format!("cp{size}"),
                 checkpoint: cp,
                 witness_id,
                 cosignature,
@@ -1331,13 +1584,15 @@ impl Corpus {
     /// cosigned by the OUTGOING witness, witness-1 — proves the rotating manifest's own
     /// anchoring under the state it retires. This corpus has exactly one governance-key
     /// rotation, so one element suffices for every vector whose chain carries manifest v2.
-    pub fn rotation_proof_element(&self, keys: &Keys) -> Value {
-        let cp26 = self.anchor("cp26");
+    pub fn rotation_proof_element(&self, keys: &Keys, manifest_index: u64) -> Value {
+        let (_, name, _) = rotation(manifest_index);
+        let anchor = self.anchor(name);
+        let index = usize::try_from(manifest_index).expect("small entry index");
         json!({
-            "manifest_entry_index": 25,
-            "checkpoint": cp26.checkpoint,
-            "inclusion_path": self.log_path(25, cp26.tree_size()),
-            "witnesses": [ cp26.witness_entry(keys) ],
+            "manifest_entry_index": manifest_index,
+            "checkpoint": anchor.checkpoint,
+            "inclusion_path": self.log_path(index, anchor.tree_size()),
+            "witnesses": [ anchor.witness_entry(keys) ],
         })
     }
 
@@ -1404,20 +1659,28 @@ impl Corpus {
     /// reader could tell the intended lesson from the accident. Entry ids are checked too — two
     /// envelopes sharing one would be one anchored entry counted twice.
     ///
-    /// ONE pair is deliberate, and it is the one §2.1's rule does not reach: entry 38 is a
-    /// purported `key` statement whose envelope does not verify, and entry 41 is the same
-    /// statement genuinely signed. §2.1 voids "the envelope with the smallest entry index
-    /// governs and later ones are void" among GOVERNING statements, and I-D §7.5.1 4b admits an
-    /// enumeration-only entry to the induction "only if its envelope verifies in phase 1" — a
-    /// void entry never governs, so it occupies no statement id and the later verifying copy is
-    /// the one that governs. Their ENTRY ids still differ, since the signatures do.
+    /// THREE groups of entries repeat a statement id on purpose, and each is a case the rule
+    /// is ABOUT rather than a case it forbids.
+    ///
+    /// * Entries 38 and 41 — a purported `key` statement whose envelope does not verify, and the
+    ///   same statement genuinely signed. §2.1 voids later duplicates among GOVERNING
+    ///   statements, and I-D §7.5.1 4b admits an enumeration-only entry to the induction "only
+    ///   if its envelope verifies in phase 1", so a void entry occupies no statement id at all
+    ///   and the later verifying copy is the one that governs.
+    /// * Entries 37 and 43 — the same for a derivation: void first, genuinely signed second.
+    /// * Entries 46, 47 and 48 — one manifest version under three signature sets, which is
+    ///   §2.1's own case: the smallest entry index governs and the later two are void. This is
+    ///   what a producer that anchors a duplicate actually produces, and it is reachable because
+    ///   the statement id digests the PAYLOAD while the entry id digests the ENVELOPE.
+    ///
+    /// Every ENTRY id is still distinct in all three groups, since the signature sets are.
     fn check_statement_ids_are_unique(&self) {
-        const VOID_THEN_VERIFYING: [usize; 2] = [38, 41];
+        const DUPLICATED_ON_PURPOSE: [usize; 7] = [37, 38, 41, 43, 46, 47, 48];
         let mut statements: BTreeMap<String, usize> = BTreeMap::new();
         let mut entries: BTreeMap<String, usize> = BTreeMap::new();
         for (index, env) in self.envelopes.iter().enumerate() {
             let sid = statement_id(env).expect("well-formed envelope");
-            if VOID_THEN_VERIFYING.contains(&index) {
+            if DUPLICATED_ON_PURPOSE.contains(&index) {
                 statements.entry(sid).or_insert(index);
                 let eid = entry_id(env);
                 if let Some(first) = entries.insert(eid.clone(), index) {
@@ -1454,9 +1717,11 @@ impl Corpus {
         // vector's purpose) or an invalid one elsewhere (a real regression) would each be
         // caught.
         // Entries 38 and 39 join them: a purported `key` statement and a purported `manifest`
-        // whose signatures do not verify, anchored past every checkpoint the rest of the corpus
-        // uses, for the reliance rule of I-D §7.5.1 4d.
-        const NON_VERIFYING_ENTRIES: [usize; 5] = [32, 33, 38, 39, 46];
+        // whose signatures do not verify, for the reliance rule of I-D §7.5.1 4d. Entry 37 is
+        // the derivation that rule excludes from a propagation prefix, entry 48 the third
+        // envelope of manifest version 3, and entry 54 a foreign-revision manifest nothing
+        // signs.
+        const NON_VERIFYING_ENTRIES: [usize; 7] = [32, 33, 37, 38, 39, 48, 54];
         for (index, env) in self.envelopes.iter().enumerate() {
             if NON_VERIFYING_ENTRIES.contains(&index) {
                 continue;
@@ -1561,7 +1826,7 @@ impl Corpus {
             let msg = checkpoint_signing_bytes(&anchor.checkpoint).expect("checkpoint object");
             let sig = field_str(&anchor.checkpoint, "signature").expect("signed checkpoint");
             assert!(
-                verify_signature(&keys.log_1.verifying_key(), &msg, sig)
+                verify_signature(&keys.log_for(anchor.manifest_index).verifying_key(), &msg, sig)
                     .expect("well-formed signature"),
                 "{}: checkpoint signature did not verify",
                 anchor.name
@@ -1579,8 +1844,8 @@ impl Corpus {
             );
         }
         println!(
-            "  [ok] {} checkpoints signed by log-1 and cosigned by the witness of their active \
-             manifest version",
+            "  [ok] {} checkpoints signed by the log key of their active manifest version and \
+             cosigned by its witness",
             self.anchors.len()
         );
 
@@ -1878,7 +2143,7 @@ impl Corpus {
                      governance-state-void-governance-entries.ahl."
                 );
             }
-            if index == 46 {
+            if index == 54 {
                 // A chain hop that is both: a foreign revision AND a signature no key produced.
                 // I-D §7.5.1 4b orders the two rules — "A `governance.chain[]` element is
                 // different: the receipt presents it as its own lineage, so its phase-1 failure
@@ -1891,6 +2156,31 @@ impl Corpus {
                      `ahl_version: \"0.5\"` besides. As a `governance.chain[]` element this is \
                      `invalid` on the signature (I-D §7.5.1 4b), not `unverifiable` on the \
                      revision. See statement-anchored-broken-foreign-revision-chain-hop-must-fail.ahl."
+                );
+            }
+            if index == 37 {
+                // The derivation the reliance rule excludes from a propagation prefix. Entry 43
+                // anchors the same payload genuinely signed, so the only difference between the
+                // two is the signature — which is what makes the exclusion observable.
+                vector["note"] = json!(
+                    "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against \
+                     `signatures[0].key_id`'s real public key. A void entry is never traversed \
+                     by closure (I-D §2.1, §7.5.1 4d), so a propagation prefix reaching this \
+                     index recomputes an affected set without the record it would introduce. \
+                     See propagation-complete-void-prefix-entry.ahl."
+                );
+            }
+            if index == 48 {
+                // The third envelope over manifest version 3's payload. Void as a governing
+                // statement under §2.1's first-wins rule whatever its signature says, and
+                // `invalid` wherever a receipt presents it as its own `governance.chain[]`
+                // lineage (I-D §7.5.1 4d).
+                vector["note"] = json!(
+                    "INTENTIONALLY NON-VERIFYING: `signatures[0].sig` does not verify against \
+                     `signatures[0].key_id`'s real public key. It is the third envelope over \
+                     manifest version 3's payload — one statement id, three entry ids — so it \
+                     governs nothing under I-D §2.1 either way. See \
+                     statement-anchored-duplicate-manifest-unsigned-must-fail.ahl."
                 );
             }
             if index == 33 {
@@ -2051,7 +2341,7 @@ impl Corpus {
                 "roots": self
                     .anchors
                     .iter()
-                    .map(|a| json!({ "name": a.name, "tree_size": a.tree_size(), "root": a.root() }))
+                    .map(|a| json!({ "name": &a.name, "tree_size": a.tree_size(), "root": a.root() }))
                     .collect::<Vec<_>>(),
                 "inclusion": {
                     "leaf_index": 3,
@@ -2179,12 +2469,16 @@ impl Corpus {
             (27, 28, "the trailing entry"),
         ];
         json!({
-            "description": "Authenticated range proofs over the 28-entry log tree under cp28 \
-                            (core spec §3 contract item 5, receipt format §4.2, adaptor profile \
-                            §8). Each proof establishes that the listed entries are exactly and \
-                            completely the leaf set of the range under the checkpoint root.",
+            "description": format!(
+                "Authenticated range proofs over the size-{} log tree under {} (core spec §3 \
+                 contract item 5, receipt format §4.2, adaptor profile §8). Each proof \
+                 establishes that the listed entries are exactly and completely the leaf set of \
+                 the range under the checkpoint root.",
+                cp28.tree_size(),
+                &cp28.name,
+            ),
             "adaptor": { "id": ADAPTOR_ID, "hash": self.adaptor_hash },
-            "checkpoint": { "name": cp28.name, "tree_size": 28, "root": cp28.root() },
+            "checkpoint": { "name": &cp28.name, "tree_size": cp28.tree_size(), "root": cp28.root() },
             "serialization": "base64 of: \"AHLRP1\" || tree_size:u64be || from_index:u64be || \
                               to_index:u64be || node_count:u32be || node_count x 32 raw bytes",
             "cases": cases
@@ -2226,7 +2520,7 @@ impl Corpus {
                     .anchors
                     .iter()
                     .map(|a| json!({
-                        "name": a.name,
+                        "name": &a.name,
                         "active_manifest_entry_index": a.manifest_index,
                         "checkpoint": a.checkpoint,
                     }))
@@ -2237,14 +2531,14 @@ impl Corpus {
                     .map(|a| {
                         let (key, _) = keys.witness_for(a.manifest_index);
                         json!({
-                            "checkpoint": a.name,
+                            "checkpoint": &a.name,
                             "witness_id": a.witness_id,
                             "key_id": key.key_id(),
                             "cosignature": a.cosignature,
                             "cosigned_at": T0,
                             "signed_over": format!(
                                 "JCS({{\"checkpoint\": <signed {}>, \"witness_id\": \"{}\"}})",
-                                a.name, a.witness_id
+                                &a.name, a.witness_id
                             ),
                         })
                     })
@@ -2264,9 +2558,10 @@ impl Corpus {
             let trigger = self.payload(case.trigger_index);
             let mut vector = json!({
                 "description": format!(
-                    "Revocation closure `{}` over the 28-entry toy corpus (core spec §5.1, §5.3), \
-                     evaluated at the checkpoint committing the trigger.",
-                    case.name
+                    "Revocation closure `{}` over the {}-entry toy corpus (core spec §5.1, \
+                     §5.3), evaluated at the checkpoint committing the trigger.",
+                    case.name,
+                    self.envelopes.len()
                 ),
                 "trigger": {
                     "statement_id": self.statement_id(case.trigger_index),
@@ -2539,6 +2834,9 @@ impl Records {
             c_e: keyed(&json!({ "customer_id": "C-6006", "country": "NL", "segment": "retail" })),
             h: plain(&json!({ "customer_id": "C-5005", "model": "risk-v4.2", "score": 421 })),
             z: plain(&json!({ "customer_id": "C-1001", "metric": "rollup", "value_bp": 4200 })),
+            k: plain(&json!({ "customer_id": "C-5005", "model": "portfolio-v1", "score": 388 })),
+            c_i: keyed(&json!({ "customer_id": "C-8008", "country": "SE", "segment": "sme" })),
+            c_j: keyed(&json!({ "customer_id": "C-9009", "country": "FI", "segment": "retail" })),
             x_unsorted: plain(
                 &json!({ "customer_id": "C-7007", "model": "portfolio-v1", "score": 701 }),
             ),

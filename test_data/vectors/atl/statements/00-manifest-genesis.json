@@ -1,9 +1,9 @@
 {
-  "entry_id": "sha256:ccbc994a935ba9dbc3c7c4a26691369637b7bcf52a3b273c4820f4227d5c4601",
-  "entry_index": 44,
+  "entry_id": "sha256:1115d3afd3edb87fdefb4c83b2eac8e5f4490c5dcb0c01329e2826648f9f2e40",
+  "entry_index": 0,
   "envelope": {
     "payload": {
-      "ahl_version": "0.5",
+      "ahl_version": "0.4",
       "datasets": {
         "customers": {
           "authority": {
@@ -32,8 +32,8 @@
       "level": "L3",
       "log": {
         "adaptor": {
-          "hash": "sha256:ea4e9a7d9f4c2286fe2a0a292e939ef6c2261c8567b3d91cd7375c5490525961",
-          "id": "ahl-test-log-v1"
+          "hash": "sha256:028ffd43b43a4e088bbb65ad9c6898fd173c59160772b48f157da7b62ace11c0",
+          "id": "ahl-test-atl-leaf-v1"
         },
         "cadence_epoch": "2026-08-16T11:30:00Z",
         "checkpoint_cadence": "PT1H",
@@ -44,7 +44,7 @@
             "valid_from_index": 0
           }
         ],
-        "log_id": "sha256:f96bab99f35b3ca221f3f233369835c3ee222f4b2e6c00f84b3a24f840f017a0",
+        "log_id": "sha256:d66fef87c0f962f116952b4fc318d76686d5625b8d43cf22d608bb20f79638ae",
         "operator": "log-operator-1",
         "witness_grace_period": "PT15M"
       },
@@ -54,7 +54,6 @@
           "scoring-v1"
         ]
       },
-      "predecessor": "sha256:a90a849f737efda966e76addf1218903898f476b7a683c0a4cdacf1de682d972",
       "producer": "producer-1",
       "properties": {
         "reproducible_reconstruction": false
@@ -72,21 +71,21 @@
         {
           "keys": [
             {
-              "key_id": "sha256:72456720412037a6b339f884ce6d91bb4cc163a7dc3e4c58c658e6c2097b92a2",
-              "pubkey": "base64:iodf/x6zhFFXes1a/uQFRWVo3XyJ4JCGOgVXvHr0nxc=",
-              "valid_from_index": 44
+              "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
+              "pubkey": "base64:ypOsFwUYcHHWe4PH/w7+gQjo7EUwV113JoeTM9vavnw=",
+              "valid_from_index": 0
             }
           ],
-          "witness_id": "witness-2"
+          "witness_id": "witness-1"
         }
       ]
     },
     "signatures": [
       {
         "key_id": "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e",
-        "sig": "base64:kc5uRdXYofKhHX44zrk0PkLa8CeqvAN1UO7dQyusc3FNuIAEFBBvPtK//+BXgW4lhQ4y9Ydt6m6gKejJdZAIDw=="
+        "sig": "base64:nGu5IgygwobXkehaLDphEVCrDqun8qQgR+bOpsFZmrRoqgS1TuZ+f4uUXQ9ZPPPbKEldGZn4VnNy+tMXzuYOBQ=="
       }
     ]
   },
-  "statement_id": "sha256:251e04a1582c2ada50ec392b17c71e1cd84434af4e778d9ba38cdfcf042952f8"
+  "statement_id": "sha256:82f00929110b9da342763dba4e74316aca6549c4295f02e1a609e256f27fad8c"
 }

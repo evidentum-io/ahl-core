@@ -109,7 +109,7 @@
     "root": "sha256:fb00ea07ca1fa768b74e56005b165a3223f0763840c2780471c3f3501a0fadda",
     "tree_size": 28
   },
-  "description": "Authenticated range proofs over the 28-entry log tree under cp28 (core spec §3 contract item 5, receipt format §4.2, adaptor profile §8). Each proof establishes that the listed entries are exactly and completely the leaf set of the range under the checkpoint root.",
+  "description": "Authenticated range proofs over the size-28 log tree under cp28 (core spec §3 contract item 5, receipt format §4.2, adaptor profile §8). Each proof establishes that the listed entries are exactly and completely the leaf set of the range under the checkpoint root.",
   "negative": {
     "expect": "reject: substituting, reordering, dropping or adding any entry in the carried range changes the recomputed root, and a carried leaf count other than `to_index - from_index` is rejected structurally"
   },
