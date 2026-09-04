@@ -16,7 +16,7 @@
         "tree_size": 5
       },
       "cosignature": {
-        "cosignature": "base64:xZaQ9y3SptsslKNrXhA89HielBfMwwh29/V6+J2E97JApm1g535gEIPoL+DiXfcBd05poGVPtzDU5QUe2oIaDw==",
+        "cosignature": "base64:Z//mlARz40fyLH8B/LZATmi369SLQHsYeRRFB0cb6tVBRlJEgxrc5AAj/Y96rlGpPch9XIftRlQ2IVTycEHxAg==",
         "cosigned_at": "2026-08-16T12:00:00Z",
         "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
         "witness_id": "witness-1"
@@ -34,7 +34,7 @@
         "tree_size": 6
       },
       "cosignature": {
-        "cosignature": "base64:vS6su1iTqVgebyU5CzfX6xNldW1ylRtFK3h8ZYjZ+0qFb7J6nJHEuyG6cGS6sRLYvwCKG4jRhfVxxrnzXf9RCg==",
+        "cosignature": "base64:DB9pQ368cwVxD/3LkdbO8RftyLIPVuqBuscidGXoMYWoy8Hgf5Q8AMY1Q3SIYRVFkL329OSLCsFE3+wYd6cjCA==",
         "cosigned_at": "2026-08-16T12:00:00Z",
         "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
         "witness_id": "witness-1"
@@ -52,7 +52,7 @@
         "tree_size": 7
       },
       "cosignature": {
-        "cosignature": "base64:x5TMIBipSVZXnPULGLazRgbFTFLB+b3aiPToti3Jgy3iC1xhWNRftof3m/Rn9eZbZeMdqt2QoVjAc0R0729BDg==",
+        "cosignature": "base64:5gzMCSjAuMzBTngYQGjSFrqAj9cL47fNzqVm6KjVk9ABvXZx8cUHBXE68c4XDquFaOWQYifbhLTMpyQ307G7BQ==",
         "cosigned_at": "2026-08-16T12:00:00Z",
         "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
         "witness_id": "witness-1"

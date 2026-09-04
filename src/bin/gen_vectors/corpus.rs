@@ -9,15 +9,14 @@ use ahl_core::closure::{affected_set, RecordRef, TreeMaterial};
 use ahl_core::descriptor::CanonicalizationDescriptor;
 use ahl_core::{
     checkpoint, checkpoint_signing_bytes, commit_keyed, commit_plain, consistency_path_hex,
-    consistency_proof, cosignature_bytes, entry_id, envelope, field_str, hash_hex, inclusion_proof,
-    jcs, leaf_hash, parse_hash_hex, proof_path_hex, range_proof, record_sorted, sha256_hex,
-    statement_id, tree_root, verify_consistency_proof, verify_envelope, verify_inclusion_proof,
-    verify_signature,
+    consistency_proof, entry_id, envelope, field_str, hash_hex, inclusion_proof, jcs, leaf_hash,
+    parse_hash_hex, proof_path_hex, range_proof, record_sorted, sha256_hex, statement_id,
+    tree_root, verify_consistency_proof, verify_envelope, verify_inclusion_proof, verify_signature,
 };
 use serde_json::{json, Value};
 
 use crate::scenario::{
-    leaf_bytes, manifest, payload, signed, transform, write_json, Keys, ADAPTOR_ID,
+    cosigned_bytes, leaf_bytes, manifest, payload, signed, transform, write_json, Keys, ADAPTOR_ID,
     CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, LEAF_FORMAT, LOG_OPERATOR, LOG_ROTATION_INDEX,
     LOG_SEED, PIPELINE, T0, T_EARLY, T_OPEN_FROM, T_PAST_FROM, T_PAST_TO, T_REKEY, T_RETRACTION,
     WITNESS_1, WITNESS_2, WITNESS_ROTATION_INDEX,
@@ -152,9 +151,9 @@ impl Anchor {
     /// "Present if and only if `later_checkpoint` is carried. An array in the shape of
     /// `anchoring.witnesses[]`, each element a cosignature over `later_checkpoint`"). Nesting
     /// it INSIDE the checkpoint object would change the very bytes the log's own signature
-    /// (`checkpoint_signing_bytes`, "`JCS(cp)` with `signature` removed") and each
-    /// cosignature's own preimage (`cosignature_bytes`, "the signed checkpoint object") are
-    /// computed over.
+    /// (`checkpoint_signing_bytes`, "`JCS(cp)` with `signature` removed") is computed over,
+    /// and would be refused outright on the cosignature side, whose preimage is the
+    /// six-member projection of adaptor §11.1 and admits no member beyond those six and `raw`.
     ///
     /// `propagation-complete`'s declared checkpoint D has no counterpart at all: format §7.2
     /// authenticates D by consistency-proof-or-prefix-recomputation, no cosignature.
@@ -1427,7 +1426,7 @@ impl Corpus {
             let root = hash_hex(&tree_root(&log_leaves[..at(size)]));
             let cp = checkpoint(&log_id, size, &root, T0, keys.log_for(manifest_index));
             let (key, witness_id) = keys.witness_for(manifest_index);
-            let cosignature = key.sign(&cosignature_bytes(&cp, witness_id));
+            let cosignature = key.sign(&cosigned_bytes(&cp, witness_id));
             Anchor {
                 name: format!("cp{size}"),
                 checkpoint: cp,
@@ -1574,7 +1573,7 @@ impl Corpus {
             let witness_id = field_str(cosignature, "witness_id").expect("witness_id").to_owned();
             let witness = keys.by_key_id(field_str(cosignature, "key_id").expect("key_id"));
             cosignature["cosignature"] =
-                json!(witness.sign(&cosignature_bytes(&reissued, &witness_id)));
+                json!(witness.sign(&cosigned_bytes(&reissued, &witness_id)));
         }
         receipt["anchoring"]["checkpoint"] = reissued;
     }
@@ -1835,7 +1834,7 @@ impl Corpus {
             assert!(
                 verify_signature(
                     &witness_key.verifying_key(),
-                    &cosignature_bytes(&anchor.checkpoint, anchor.witness_id),
+                    &cosigned_bytes(&anchor.checkpoint, anchor.witness_id),
                     &anchor.cosignature,
                 )
                 .expect("well-formed signature"),

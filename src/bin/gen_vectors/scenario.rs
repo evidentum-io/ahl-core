@@ -3,7 +3,9 @@
 use std::fs;
 use std::path::Path;
 
-use ahl_core::{envelope, jcs, sha256_hex, TestKey, AHL_VERSION};
+use ahl_core::{
+    cosignature_bytes, envelope, jcs, sha256_hex, CosignedCheckpoint, TestKey, AHL_VERSION,
+};
 use serde_json::{json, Value};
 
 use crate::text::{ADAPTOR_DOC, CORPUS_README, KEYS_README};
@@ -356,4 +358,17 @@ pub fn write_jcs(path: &Path, value: &Value) {
 
 pub fn leaf_bytes(values: &[Value]) -> Vec<Vec<u8>> {
     values.iter().map(jcs).collect()
+}
+
+/// The bytes a witness cosigns over `checkpoint`, through the same projection a verifier uses
+/// (adaptor `ahl-adaptor-atl-v1` §11.1: exactly six members, `raw` excluded).
+///
+/// Every cosignature this generator produces or re-verifies goes through here, so a corpus
+/// checkpoint that carries `raw` is cosigned over the same bytes as one that does not — the
+/// defect the end-to-end pilot found, where a producer serialised the checkpoint as it stood
+/// and a witness signed the six members.
+pub fn cosigned_bytes(checkpoint: &Value, witness_id: &str) -> Vec<u8> {
+    let projected = CosignedCheckpoint::project(checkpoint)
+        .expect("a receipt-borne checkpoint carries the six cosigned members");
+    cosignature_bytes(&projected, witness_id)
 }

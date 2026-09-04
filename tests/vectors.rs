@@ -40,11 +40,19 @@ use ahl_core::{
     decode_pubkey, entry_id, field_str, hash_hex, inclusion_proof, jcs, leaf_hash, parse_hash_hex,
     proof_from_hex, proof_path_hex, range_proof, reconcile_atl_checkpoint_raw, sha256_hex,
     statement_id, tree_root, verify_envelope, verify_inclusion_proof, verify_signature, AhlError,
-    TestKey,
+    CosignedCheckpoint, TestKey,
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
+
+/// The bytes a witness cosigns over `checkpoint`, through the same six-member projection the
+/// verifier uses (adaptor `ahl-adaptor-atl-v1` §11.1, `raw` excluded).
+fn cosigned_bytes(checkpoint: &Value, witness_id: &str) -> Vec<u8> {
+    let projected =
+        CosignedCheckpoint::project(checkpoint).expect("a receipt-borne checkpoint object");
+    cosignature_bytes(&projected, witness_id)
+}
 
 /// The statement vectors, in entry-index order. Entry 28 re-adds `producer-2` to the producer
 /// snapshot and entry 29 is a trigger genuinely CO-SIGNED by both the authority and
@@ -909,7 +917,7 @@ fn checkpoints_and_witness_cosignatures_verify_under_the_active_manifest() {
         assert!(
             verify_signature(
                 &decode_pubkey(pubkey).expect("manifest pubkey"),
-                &cosignature_bytes(cp, witness_id),
+                &cosigned_bytes(cp, witness_id),
                 field_str(cosignature, "cosignature").expect("cosignature"),
             )
             .expect("well-formed signature"),
@@ -2280,7 +2288,7 @@ fn two_independent_causes_agree_between_the_report_and_the_error() {
         "witness_id": "witness-1",
         "key_id": impostor.key_id(),
         "cosignature": impostor
-            .sign(&cosignature_bytes(&receipt["anchoring"]["checkpoint"], "witness-1")),
+            .sign(&cosigned_bytes(&receipt["anchoring"]["checkpoint"], "witness-1")),
         "cosigned_at": "2026-08-16T12:00:00Z",
     }]);
 
@@ -2906,7 +2914,7 @@ fn a_primary_witness_gap_does_not_suppress_the_later_checkpoint() {
             "witness_id": "witness-1",
             "key_id": impostor.key_id(),
             "cosignature": impostor
-                .sign(&cosignature_bytes(&receipt["anchoring"]["checkpoint"], "witness-1")),
+                .sign(&cosigned_bytes(&receipt["anchoring"]["checkpoint"], "witness-1")),
             "cosigned_at": "2026-08-16T12:00:00Z",
         }]);
         receipt
@@ -3123,7 +3131,7 @@ fn an_untrusted_local_policy_witness_key_settles_only_the_witness_assertion() {
         "witness_id": "witness-1",
         "key_id": impostor.key_id(),
         "cosignature": impostor
-            .sign(&cosignature_bytes(&receipt["anchoring"]["checkpoint"], "witness-1")),
+            .sign(&cosigned_bytes(&receipt["anchoring"]["checkpoint"], "witness-1")),
         "cosigned_at": "2026-08-16T12:00:00Z",
     }]);
 
@@ -3843,7 +3851,7 @@ fn reanchor(receipt: &mut Value) {
     for cosignature in receipt["anchoring"]["witnesses"].as_array_mut().expect("witnesses") {
         let witness_id = field_str(cosignature, "witness_id").expect("witness_id").to_owned();
         let witness = key_by_id(field_str(cosignature, "key_id").expect("key_id"));
-        cosignature["cosignature"] = json!(witness.sign(&cosignature_bytes(&signed, &witness_id)));
+        cosignature["cosignature"] = json!(witness.sign(&cosigned_bytes(&signed, &witness_id)));
     }
     receipt["anchoring"]["checkpoint"] = signed;
 }
@@ -3986,7 +3994,7 @@ fn a_local_policy_witness_key_is_accepted_only_from_the_verifiers_own_trusted_se
             "witness_id": witness_id,
             "key_id": impostor.key_id(),
             "cosignature": impostor
-                .sign(&cosignature_bytes(&receipt["anchoring"]["checkpoint"], witness_id)),
+                .sign(&cosigned_bytes(&receipt["anchoring"]["checkpoint"], witness_id)),
             "cosigned_at": "2026-08-16T12:00:00Z",
         }]);
         receipt

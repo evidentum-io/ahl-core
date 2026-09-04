@@ -100,6 +100,20 @@
       "finding": "adaptor-profile",
       "reason": "malformed receipt: ATL checkpoint invalid: raw: `raw` does not equal the blob assembled from the JSON checkpoint members — the JSON members govern",
       "rule": "adaptor `ahl-test-atl-leaf-v1` §5.4 / I-D §7.5 step 2 — a carried `raw` must parse to the same values as the JSON members"
+    },
+    {
+      "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "statement-anchored",
+      "expect": "verified",
+      "file": "statement-anchored-atl-cosigned-projection.ahl"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-atl-checkpoint-unknown-member-must-fail.ahl",
+      "finding": "anchoring",
+      "reason": "malformed receipt: `checkpoint` carries `origin_id`, which is not a member of that object: I-D §7.1 fixes its shape as [\"log_id\", \"tree_size\", \"root_hash\", \"checkpoint_time\", \"key_id\", \"signature\", \"raw\"]",
+      "rule": "I-D §7.1 / adaptor §11.1 — a checkpoint member outside the six and `raw` is invalid, on the ANCHORING assertion where §7.5 step 3 reads the shape"
     }
   ]
 }

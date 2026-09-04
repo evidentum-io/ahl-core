@@ -40,18 +40,18 @@ use ahl_core::receipt::{
 };
 use ahl_core::{
     atl_checkpoint, atl_checkpoint_blob_from_json, atl_log_id, consistency_path_hex,
-    consistency_proof, cosignature_bytes, entry_id, envelope, hash_hex, inclusion_proof, jcs,
-    leaf_hash, log_leaf_bytes_for, parse_hash_hex, proof_path_hex, range_proof, sha256_hex,
-    statement_id, tree_root, verify_consistency_proof, verify_envelope, verify_inclusion_proof,
-    verify_signature, TestKey, TEST_ATL_PROFILE_ID,
+    consistency_proof, entry_id, envelope, hash_hex, inclusion_proof, jcs, leaf_hash,
+    log_leaf_bytes_for, parse_hash_hex, proof_path_hex, range_proof, sha256_hex, statement_id,
+    tree_root, verify_consistency_proof, verify_envelope, verify_inclusion_proof, verify_signature,
+    TestKey, TEST_ATL_PROFILE_ID,
 };
 use base64::Engine as _;
 use serde_json::{json, Value};
 
 use crate::corpus::Records;
 use crate::scenario::{
-    manifest, signed, transform, write_jcs, write_json, write_text, Keys, DS_CUSTOMERS, DS_SCORES,
-    PIPELINE, T0, WITNESS_1,
+    cosigned_bytes, manifest, signed, transform, write_jcs, write_json, write_text, Keys,
+    DS_CUSTOMERS, DS_SCORES, PIPELINE, T0, WITNESS_1,
 };
 use crate::text::TEST_ATL_PROFILE_DOC;
 
@@ -471,7 +471,7 @@ impl AtlCorpus {
             assert!(
                 verify_signature(
                     &keys.witness_1.verifying_key(),
-                    &cosignature_bytes(&anchor.checkpoint, WITNESS_1),
+                    &cosigned_bytes(&anchor.checkpoint, WITNESS_1),
                     &anchor.cosignature,
                 )
                 .expect("well-formed signature"),
@@ -977,6 +977,68 @@ impl AtlCorpus {
             )),
         ));
 
+        vectors.push((
+            "statement-anchored-atl-cosigned-projection.ahl",
+            self.receipt(
+                keys,
+                &declared(
+                    "statement-anchored",
+                    3,
+                    None,
+                    "The cosignature preimage under a profile that DEFINES a binary checkpoint \
+                     framing. `anchoring.checkpoint` carries `raw` (§5.4) and the cosignature in \
+                     `anchoring.witnesses[]` was computed over the six members alone — `{log_id, \
+                     tree_size, root_hash, checkpoint_time, key_id, signature}`, the object \
+                     `ahl-adaptor-atl-v1` §11.1 draws — with `raw` EXCLUDED. A verifier that \
+                     serialised the checkpoint as it stands would build different bytes and \
+                     reject a cosignature the witness genuinely made, which is what an \
+                     end-to-end run of a log, a witness and a verifier found: the witness \
+                     cosigns a typed six-member projection, never the JSON object as received, \
+                     so a verifier must reconstruct the cosigned object from those six members \
+                     and no others. That the same rule holds where `raw` is absent is what \
+                     makes the exclusion checkable: every other cosigned vector in this corpus \
+                     shares this preimage construction.",
+                ),
+            ),
+            None,
+        ));
+
+        let mut unknown_member = self.receipt(
+            keys,
+            &declared(
+                "statement-anchored",
+                3,
+                None,
+                "MUST FAIL. `anchoring.checkpoint` carries `origin_id` — a member no receipt-borne \
+                 checkpoint has. I-D §7.1 draws the object complete as the committed state plus \
+                 `key_id` and `signature`, and MAY add `raw`; adaptor §11.1 closes the same set \
+                 from the cosignature side, since the cosigned object \"contains exactly\" the \
+                 six members \"and nothing else\" and \"any other checkpoint member is \
+                 `invalid`\". The value here is even redundant rather than contradictory — the \
+                 origin the blob already binds, rendered again — which is the point: a member no \
+                 rule compares reads to a second implementation as though something had checked \
+                 it, and it silently enters a preimage two implementations must agree on. \
+                 Neither the log signature nor the cosignature is disturbed; the shape is. The \
+                 finding lands on `anchoring` rather than `structure`: the receipt-borne \
+                 checkpoint's shape is read in §7.5 step 3's key-independent checks, where the \
+                 material the paths are bound to is established, and not in the container walk \
+                 that precedes it.",
+            ),
+        );
+        unknown_member["anchoring"]["checkpoint"]["origin_id"] = cp5.checkpoint["log_id"].clone();
+        vectors.push((
+            "statement-anchored-atl-checkpoint-unknown-member-must-fail.ahl",
+            unknown_member,
+            Some((
+                "I-D §7.1 / adaptor §11.1 — a checkpoint member outside the six and `raw` is \
+                 invalid, on the ANCHORING assertion where §7.5 step 3 reads the shape",
+                |e: &ReceiptError| {
+                    matches!(e, ReceiptError::Malformed(detail)
+                        if detail.contains("`checkpoint` carries `origin_id`"))
+                },
+            )),
+        ));
+
         println!("ATL-profile receipt self-check");
         let dir = root.join("receipts").join("atl");
         let mut index = Vec::new();
@@ -1140,7 +1202,7 @@ fn signed_anchor(
     let blob = atl_checkpoint_blob_from_json(&checkpoint).expect("well-formed checkpoint");
     checkpoint["raw"] =
         json!(format!("base64:{}", base64::engine::general_purpose::STANDARD.encode(blob)));
-    let cosignature = keys.witness_1.sign(&cosignature_bytes(&checkpoint, WITNESS_1));
+    let cosignature = keys.witness_1.sign(&cosigned_bytes(&checkpoint, WITNESS_1));
     AtlAnchor { name, checkpoint, cosignature }
 }
 

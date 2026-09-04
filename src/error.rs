@@ -175,6 +175,12 @@ pub enum AhlError {
     #[error("ATL checkpoint invalid: {0}")]
     AtlCheckpoint(String),
 
+    /// A checkpoint could not be projected onto the six members a witness cosigns (adaptor
+    /// `ahl-adaptor-atl-v1` §11.1) — a member was absent, had the wrong JSON type, or was one
+    /// the cosigned object does not contain.
+    #[error("cosigned checkpoint projection invalid: {0}")]
+    CosignedCheckpoint(String),
+
     /// An Ed25519 public key was structurally invalid.
     #[error("invalid ed25519 public key: {0}")]
     PublicKey(ed25519_dalek::SignatureError),
