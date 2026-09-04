@@ -76,7 +76,11 @@ enum Span {
 }
 
 const fn classify(offset: u64, size: u64, from: u64, to: u64) -> Span {
-    let end = offset + size;
+    // Every `(offset, size)` the recursion below produces satisfies `offset + size <=
+    // tree_size`, so the sum is in range for any tree a `u64` size can describe. Saturating
+    // rather than wrapping keeps that true without a panicking operator: a saturated `end`
+    // could only classify a subtree as `Outside`, never widen the proven range.
+    let end = offset.saturating_add(size);
     if end <= from || offset >= to {
         Span::Outside
     } else if offset >= from && end <= to {
@@ -104,8 +108,18 @@ fn walk_outside<F: FnMut(u64, u64, u32)>(
         Span::Inside => {}
         Span::Straddles => {
             let k = largest_power_of_2_less_than(size);
-            walk_outside(offset, k, from, to, depth + 1, visit);
-            walk_outside(offset + k, size - k, from, to, depth + 1, visit);
+            // `k < size` by construction, and `offset + size <= tree_size` above, so both
+            // the split point and both halves are in range; `depth` counts splits and is
+            // bounded by 64 for a `u64` tree size.
+            walk_outside(offset, k, from, to, depth.saturating_add(1), visit);
+            walk_outside(
+                offset.saturating_add(k),
+                size.saturating_sub(k),
+                from,
+                to,
+                depth.saturating_add(1),
+                visit,
+            );
         }
     }
 }
@@ -138,8 +152,10 @@ pub fn generate(leaf_hashes: &[Hash], from_index: u64, to_index: u64) -> AhlResu
     let mut nodes = Vec::new();
     walk_outside(0, tree_size, from_index, to_index, 0, &mut |offset, size, _| {
         let lo = usize::try_from(offset).unwrap_or(usize::MAX);
-        let hi = usize::try_from(offset + size).unwrap_or(usize::MAX);
-        nodes.push(compute_root(&leaf_hashes[lo..hi]));
+        let hi = usize::try_from(offset.saturating_add(size)).unwrap_or(usize::MAX);
+        // `leaf_hashes` is the whole tree and the walk stays inside `[0, tree_size)`, so the
+        // span is present; an absent one yields the empty root rather than an abort.
+        nodes.push(compute_root(leaf_hashes.get(lo..hi).unwrap_or(&[])));
     });
     Ok(RangeProof { tree_size, from_index, to_index, nodes })
 }
@@ -157,15 +173,20 @@ fn recompute(
             let node = proof.nodes.get(*cursor).copied().ok_or_else(|| {
                 AhlError::RangeProof("proof has too few subtree hashes".to_owned())
             })?;
-            *cursor += 1;
+            *cursor = cursor.saturating_add(1);
             Ok(node)
         }
         Span::Inside => {
-            let lo = usize::try_from(offset - proof.from_index)
+            let offset_in_range = offset
+                .checked_sub(proof.from_index)
+                .ok_or_else(|| AhlError::RangeProof("range offset underflows".to_owned()))?;
+            let lo = usize::try_from(offset_in_range)
                 .map_err(|_| AhlError::RangeProof("range offset overflows usize".to_owned()))?;
+            let width = usize::try_from(size)
+                .map_err(|_| AhlError::RangeProof("range size overflows usize".to_owned()))?;
             let hi = lo
-                + usize::try_from(size)
-                    .map_err(|_| AhlError::RangeProof("range size overflows usize".to_owned()))?;
+                .checked_add(width)
+                .ok_or_else(|| AhlError::RangeProof("range end overflows usize".to_owned()))?;
             let span = leaf_hashes
                 .get(lo..hi)
                 .ok_or_else(|| AhlError::RangeProof("carried leaf set is short".to_owned()))?;
@@ -174,7 +195,13 @@ fn recompute(
         Span::Straddles => {
             let k = largest_power_of_2_less_than(size);
             let left = recompute(offset, k, proof, leaf_hashes, cursor)?;
-            let right = recompute(offset + k, size - k, proof, leaf_hashes, cursor)?;
+            let right = recompute(
+                offset.saturating_add(k),
+                size.saturating_sub(k),
+                proof,
+                leaf_hashes,
+                cursor,
+            )?;
             Ok(hash_children(&left, &right))
         }
     }
@@ -196,7 +223,12 @@ fn recompute(
 pub fn verify(proof: &RangeProof, leaf_hashes: &[Hash], root: &Hash) -> AhlResult<bool> {
     check_range(proof.tree_size, proof.from_index, proof.to_index)?;
 
-    let width = proof.to_index - proof.from_index;
+    // `check_range` has just established `from_index < to_index`, so the difference is
+    // positive; the checked form keeps that provable at the operator.
+    let width = proof
+        .to_index
+        .checked_sub(proof.from_index)
+        .ok_or_else(|| AhlError::RangeProof("inverted range".to_owned()))?;
     if leaf_hashes.len() as u64 != width {
         return Err(AhlError::RangeProof(format!(
             "range [{}, {}) needs exactly {width} leaves, {} were carried",
@@ -223,6 +255,9 @@ pub fn verify(proof: &RangeProof, leaf_hashes: &[Hash], root: &Hash) -> AhlResul
     if width == 1 {
         let mut ordered: Vec<(u32, Hash)> = Vec::with_capacity(proof.nodes.len());
         let mut index = 0usize;
+        // The walk visits exactly the subtrees `recompute` consumed a node for, and the
+        // cursor check above proved that count equals `proof.nodes.len()`; a node the walk
+        // did not find is therefore impossible, and is skipped rather than indexed for.
         walk_outside(
             0,
             proof.tree_size,
@@ -230,8 +265,10 @@ pub fn verify(proof: &RangeProof, leaf_hashes: &[Hash], root: &Hash) -> AhlResul
             proof.to_index,
             0,
             &mut |_, _, depth| {
-                ordered.push((depth, proof.nodes[index]));
-                index += 1;
+                if let Some(node) = proof.nodes.get(index) {
+                    ordered.push((depth, *node));
+                }
+                index = index.saturating_add(1);
             },
         );
         // An inclusion path runs leaf to root: deepest sibling first.
@@ -241,7 +278,12 @@ pub fn verify(proof: &RangeProof, leaf_hashes: &[Hash], root: &Hash) -> AhlResul
             tree_size: proof.tree_size,
             path: ordered.into_iter().map(|(_, hash)| hash).collect(),
         };
-        if !verify_inclusion(&leaf_hashes[0], &inclusion, root)? {
+        // `width == 1` and the carried-leaf count was checked against `width` above, so the
+        // single leaf is present.
+        let Some(leaf) = leaf_hashes.first() else {
+            return Err(AhlError::RangeProof("carried leaf set is short".to_owned()));
+        };
+        if !verify_inclusion(leaf, &inclusion, root)? {
             return Ok(false);
         }
     }
@@ -267,7 +309,9 @@ pub fn verify_over_leaves(proof: &RangeProof, leaves: &[Vec<u8>], root: &Hash) -
 /// to_index:u64 || node_count:u32 || node_count × 32 raw bytes`.
 #[must_use]
 pub fn encode(proof: &RangeProof) -> String {
-    let mut bytes = Vec::with_capacity(HEADER_LEN + proof.nodes.len() * 32);
+    // A capacity hint; saturating rather than wrapping, since only under-reservation follows.
+    let mut bytes =
+        Vec::with_capacity(HEADER_LEN.saturating_add(proof.nodes.len().saturating_mul(32)));
     bytes.extend_from_slice(RANGE_PROOF_MAGIC);
     bytes.extend_from_slice(&proof.tree_size.to_be_bytes());
     bytes.extend_from_slice(&proof.from_index.to_be_bytes());
@@ -294,23 +338,34 @@ pub fn decode(value: &str) -> AhlResult<RangeProof> {
     if bytes.len() < HEADER_LEN {
         return Err(AhlError::RangeProof(format!("truncated: {} bytes", bytes.len())));
     }
-    if &bytes[..6] != RANGE_PROOF_MAGIC {
+    if bytes.get(..6) != Some(RANGE_PROOF_MAGIC) {
         return Err(AhlError::RangeProof("wrong magic; expected AHLRP1".to_owned()));
     }
+    // Every offset below sits inside the `HEADER_LEN` bytes just checked for, so each read
+    // returns a slice of the requested width; an absent one reads as zero rather than
+    // aborting, and a proof built from zeros fails the checks that follow.
     let read_u64 = |at: usize| {
         let mut buf = [0u8; 8];
-        buf.copy_from_slice(&bytes[at..at + 8]);
+        if let Some(field) = bytes.get(at..at.saturating_add(8)) {
+            buf.copy_from_slice(field);
+        }
         u64::from_be_bytes(buf)
     };
     let tree_size = read_u64(6);
     let from_index = read_u64(14);
     let to_index = read_u64(22);
     let mut count_buf = [0u8; 4];
-    count_buf.copy_from_slice(&bytes[30..34]);
+    if let Some(field) = bytes.get(30..34) {
+        count_buf.copy_from_slice(field);
+    }
     let node_count = u32::from_be_bytes(count_buf) as usize;
 
-    let body = &bytes[HEADER_LEN..];
-    if body.len() != node_count * 32 {
+    let body = bytes.get(HEADER_LEN..).unwrap_or(&[]);
+    // `node_count` is a `u32` read from attacker-controlled bytes: on a 32-bit target the
+    // product overflows, so it is computed checked and a count that cannot describe any
+    // buffer is rejected as a length disagreement.
+    let declared = node_count.checked_mul(32);
+    if declared != Some(body.len()) {
         return Err(AhlError::RangeProof(format!(
             "declares {node_count} subtree hashes but carries {} bytes of node data",
             body.len()
@@ -328,6 +383,15 @@ pub fn decode(value: &str) -> AhlResult<RangeProof> {
 }
 
 #[cfg(test)]
+#[allow(
+    // A test asserts; an assertion that fires IS the failure report. The crate-level no-panic
+    // lints are the library's contract, not this module's.
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use crate::tree_root;

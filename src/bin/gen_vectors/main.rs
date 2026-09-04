@@ -19,6 +19,16 @@
 //! committed `test_data/`, rather than relying on this doc comment's claim alone.
 
 #![forbid(unsafe_code)]
+// The generator is a build tool whose self-check is a chain of assertions: a vector that
+// cannot be re-verified must abort the run rather than be written. The crate-level no-panic
+// lints state the LIBRARY's contract; this binary is held to the determinism check in CI.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
 
 mod atl;
 mod corpus;

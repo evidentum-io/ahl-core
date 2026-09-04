@@ -2181,7 +2181,9 @@ impl Run {
             return Err(ReceiptError::LimitExceeded("embedded-receipt nesting depth"));
         }
         if depth > 0 {
-            self.embedded += 1;
+            // Bounded by `MAX_EMBEDDED_RECEIPTS` on the very next line; saturating keeps the
+            // counter monotone without a panicking `+`.
+            self.embedded = self.embedded.saturating_add(1);
             if self.embedded > MAX_EMBEDDED_RECEIPTS {
                 return Err(ReceiptError::LimitExceeded("embedded receipts per file"));
             }
@@ -2788,6 +2790,8 @@ fn witness_cosignature_object(value: &Value) -> Result<&Value> {
 fn duration_nanos(value: &str) -> core::result::Result<u128, &'static str> {
     /// Seconds per unit, in the order the grammar fixes.
     const UNITS: [(char, u128); 3] = [('H', 3_600), ('M', 60), ('S', 1)];
+    /// Reported where a component, or the running total, exceeds what `u128` nanoseconds hold.
+    const TOO_LARGE: &str = "the duration is too large to represent";
 
     fn digits(text: &str) -> core::result::Result<u64, &'static str> {
         if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
@@ -2808,8 +2812,10 @@ fn duration_nanos(value: &str) -> core::result::Result<u128, &'static str> {
         let day_digits = date.strip_suffix('D').ok_or(
             "the date part admits days only — `Y` and a date-part `M` are prohibited (§7.3)",
         )?;
-        nanos = u128::from(digits(day_digits)?) * 86_400 * 1_000_000_000;
-        components += 1;
+        nanos = u128::from(digits(day_digits)?)
+            .checked_mul(86_400 * 1_000_000_000)
+            .ok_or("the duration is too large to represent")?;
+        components = components.saturating_add(1);
     }
 
     if let Some(time) = time {
@@ -2833,7 +2839,11 @@ fn duration_nanos(value: &str) -> core::result::Result<u128, &'static str> {
             if unit < next_unit {
                 return Err("time components appear in the order H, M, S, each at most once");
             }
-            next_unit = unit + 1;
+            next_unit = unit.saturating_add(1);
+
+            // `unit` is the position [`Iterator::position`] just returned for `UNITS`, so the
+            // entry is present; an absent one is reported rather than indexed for.
+            let (_, seconds_per_unit) = UNITS.get(unit).ok_or("an unknown time designator")?;
 
             let value_nanos = match number.split_once('.') {
                 Some((whole, fraction)) => {
@@ -2846,15 +2856,22 @@ fn duration_nanos(value: &str) -> core::result::Result<u128, &'static str> {
                              rejected rather than truncated or rounded (§7.3)",
                         );
                     }
-                    let scale = 10u128.pow(9 - u32::try_from(fraction.len()).unwrap_or(9));
-                    u128::from(digits(whole)?) * 1_000_000_000
-                        + u128::from(digits(fraction)?) * scale
+                    // `fraction.len() <= 9` was just checked, so the exponent is in `0..=9`.
+                    let scale =
+                        10u128.pow(9u32.saturating_sub(u32::try_from(fraction.len()).unwrap_or(9)));
+                    let whole_nanos =
+                        u128::from(digits(whole)?).checked_mul(1_000_000_000).ok_or(TOO_LARGE)?;
+                    let fraction_nanos =
+                        u128::from(digits(fraction)?).checked_mul(scale).ok_or(TOO_LARGE)?;
+                    whole_nanos.checked_add(fraction_nanos).ok_or(TOO_LARGE)?
                 }
-                None => u128::from(digits(number)?) * UNITS[unit].1 * 1_000_000_000,
+                None => u128::from(digits(number)?)
+                    .checked_mul(*seconds_per_unit)
+                    .and_then(|value| value.checked_mul(1_000_000_000))
+                    .ok_or(TOO_LARGE)?,
             };
-            nanos =
-                nanos.checked_add(value_nanos).ok_or("the duration is too large to represent")?;
-            components += 1;
+            nanos = nanos.checked_add(value_nanos).ok_or(TOO_LARGE)?;
+            components = components.saturating_add(1);
             cursor = &tail[designator.len_utf8()..];
         }
     }
@@ -3804,9 +3821,9 @@ fn read_chain<'a>(
     run: &mut Run,
 ) -> Result<Governance<'a>> {
     let chain = array(obj(receipt, "governance")?, "chain")?;
-    if chain.is_empty() {
+    let Some(genesis) = chain.first() else {
         return Err(ReceiptError::GovernanceChainInvalid("chain is empty".to_owned()));
-    }
+    };
 
     // The raw index of what the chain CARRIES, taken before the induction walks anything: §7.6's
     // rules about `subject.manifest` are decidable from the receipt alone and are never
@@ -3848,12 +3865,12 @@ fn read_chain<'a>(
     // FULL, payload and signatures together, because an entry id is SHA-256(JCS(envelope))...
     // no key is needed to establish it, which is what makes the base case genuinely basal
     // rather than one more thing needing a key."
-    if number(&chain[0], "entry_index")? != 0 {
+    if number(genesis, "entry_index")? != 0 {
         return Err(ReceiptError::GovernanceChainInvalid(
             "the chain must start at entry index 0".to_owned(),
         ));
     }
-    let genesis_envelope = obj(&chain[0], "envelope")?;
+    let genesis_envelope = obj(genesis, "envelope")?;
     let genesis_payload = payload_of(genesis_envelope)?;
     // §2.2's version-first rule runs before anything else, typed content included — an
     // unsupported `ahl_version` is `unverifiable`, decided from the bytes alone, before any
@@ -3940,7 +3957,8 @@ fn read_chain<'a>(
     // performs over the same member, so it precedes every signature without breaking the
     // phase discipline the induction below keeps.
     let mut chain_hops: Vec<(u64, &Value)> = Vec::with_capacity(chain.len().saturating_sub(1));
-    for hop in &chain[1..] {
+    // Everything after the genesis element, which `chain.first()` above proved is present.
+    for hop in chain.get(1..).unwrap_or(&[]) {
         let index = number(hop, "entry_index")?;
         if previous_index >= index {
             return Err(ReceiptError::GovernanceChainInvalid(CHAIN_ASCENDING.to_owned()));
@@ -3971,7 +3989,12 @@ fn read_chain<'a>(
     // The genesis manifest, at entry index 0, is the statement the base case has just walked.
     let mut walked_index = 0u64;
     while chain_cursor < chain_hops.len() || key_cursor < key_statements.len() {
-        let take_key = match (chain_hops.get(chain_cursor), key_statements.get(key_cursor)) {
+        // The next element of each stream, taken once: the merge decision and the element it
+        // selects come from the same lookup, so neither arm below re-indexes for a cursor the
+        // decision already proved is in range.
+        let next_chain = chain_hops.get(chain_cursor).copied();
+        let next_key = key_statements.get(key_cursor).copied();
+        let take_key = match (next_chain, next_key) {
             (Some((chain_index, _)), Some((key_index, _))) => key_index < chain_index,
             (None, Some(_)) => true,
             _ => false,
@@ -3982,9 +4005,8 @@ fn read_chain<'a>(
         // enumeration material the caller owns. Phases 1 and 2 are identical for both, and are
         // shared through [`check_merged_order`], [`verify_governance_phase_1`] and
         // [`validate_key_statement`].
-        if take_key {
-            let (index, envelope) = key_statements[key_cursor];
-            key_cursor += 1;
+        if let (true, Some((index, envelope))) = (take_key, next_key) {
+            key_cursor = key_cursor.saturating_add(1);
             check_merged_order(walked_index, index)?;
             walked_index = index;
             // I-D §7.5.1 4b: an entry the enumeration alone reveals "is selected for the walk
@@ -4043,8 +4065,12 @@ fn read_chain<'a>(
             continue;
         }
 
-        let (index, envelope) = chain_hops[chain_cursor];
-        chain_cursor += 1;
+        // `take_key` is false here, which the match above reaches only where the chain stream
+        // has a next element — the `while` condition guarantees at least one stream does.
+        let Some((index, envelope)) = next_chain else {
+            break;
+        };
+        chain_cursor = chain_cursor.saturating_add(1);
         check_merged_order(walked_index, index)?;
         walked_index = index;
 
@@ -4208,7 +4234,7 @@ fn read_chain<'a>(
                         },
                         run,
                     )?;
-                    rotation_cursor += 1;
+                    rotation_cursor = rotation_cursor.saturating_add(1);
                 }
                 // Phase 3: effect — replaces the log, witness, and producer key state in full.
                 previous_manifest_entry_id = entry_id(envelope);
@@ -5380,6 +5406,16 @@ struct Enumeration {
 }
 
 impl Enumeration {
+    /// The absolute entry index of the entry at `offset` within the range.
+    ///
+    /// [`decode_enumeration`] proves `to_index > from_index` and that the carried entry count
+    /// equals that width, so `from_index + offset` stays below `to_index` for every offset an
+    /// enumeration this crate builds can produce. Saturating keeps that provable at the
+    /// operator without a panicking `+`.
+    fn index_at(&self, offset: usize) -> u64 {
+        self.from_index.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX))
+    }
+
     /// The entry at absolute index `index`, if the range covers it.
     fn at(&self, index: u64) -> Option<&Value> {
         index
@@ -5428,7 +5464,9 @@ fn decode_enumeration(
     let mut envelopes = Vec::with_capacity(entries.len());
     for (offset, entry) in entries.iter().enumerate() {
         let claimed = number(entry, "entry_index")?;
-        let expected = from_index + offset as u64;
+        // `entries.len() == width` and `from_index + width == to_index`, both established
+        // above, so the sum stays below `to_index`.
+        let expected = from_index.saturating_add(u64::try_from(offset).unwrap_or(u64::MAX));
         if claimed != expected {
             return Err(ReceiptError::RangeProofInvalid {
                 what,
@@ -5560,7 +5598,7 @@ fn verify_enumerated_envelopes(
         // "every carried envelope that is not part of the induction" reaches it. Exempting by
         // type would exempt it too, since it carries the same type — and the same statement id —
         // as the copy that governs.
-        let index = enumeration.from_index + offset as u64;
+        let index = enumeration.index_at(offset);
         // Already verified, and already charged: the indexes the induction walked (4b phase 1)
         // and the void chain hops the direct 4d sweep just verified. §7.8's work budget counts
         // verifications, so one carried envelope must cost one.
@@ -6464,7 +6502,7 @@ fn enumerated_key_statements(enumeration: &Enumeration) -> Vec<(u64, &Value)> {
     let mut out = Vec::new();
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
         if statement_type_literal(envelope) == Some("key") {
-            out.push((enumeration.from_index + offset as u64, envelope));
+            out.push((enumeration.index_at(offset), envelope));
         }
     }
     out
@@ -6492,7 +6530,7 @@ fn check_manifest_completeness(
     // What the CHAIN carries, not what the induction applied: an element skipped as a void
     // duplicate (I-D §2.1) is carried, and 4c asks whether the chain shows the range's manifests.
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
-        let index = enumeration.from_index + offset as u64;
+        let index = enumeration.index_at(offset);
         if statement_type_literal(envelope) == Some("manifest")
             && !governance.chain_indexes.contains(&index)
         {
@@ -7091,8 +7129,11 @@ fn verify_embedded(
         verdict
     } else {
         let before = run.findings.len();
-        let verdict = verify_nested(embedded, ctx.policy, run, ctx.depth + 1)?;
-        let findings = run.findings[before..].to_vec();
+        // Depth is bounded by `MAX_EMBEDDED_DEPTH`, checked on entry.
+        let verdict = verify_nested(embedded, ctx.policy, run, ctx.depth.saturating_add(1))?;
+        // `before` is a length this run recorded and the list only grows, so the tail is
+        // present; an absent one caches no findings rather than aborting.
+        let findings = run.findings.get(before..).unwrap_or(&[]).to_vec();
         run.verified.insert(key, (verdict.clone(), findings));
         verdict
     };
@@ -7439,7 +7480,7 @@ fn verify_competing_triggers(
     let mut governing = None;
     let mut challenges = Vec::new();
     for (offset, envelope) in enumeration.entries.iter().enumerate() {
-        let index = enumeration.from_index + offset as u64;
+        let index = enumeration.index_at(offset);
         // I-D §7.5.1 4d and 4e: a void entry "is excluded before any authority comparison", and
         // "a trigger whose envelope does not verify is void and never effective, whoever signed
         // it, and it is not a challenge". The 4d sweep over this range has already decided which
@@ -7826,7 +7867,7 @@ fn verify_propagation_complete(ctx: &ClaimCtx<'_>, run: &mut Run) -> Result<()> 
         .iter()
         .enumerate()
         .map(|(offset, entry)| {
-            let index = prefix.from_index + offset as u64;
+            let index = prefix.index_at(offset);
             if run.is_void(index) {
                 Value::Null
             } else {
@@ -7913,7 +7954,7 @@ fn verify_governance_state(ctx: &ClaimCtx<'_>, run: &Run) -> Result<()> {
         return Err(ReceiptError::GovernanceRangeNotComplete {
             got_from: enumeration.from_index,
             got_to: enumeration.to_index,
-            tree_size: target_index + 1,
+            tree_size: target_index.saturating_add(1),
         });
     }
     // Absence of any governance statement in `(subject.entry_index, target_index]`.
@@ -7926,7 +7967,7 @@ fn verify_governance_state(ctx: &ClaimCtx<'_>, run: &Run) -> Result<()> {
     // ones are void". Counting either would report a state that is current as stale — one
     // manifest version anchored twice would make every `governance-state` claim past it
     // `invalid`, which is the opposite of what first-wins says.
-    for index in (ctx.subject_index + 1)..=target_index {
+    for index in ctx.subject_index.saturating_add(1)..=target_index {
         let Some(envelope) = enumeration.at(index) else { continue };
         if run.is_void(index) {
             continue;
@@ -8012,6 +8053,15 @@ fn render(claim_type: &str, assurance: &Assurance) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    // A test asserts; an assertion that fires IS the failure report. The crate-level no-panic
+    // lints are the library's contract, not this module's.
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
 mod tests {
     use serde_json::{json, Value};
 

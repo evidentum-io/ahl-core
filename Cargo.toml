@@ -42,3 +42,17 @@ cargo = { level = "warn", priority = -1 }
 # is allowed here, visibly, rather than left as a standing CI failure. Revisit when the pinned
 # `atl-core` revision moves to `thiserror` 2.
 multiple_crate_versions = "allow"
+# No-panic policy: library code reaches no panicking construct on any input. Every one of
+# these is a way a library function could abort the caller's process instead of returning a
+# rejection, so they are denied crate-wide and satisfied in code rather than allowed at a
+# site. Test modules, the integration tests and the vector generator allow them back at
+# module level: an assertion that fires IS the failure report there.
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+missing_panics_doc = "deny"
