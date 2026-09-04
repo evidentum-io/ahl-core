@@ -2605,7 +2605,7 @@ fn checkpoint_object(value: &Value) -> Result<&Value> {
     Ok(value)
 }
 
-/// The two adaptor profiles this verifier implements end to end.
+/// The adaptor profiles this verifier implements end to end.
 ///
 /// Core spec §3 item 6 forbids verification from depending on knowledge outside the profile
 /// document, so "which profiles a build implements" is a property of the BUILD, named here, and
@@ -2614,28 +2614,33 @@ fn checkpoint_object(value: &Value) -> Result<&Value> {
 /// * [`TEST_ADAPTOR_PROFILE_ID`] is the corpus's own minimal profile: `JCS(envelope)` log
 ///   leaves (its §2.1), `JCS(cp minus "signature")` checkpoint signing bytes (its §5), and no
 ///   binary checkpoint framing at all (its §7).
-/// * [`ATL_ADAPTOR_PROFILE_ID`] is the ATL binding: two-digest log leaves (its §4.2), the
-///   98-byte checkpoint blob (its §6.1, §6.5), and a `raw` framing that MUST reconcile with the
-///   JSON members where carried (its §6.4). Its `log_id` is origin-derived (its §7.1), which
-///   this verifier sees as the requirement that `log_id` be a 32-octet `sha256:` family string
-///   — the Origin ID itself — since the 98-byte blob it reconstructs binds exactly those bytes.
+/// * [`ATL_ADAPTOR_PROFILE_ID`] and [`TEST_ATL_ADAPTOR_PROFILE_ID`] share one serialization:
+///   two-digest log leaves, the 98-byte checkpoint blob, a `raw` framing that MUST reconcile
+///   with the JSON members where carried, and an origin-derived `log_id` — which this verifier
+///   sees as the requirement that `log_id` be a 32-octet `sha256:` family string, the Origin ID
+///   itself, since the blob it reconstructs binds exactly those bytes.
 ///
-/// Everything else about a log tree is shared: node hashing, the splitting rule, inclusion and
-/// consistency proofs, and the range-proof serialization. The AHL trees the log never sees —
-/// batch outputs, input sets, dispositions — take plain leaf hashing under BOTH (ATL adaptor
-/// §9: an implementation "MUST NOT apply the payload/metadata leaf construction to them").
+/// Everything else about a log tree is shared by all three: node hashing, the splitting rule,
+/// inclusion and consistency proofs, and the range-proof serialization. The AHL trees the log
+/// never sees — batch outputs, input sets, dispositions — take plain leaf hashing under every
+/// one of them.
 ///
-/// **The ATL profile is PRE-RELEASE.** Its own §14 makes release a precondition for use:
-/// "Until this document is released as an immutable, openly published artifact at a stable
-/// location, its digest is not stable and no manifest may pin it." The digest this crate's
-/// corpus pins is the CURRENT DRAFT's, which is a test-only pin; a production manifest MUST NOT
-/// pin the profile until that release obligation is met. Nothing about that is a verifier rule
-/// — §14 binds the corpus operator — so the verifier implements the profile and the corpus
-/// documents the pin.
+/// **What separates the two ATL-shaped ids is the ARTIFACT, not the procedure.**
+/// `ahl-adaptor-atl-v1` is the ATL binding, and this crate ships NO document for it: its own §14
+/// makes the digest the SHA-256 over the released artifact's exact bytes and adds that "any
+/// change to this document, however small, produces a different hash and therefore a different
+/// profile. A changed profile MUST be published under a new id." A verifier holding the released
+/// artifact resolves that id normally; a verifier holding nothing under it reports I-D §7.5 step
+/// 2's `unverifiable`, which is what this crate's own corpus policy does.
+/// `ahl-test-atl-leaf-v1` is a different profile with a document of its own, which defines these
+/// same rules as ITS OWN and is what the conformance corpus pins.
 const TEST_ADAPTOR_PROFILE_ID: &str = crate::TEST_PROFILE_ID;
 
 /// See [`TEST_ADAPTOR_PROFILE_ID`].
 const ATL_ADAPTOR_PROFILE_ID: &str = crate::ATL_PROFILE_ID;
+
+/// See [`TEST_ADAPTOR_PROFILE_ID`].
+const TEST_ATL_ADAPTOR_PROFILE_ID: &str = crate::TEST_ATL_PROFILE_ID;
 
 /// The bytes a checkpoint's own log signature is verified over, dispatched on the pinned
 /// profile (I-D §3.2: the checkpoint's signing form is profile-defined).
@@ -2655,9 +2660,9 @@ fn log_leaf_bytes(envelope: &Value, profile_id: &str) -> Result<Vec<u8>> {
 ///
 /// A profile that defines no binary framing has nothing to reconcile against, so `raw` under it
 /// is material the profile does not define; a profile that defines one this build has no parser
-/// for would be a build limitation. Today the two coincide with the two profile ids.
+/// for would be a build limitation. Today the two coincide with the ATL-shaped ids.
 const fn parses_checkpoint_raw(profile_id: &str) -> bool {
-    matches!(profile_id.as_bytes(), b"ahl-adaptor-atl-v1")
+    crate::is_atl_shaped(profile_id)
 }
 
 /// Refuse a profile id this verifier has no procedures for, at the point I-D §7.5 step 2
@@ -2672,7 +2677,10 @@ const fn parses_checkpoint_raw(profile_id: &str) -> bool {
 /// Ordering that work ahead of a decided refusal would let material this verifier has already
 /// declined to interpret drive it.
 fn check_profile_supported(profile_id: &str) -> Result<()> {
-    if profile_id == TEST_ADAPTOR_PROFILE_ID || profile_id == ATL_ADAPTOR_PROFILE_ID {
+    if profile_id == TEST_ADAPTOR_PROFILE_ID
+        || profile_id == ATL_ADAPTOR_PROFILE_ID
+        || profile_id == TEST_ATL_ADAPTOR_PROFILE_ID
+    {
         return Ok(());
     }
     Err(ReceiptError::AdaptorCapabilityUnsupported {

@@ -640,30 +640,25 @@ pub fn atl_checkpoint_blob_from_json(checkpoint: &Value) -> AhlResult<[u8; 98]> 
 /// adaptor profile (I-D §3.2: the checkpoint's signing form is profile-defined).
 ///
 /// `ahl-test-log-v1` signs `JCS(checkpoint minus "signature")` ([`checkpoint_signing_bytes`],
-/// its own §5); `ahl-adaptor-atl-v1` signs the 98-byte blob of [`atl_checkpoint_blob_from_json`]
-/// (its §6.1, §6.5). Any other profile id has no procedure here.
+/// its own §5); the ATL-shaped profiles ([`is_atl_shaped`]) sign the 98-byte blob of
+/// [`atl_checkpoint_blob_from_json`]. Any other profile id has no procedure here.
 ///
-/// This is a MECHANICAL, profile-string dispatcher — a reusable primitive, not a policy
-/// decision. `ahl_core::receipt::verify_receipt` does NOT call this for `ahl-adaptor-atl-v1`:
-/// that profile's leaf construction (adaptor §4.2) and origin-derived `log_id` (§7.1) are not
-/// yet profile-dispatched anywhere in this crate, so a checkpoint signing over the RIGHT bytes
-/// would still rest on entries hashed the WRONG way, and until the profile document itself is
-/// released (adaptor §14: "Until this document is released as an immutable, openly published
-/// artifact… no manifest may pin it") no manifest may pin it either. This function exists so
-/// the checkpoint-level mechanism is available to a client integrating ATL directly, tested
-/// here at the unit level, without the receipt verifier presenting a false positive.
+/// This is a MECHANICAL, profile-string dispatcher: which ARTIFACT a policy must hold under an
+/// id is decided elsewhere, and is what separates the two ATL-shaped ids.
 ///
 /// # Errors
 ///
-/// Returns [`AhlError::Field`] for any profile id other than the two named above.
+/// Returns [`AhlError::Field`] for a profile id this crate has no procedure for.
 pub fn checkpoint_signing_bytes_for(checkpoint: &Value, profile_id: &str) -> AhlResult<Vec<u8>> {
-    match profile_id {
-        TEST_PROFILE_ID => checkpoint_signing_bytes(checkpoint),
-        ATL_PROFILE_ID => Ok(atl_checkpoint_blob_from_json(checkpoint)?.to_vec()),
-        other => Err(AhlError::Field(format!(
-            "no checkpoint signing-bytes procedure for adaptor profile `{other}`"
-        ))),
+    if profile_id == TEST_PROFILE_ID {
+        return checkpoint_signing_bytes(checkpoint);
     }
+    if is_atl_shaped(profile_id) {
+        return Ok(atl_checkpoint_blob_from_json(checkpoint)?.to_vec());
+    }
+    Err(AhlError::Field(format!(
+        "no checkpoint signing-bytes procedure for adaptor profile `{profile_id}`"
+    )))
 }
 
 /// Reconcile a carried `ahl-adaptor-atl-v1` `raw` framing against the assembled blob.
@@ -776,7 +771,35 @@ pub fn atl_metadata_hash() -> Hash {
 pub const TEST_PROFILE_ID: &str = "ahl-test-log-v1";
 
 /// Adaptor profile id of the ATL binding.
+///
+/// This crate ships NO document for it. `ahl-adaptor-atl-v1` §14 makes the profile digest the
+/// SHA-256 over the exact bytes of the RELEASED artifact and adds that "any change to this
+/// document, however small, produces a different hash and therefore a different profile. A
+/// changed profile MUST be published under a new id." Until that artifact exists a corpus can
+/// pin nothing under this id, and no document a corpus could ship would be it. The id is
+/// implemented here so that a verifier holding the released artifact can use it; for a verifier
+/// holding nothing under it the outcome is I-D §7.5 step 2's `unverifiable`.
 pub const ATL_PROFILE_ID: &str = "ahl-adaptor-atl-v1";
+
+/// Adaptor profile id of the conformance corpus's own ATL-shaped test profile.
+///
+/// A separate profile with a document of its own, and deliberately not a stand-in for the one
+/// above: that document defines the leaf construction, checkpoint blob, `raw` framing,
+/// origin-derived log id, tree geometry and range form AS ITS OWN rules, citing the ATL adaptor
+/// draft as where the shape comes from and claiming nothing about being that profile. The
+/// serialization is identical, which is the point — the corpus exercises those rules under an
+/// identity it may actually publish.
+pub const TEST_ATL_PROFILE_ID: &str = "ahl-test-atl-leaf-v1";
+
+/// Whether `profile_id` names a profile whose serialization is the ATL-shaped one.
+///
+/// Two ids reach the same procedures: the ATL binding itself and the corpus's own ATL-shaped
+/// test profile. What differs between them is which ARTIFACT a policy must hold, never how a
+/// checkpoint is signed or a leaf is built.
+#[must_use]
+pub const fn is_atl_shaped(profile_id: &str) -> bool {
+    matches!(profile_id.as_bytes(), b"ahl-adaptor-atl-v1" | b"ahl-test-atl-leaf-v1")
+}
 
 /// `log_id` for an ATL-bound corpus: `"sha256:" || hex(Origin ID)`, where the Origin ID is
 /// ATL's SHA-256 over the 16-byte Data Tree UUID (adaptor §7.1).
@@ -797,7 +820,7 @@ pub fn atl_log_id(tree_uuid: &[u8; 16]) -> String {
 ///
 /// * `ahl-test-log-v1` (its §2.1) hashes the anchored entry bytes directly, so the preimage is
 ///   `JCS(envelope)`;
-/// * `ahl-adaptor-atl-v1` (its §4.2) combines two digests, so the preimage is
+/// * the ATL-shaped profiles ([`is_atl_shaped`]) combine two digests, so the preimage is
 ///   `SHA-256(JCS(envelope)) || METADATA_HASH` and the leaf is
 ///   `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`. The first digest is the raw
 ///   form of the AHL entry id, which is why the entry id stays derivable from the entry bytes
@@ -812,18 +835,16 @@ pub fn atl_log_id(tree_uuid: &[u8; 16]) -> String {
 ///
 /// Returns [`AhlError::Field`] for a profile id this crate has no log-leaf construction for.
 pub fn log_leaf_bytes_for(envelope: &Value, profile_id: &str) -> AhlResult<Vec<u8>> {
-    match profile_id {
-        TEST_PROFILE_ID => Ok(jcs(envelope)),
-        ATL_PROFILE_ID => {
-            let mut preimage = Vec::with_capacity(64);
-            preimage.extend_from_slice(&Sha256::digest(jcs(envelope)));
-            preimage.extend_from_slice(&atl_metadata_hash());
-            Ok(preimage)
-        }
-        other => {
-            Err(AhlError::Field(format!("no log-leaf construction for adaptor profile `{other}`")))
-        }
+    if profile_id == TEST_PROFILE_ID {
+        return Ok(jcs(envelope));
     }
+    if is_atl_shaped(profile_id) {
+        let mut preimage = Vec::with_capacity(64);
+        preimage.extend_from_slice(&Sha256::digest(jcs(envelope)));
+        preimage.extend_from_slice(&atl_metadata_hash());
+        return Ok(preimage);
+    }
+    Err(AhlError::Field(format!("no log-leaf construction for adaptor profile `{profile_id}`")))
 }
 
 /// AHL leaf hash — `SHA-256(0x00 || bytes)`.
@@ -1055,6 +1076,15 @@ mod tests {
         // `ahl-adaptor-atl-v1` §4.2: `SHA-256(0x00 || SHA-256(JCS(envelope)) || METADATA_HASH)`,
         // and the first digest is the raw form of the AHL entry id.
         let atl_leaf = log_leaf_bytes_for(&env, ATL_PROFILE_ID).expect("atl profile");
+        // The corpus's own ATL-shaped profile is a DIFFERENT profile with a different artifact,
+        // and the same serialization: the two ids reach one procedure, which is what lets the
+        // conformance corpus exercise these rules under an identity it may actually publish.
+        assert_eq!(
+            log_leaf_bytes_for(&env, TEST_ATL_PROFILE_ID).expect("test atl profile"),
+            atl_leaf
+        );
+        assert!(is_atl_shaped(ATL_PROFILE_ID) && is_atl_shaped(TEST_ATL_PROFILE_ID));
+        assert!(!is_atl_shaped(TEST_PROFILE_ID));
         assert_eq!(atl_leaf.len(), 64);
         assert_eq!(sha256_hex(&jcs(&env)), entry_id(&env));
         assert_eq!(&atl_leaf[..32], &parse_hash_hex(&entry_id(&env)).expect("entry id")[..]);
