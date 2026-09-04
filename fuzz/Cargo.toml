@@ -1,0 +1,54 @@
+[package]
+name = "ahl-core-fuzz"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.92"
+publish = false
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.ahl-core]
+path = ".."
+# The `manifest` target's entry point; see that target's own module documentation.
+features = ["fuzzing"]
+
+[lints.clippy]
+# Every target is panic-free by construction: nothing here unwraps, indexes or asserts. The
+# no-panic policy the parent crate states applies to this crate too, because a panic raised by
+# the harness itself would be reported as a finding against the library under test.
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+
+# Not a member of any workspace: the parent directory is `ahl-core` itself, and a fuzz crate
+# that joined it would put `libfuzzer-sys` and its nightly-only instrumentation into the
+# library's own dependency graph.
+[workspace]
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "receipt"
+path = "fuzz_targets/receipt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false

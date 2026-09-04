@@ -131,6 +131,15 @@ impl Scope {
 }
 
 #[cfg(test)]
+#[allow(
+    // A test asserts; an assertion that fires IS the failure report. The crate-level no-panic
+    // lints are the library's contract, not this module's.
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
 mod tests {
     use serde_json::json;
 

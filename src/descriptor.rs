@@ -218,11 +218,11 @@ pub fn validate_media_type_production(raw: &str) -> AhlResult<String> {
     let mut params: Vec<(String, &str)> =
         parsed.params.iter().map(|(name, value)| (name.to_ascii_lowercase(), *value)).collect();
     params.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-    for pair in params.windows(2) {
-        if pair[0].0 == pair[1].0 {
+    for (left, right) in params.iter().zip(params.iter().skip(1)) {
+        if left.0 == right.0 {
             return Err(AhlError::MediaTypeDuplicateParam {
                 media_type: raw.to_owned(),
-                param: pair[0].0.clone(),
+                param: left.0.clone(),
             });
         }
     }
@@ -322,6 +322,15 @@ impl CanonicalizationDescriptor {
 }
 
 #[cfg(test)]
+#[allow(
+    // A test asserts; an assertion that fires IS the failure report. The crate-level no-panic
+    // lints are the library's contract, not this module's.
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 

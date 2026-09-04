@@ -1,6 +1,6 @@
 [package]
 name = "ahl-core"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.92"
 license = "Apache-2.0"
@@ -9,6 +9,16 @@ repository = "https://github.com/evidentum-io/ahl-core"
 readme = "README.md"
 categories = ["cryptography", "data-structures"]
 keywords = ["provenance", "transparency-log", "merkle-tree", "test-vectors"]
+
+[features]
+default = []
+# A seam for the fuzz harness in `fuzz/`, and nothing else: it exposes the governance-statement
+# schema validation the I-D §7.5.1 walk runs, so a fuzz target can reach it directly. Reaching
+# it through a receipt is not possible for arbitrary bytes — §7.5 step 3 verifies each chain
+# hop's inclusion path against the checkpoint root before the walk runs, so any edit to a
+# carried payload is rejected as an unanchored hop long before its schema is read. Off by
+# default; the API it adds carries no stability promise.
+fuzzing = []
 
 [dependencies]
 # Anti-drift: JCS canonicalization, RFC 6962-style node hashing, and - normatively -
@@ -42,3 +52,17 @@ cargo = { level = "warn", priority = -1 }
 # is allowed here, visibly, rather than left as a standing CI failure. Revisit when the pinned
 # `atl-core` revision moves to `thiserror` 2.
 multiple_crate_versions = "allow"
+# No-panic policy: library code reaches no panicking construct on any input. Every one of
+# these is a way a library function could abort the caller's process instead of returning a
+# rejection, so they are denied crate-wide and satisfied in code rather than allowed at a
+# site. Test modules, the integration tests and the vector generator allow them back at
+# module level: an assertion that fires IS the failure report there.
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+missing_panics_doc = "deny"

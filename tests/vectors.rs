@@ -13,6 +13,17 @@
 //!
 //! Regenerate the corpus with `cargo run --bin gen_vectors` before running these.
 
+// A test asserts; an assertion that fires IS the failure report. The crate-level no-panic
+// lints are the library's contract, not this file's, so they are allowed back here rather
+// than worked around with error plumbing that would hide which assertion failed.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

@@ -27,6 +27,28 @@
 //! rather than reimplemented here. AHL vectors therefore cannot silently diverge from the
 //! ATL family's Merkle semantics.
 //!
+//! # No panic
+//!
+//! `ahl-core` reaches no panicking construct on any input to its three parsers — the statement
+//! envelope (`statement_id`, `entry_id`, `check_envelope`, `verify_envelope`), the Evidence
+//! Receipt (`receipt::verify_receipt_report`, `receipt::verify_receipt`), and the governance
+//! manifest and key statement schema the §7.5.1 walk applies — under the crate's own
+//! `receipt::Limits`. Malformed, hostile or simply absurd input is reported as an error or as a
+//! §7.7 finding, never as an abort of the caller's process. The mechanism is the crate-level
+//! lints in `Cargo.toml` (`clippy::unwrap_used`, `expect_used`, `indexing_slicing`,
+//! `arithmetic_side_effects`, `panic`, `unreachable`, `todo`, `unimplemented`,
+//! `missing_panics_doc`, all denied and satisfied in library code rather than allowed at a site);
+//! the evidence is the three libFuzzer targets in the `fuzz/` crate. The boundary:
+//! allocation failure and stack exhaustion are out of scope, since neither is a panic and neither
+//! is something a library can decline; nesting depth is bounded by `serde_json`, which refuses a
+//! document nested deeper than 128 levels with an error rather than recursing, so a `Value`
+//! obtained by parsing bytes is already bounded when this crate sees it, while a `Value` built
+//! programmatically to arbitrary depth is not and is outside the claim; total work is bounded by
+//! the I-D §7.8 decoded-size budget (`Limits::max_decoded_bytes`), enforced over the canonical
+//! form of the whole receipt ahead of every semantic and cryptographic check; and `atl-core` —
+//! the pinned sibling that performs canonicalization, node hashing and proof verification — is
+//! not covered, because the claim is about this crate's own code.
+//!
 //! # Test material only
 //!
 //! Every key in `test_data/keys/` is a published constant. Nothing in this crate is
@@ -154,7 +176,11 @@ pub fn entry_id(envelope: &Value) -> String {
 /// not a valid dataset id.
 fn commitment_input(dataset: &str, ddig: &[u8; 32], canonical: &[u8]) -> AhlResult<Vec<u8>> {
     descriptor::validate_dataset_id(dataset)?;
-    let mut buf = Vec::with_capacity(dataset.len() + 1 + ddig.len() + 1 + canonical.len());
+    // A capacity hint, saturating rather than wrapping: the exact figure is
+    // `dataset + 1 + ddig + 1 + canonical`, and a saturated one only under-reserves.
+    let capacity =
+        dataset.len().saturating_add(ddig.len()).saturating_add(canonical.len()).saturating_add(2);
+    let mut buf = Vec::with_capacity(capacity);
     buf.extend_from_slice(dataset.as_bytes());
     buf.push(DATASET_SEPARATOR);
     buf.extend_from_slice(ddig);
@@ -460,16 +486,18 @@ pub fn checkpoint(
     checkpoint_time: &str,
     key: &TestKey,
 ) -> Value {
-    let mut cp = json!({
-        "log_id": log_id,
-        "tree_size": tree_size,
-        "root_hash": root_hash,
-        "checkpoint_time": checkpoint_time,
-        "key_id": key.key_id(),
-    });
-    let sig = key.sign(&jcs(&cp));
-    cp["signature"] = Value::String(sig);
-    cp
+    // Built through the map API rather than by indexing a `Value`: `Value`'s `IndexMut` panics
+    // where the target is not an object, and the signature is inserted after the unsigned form
+    // has been canonicalized. JCS sorts members, so insertion order does not reach the bytes.
+    let mut cp = serde_json::Map::new();
+    cp.insert("log_id".to_owned(), Value::String(log_id.to_owned()));
+    cp.insert("tree_size".to_owned(), Value::from(tree_size));
+    cp.insert("root_hash".to_owned(), Value::String(root_hash.to_owned()));
+    cp.insert("checkpoint_time".to_owned(), Value::String(checkpoint_time.to_owned()));
+    cp.insert("key_id".to_owned(), Value::String(key.key_id()));
+    let sig = key.sign(&jcs(&Value::Object(cp.clone())));
+    cp.insert("signature".to_owned(), Value::String(sig));
+    Value::Object(cp)
 }
 
 /// The bytes a log signs for `cp`: `JCS(cp)` with `signature` removed.
@@ -487,18 +515,18 @@ pub fn checkpoint_signing_bytes(cp: &Value) -> AhlResult<Vec<u8>> {
 /// Render a Unix nanosecond timestamp in the exact form adaptor profile `ahl-adaptor-atl-v1`
 /// §6.3 requires: UTC, exactly nine fractional-second digits, `Z` suffix.
 ///
-/// # Panics
-///
-/// Never for any `nanos` value representable as a valid Unix instant within this crate's
-/// supported date range; `time::OffsetDateTime` covers many millennia either side of 1970,
-/// far beyond what this crate's corpora need.
+/// A `nanos` value outside the representable instant range renders the Unix epoch rather than
+/// aborting: every conversion and the sub-second addition are checked, so the function reaches
+/// no panicking construct for any input.
 #[must_use]
 pub fn atl_checkpoint_time(nanos: u64) -> String {
     let whole = i64::try_from(nanos / 1_000_000_000).unwrap_or(i64::MAX);
     let sub = u32::try_from(nanos % 1_000_000_000).unwrap_or(0);
+    let epoch = time::OffsetDateTime::UNIX_EPOCH;
     let instant = time::OffsetDateTime::from_unix_timestamp(whole)
-        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
-        + time::Duration::nanoseconds(i64::from(sub));
+        .unwrap_or(epoch)
+        .checked_add(time::Duration::nanoseconds(i64::from(sub)))
+        .unwrap_or(epoch);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
         instant.year(),
@@ -566,9 +594,9 @@ pub fn atl_checkpoint_time_nanos(value: &str) -> AhlResult<u64> {
     // directly rather than trusted to whatever the generic RFC 3339 parser happens to accept.
     let bytes = value.as_bytes();
     if bytes.len() != 30
-        || bytes[19] != b'.'
-        || bytes[29] != b'Z'
-        || !value[20..29].bytes().all(|b| b.is_ascii_digit())
+        || bytes.get(19) != Some(&b'.')
+        || bytes.get(29) != Some(&b'Z')
+        || !value.get(20..29).is_some_and(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
     {
         return Err(invalid());
     }
@@ -1005,9 +1033,9 @@ pub fn record_sorted(mut leaves: Vec<Value>) -> AhlResult<Vec<Value>> {
         }
     }
     leaves.sort_by_key(record_key);
-    for pair in leaves.windows(2) {
-        if record_key(&pair[0]) == record_key(&pair[1]) {
-            return Err(AhlError::DuplicateRecord(record_key(&pair[0])));
+    for (left, right) in leaves.iter().zip(leaves.iter().skip(1)) {
+        if record_key(left) == record_key(right) {
+            return Err(AhlError::DuplicateRecord(record_key(left)));
         }
     }
     Ok(leaves)
@@ -1043,6 +1071,15 @@ pub(crate) fn strip_prefix<'a>(value: &'a str, prefix: &'static str) -> AhlResul
 }
 
 #[cfg(test)]
+#[allow(
+    // A test asserts; an assertion that fires IS the failure report. The crate-level no-panic
+    // lints are the library's contract, not this module's.
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
 mod tests {
 
     #[test]
