@@ -761,10 +761,130 @@ pub fn atl_checkpoint(
     }))
 }
 
-/// The bytes a witness cosigns: `JCS({"checkpoint": <signed cp>, "witness_id": <id>})`.
+/// The members a cosigned checkpoint object carries, and the only ones (adaptor
+/// `ahl-adaptor-atl-v1` §11.1), plus `raw`, which is accepted on the way in and dropped.
+const COSIGNED_MEMBERS_AND_RAW: [&str; 7] =
+    ["log_id", "tree_size", "root_hash", "checkpoint_time", "key_id", "signature", "raw"];
+
+/// The checkpoint projection a witness cosigns: exactly the six members adaptor
+/// `ahl-adaptor-atl-v1` §6.2 defines, and nothing else.
+///
+/// §11.1: "The cosigned checkpoint object contains exactly `{log_id, tree_size, root_hash,
+/// checkpoint_time, key_id, signature}` — the six members §6.2 defines — and nothing else...
+/// `raw` (§6.4), where carried in any receipt-borne checkpoint — `anchoring.checkpoint`,
+/// `later_checkpoint`, a rotation-proof checkpoint alike — is EXCLUDED from the cosignature
+/// preimage; any other checkpoint member is `invalid` (I-D §7.1 permits `raw` alone as
+/// optional). A witness therefore cosigns a typed six-member projection of the checkpoint,
+/// never the JSON object as received, and a verifier reconstructs the cosigned object from
+/// those six members alone."
+///
+/// The type exists so that the preimage cannot depend on what a checkpoint happened to carry.
+/// A `Value` handed straight to a serializer puts every member it holds into the bytes two
+/// implementations must agree on, and `raw` is exactly such a member: optional, carried by
+/// receipts under a profile that defines a binary framing, and absent from what the witness
+/// signed. [`CosignedCheckpoint::project`] is the only way to build one, and
+/// [`cosignature_bytes`] takes nothing else, so the two sides cannot drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CosignedCheckpoint {
+    /// `"sha256:" || hex(Origin ID)` (§6.2).
+    log_id: String,
+    /// Number of entries the checkpoint commits, `[0, tree_size)`.
+    tree_size: u64,
+    /// `"sha256:" || hex(root)` (§6.2).
+    root_hash: String,
+    /// The checkpoint's own time rendering (§6.3 under an ATL-shaped profile).
+    checkpoint_time: String,
+    /// `"sha256:" || hex(SHA-256(raw pubkey))` of the LOG's signing key.
+    key_id: String,
+    /// The log's signature over the checkpoint. §11.1 binds it deliberately: "a cosignature
+    /// attests to a checkpoint the log actually signed, not merely to values a witness was
+    /// shown."
+    signature: String,
+}
+
+impl CosignedCheckpoint {
+    /// Project a receipt-borne checkpoint object onto the six members §11.1 cosigns.
+    ///
+    /// Accepts `raw` and drops it — I-D §7.1 permits that member alone as optional, and §11.1
+    /// excludes it from the preimage — and refuses any other member rather than carrying it
+    /// into bytes a second implementation would not reproduce.
+    ///
+    /// This reads the six members and their JSON types, and nothing more: whether `log_id` is
+    /// a well-formed family string, whether `checkpoint_time` renders as §6.3 requires, and
+    /// whether the signature verifies are separate questions, answered where each belongs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AhlError::CosignedCheckpoint`] if the value is not an object, if one of the
+    /// six members is absent or has the wrong JSON type, or if it carries a member other than
+    /// those six and `raw`.
+    pub fn project(checkpoint: &Value) -> AhlResult<Self> {
+        let invalid = |detail: String| AhlError::CosignedCheckpoint(detail);
+        let members = checkpoint
+            .as_object()
+            .ok_or_else(|| invalid("a checkpoint MUST be a JSON object (I-D §7.1)".to_owned()))?;
+        if let Some(extra) =
+            members.keys().find(|member| !COSIGNED_MEMBERS_AND_RAW.contains(&member.as_str()))
+        {
+            return Err(invalid(format!(
+                "checkpoint carries `{extra}`, which is neither one of the six members the \
+                 cosigned object contains nor `raw`: adaptor §11.1 makes any other checkpoint \
+                 member invalid"
+            )));
+        }
+        let text = |member: &str| -> AhlResult<String> {
+            members
+                .get(member)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| invalid(format!("`{member}` is REQUIRED, a string")))
+        };
+        let tree_size = members
+            .get("tree_size")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| invalid("`tree_size` is REQUIRED, an entry count".to_owned()))?;
+        Ok(Self {
+            log_id: text("log_id")?,
+            tree_size,
+            root_hash: text("root_hash")?,
+            checkpoint_time: text("checkpoint_time")?,
+            key_id: text("key_id")?,
+            signature: text("signature")?,
+        })
+    }
+
+    /// The cosigned checkpoint object itself, as §11.1 draws it.
+    ///
+    /// Destructured rather than field-accessed so that a member added to the struct without a
+    /// decision about the preimage fails to compile instead of silently staying out of it.
+    fn object(&self) -> Value {
+        let Self { log_id, tree_size, root_hash, checkpoint_time, key_id, signature } = self;
+        json!({
+            "log_id": log_id,
+            "tree_size": tree_size,
+            "root_hash": root_hash,
+            "checkpoint_time": checkpoint_time,
+            "key_id": key_id,
+            "signature": signature,
+        })
+    }
+}
+
+/// The bytes a witness cosigns (adaptor `ahl-adaptor-atl-v1` §11.1):
+/// `JCS({"checkpoint": <the six-member projection>, "witness_id": <id>})`.
+///
+/// §11.1 fixes both halves of the preimage. The checkpoint half is the six-member projection
+/// of [`CosignedCheckpoint`] — "the cosigned checkpoint object contains exactly `{log_id,
+/// tree_size, root_hash, checkpoint_time, key_id, signature}`... and nothing else", with `raw`
+/// excluded wherever a receipt carries it. The `witness_id` half binds the cosignature to one
+/// identity, "so a cosignature cannot be replayed for another witness".
+///
+/// Taking the projection rather than a `Value` is what makes the rule hold at every call site:
+/// a producer and a verifier reach these bytes through the same constructor, so a checkpoint
+/// that carries `raw` cosigns and re-verifies identically to one that does not.
 #[must_use]
-pub fn cosignature_bytes(signed_checkpoint: &Value, witness_id: &str) -> Vec<u8> {
-    jcs(&json!({ "checkpoint": signed_checkpoint, "witness_id": witness_id }))
+pub fn cosignature_bytes(checkpoint: &CosignedCheckpoint, witness_id: &str) -> Vec<u8> {
+    jcs(&json!({ "checkpoint": checkpoint.object(), "witness_id": witness_id }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,5 +1670,82 @@ mod tests {
             checkpoint_signing_bytes_for(&cp, "some-other-profile"),
             Err(AhlError::Field(_))
         ));
+    }
+
+    /// Adaptor §11.1's erratum, as bytes: a checkpoint that carries `raw` cosigns over the
+    /// same preimage as the one that does not. This is the end-to-end defect — a producer that
+    /// serialised the checkpoint as it stood built different bytes from the witness, and every
+    /// cosignature on a receipt carrying `raw` failed.
+    #[test]
+    fn raw_is_excluded_from_the_cosignature_preimage() {
+        let bare = json!({
+            "log_id": format!("sha256:{}", "aa".repeat(32)),
+            "tree_size": 5,
+            "root_hash": format!("sha256:{}", "bb".repeat(32)),
+            "checkpoint_time": "2026-08-16T12:00:00.123456789Z",
+            "key_id": format!("sha256:{}", "cc".repeat(32)),
+            "signature": format!("base64:{}", "d".repeat(86)),
+        });
+        let mut with_raw = bare.clone();
+        with_raw["raw"] = json!(format!("base64:{}", "e".repeat(130)));
+
+        let projected = CosignedCheckpoint::project(&bare).expect("six members");
+        let projected_with_raw = CosignedCheckpoint::project(&with_raw).expect("six members, raw");
+        assert_eq!(projected, projected_with_raw, "`raw` is not part of the projection");
+        assert_eq!(
+            cosignature_bytes(&projected, "witness-1"),
+            cosignature_bytes(&projected_with_raw, "witness-1"),
+        );
+
+        // And the preimage is the object §11.1 draws, not the checkpoint as received: nothing
+        // in these bytes mentions `raw`, and the witness identity binds them.
+        let bytes = cosignature_bytes(&projected_with_raw, "witness-1");
+        let text = String::from_utf8(bytes).expect("JCS output is UTF-8");
+        assert!(!text.contains("raw"), "{text}");
+        assert!(text.contains("\"witness_id\":\"witness-1\""), "{text}");
+    }
+
+    #[test]
+    fn a_checkpoint_member_outside_the_six_and_raw_is_refused() {
+        let mut checkpoint = json!({
+            "log_id": format!("sha256:{}", "aa".repeat(32)),
+            "tree_size": 5,
+            "root_hash": format!("sha256:{}", "bb".repeat(32)),
+            "checkpoint_time": "2026-08-16T12:00:00.123456789Z",
+            "key_id": format!("sha256:{}", "cc".repeat(32)),
+            "signature": format!("base64:{}", "d".repeat(86)),
+        });
+        checkpoint["origin_id"] = json!("sha256:whatever");
+        assert!(matches!(
+            CosignedCheckpoint::project(&checkpoint),
+            Err(AhlError::CosignedCheckpoint(detail)) if detail.contains("`origin_id`")
+        ));
+    }
+
+    #[test]
+    fn a_projection_needs_all_six_members_at_their_own_json_types() {
+        let full = json!({
+            "log_id": format!("sha256:{}", "aa".repeat(32)),
+            "tree_size": 5,
+            "root_hash": format!("sha256:{}", "bb".repeat(32)),
+            "checkpoint_time": "2026-08-16T12:00:00.123456789Z",
+            "key_id": format!("sha256:{}", "cc".repeat(32)),
+            "signature": format!("base64:{}", "d".repeat(86)),
+        });
+        for member in ["log_id", "tree_size", "root_hash", "checkpoint_time", "key_id", "signature"]
+        {
+            let mut short = full.clone();
+            short.as_object_mut().expect("object").remove(member);
+            assert!(
+                CosignedCheckpoint::project(&short).is_err(),
+                "`{member}` absent must not project"
+            );
+        }
+        // `tree_size` is an entry count, not its decimal rendering: a string here would let two
+        // producers disagree about the preimage while carrying the same value.
+        let mut stringly = full;
+        stringly["tree_size"] = json!("5");
+        assert!(CosignedCheckpoint::project(&stringly).is_err());
+        assert!(CosignedCheckpoint::project(&json!("not an object")).is_err());
     }
 }

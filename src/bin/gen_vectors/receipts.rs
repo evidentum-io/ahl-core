@@ -18,17 +18,14 @@ use ahl_core::receipt::{
     verify_receipt, verify_receipt_report, AdaptorCapabilities, AdaptorProfile, Outcome,
     ReceiptError, TrustPolicy,
 };
-use ahl_core::{
-    checkpoint_signing_bytes, cosignature_bytes, entry_id, envelope, field_str, statement_id,
-    TestKey,
-};
+use ahl_core::{checkpoint_signing_bytes, entry_id, envelope, field_str, statement_id, TestKey};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
 use crate::corpus::{rotation, Anchor, Corpus, ROTATIONS};
 use crate::scenario::{
-    signed, write_jcs, write_json, Keys, ADAPTOR_ID, CANONICALIZATION, DS_CUSTOMERS, DS_SCORES, T0,
-    WITNESS_1, WITNESS_2,
+    cosigned_bytes, signed, write_jcs, write_json, Keys, ADAPTOR_ID, CANONICALIZATION,
+    DS_CUSTOMERS, DS_SCORES, T0, WITNESS_1, WITNESS_2,
 };
 
 /// What a receipt vector asserts about its own verification outcome.
@@ -3230,7 +3227,7 @@ fn build_vectors(corpus: &Corpus, keys: &Keys) -> Vec<Vector> {
                 proofs[0]["witnesses"] = json!([ {
                     "witness_id": WITNESS_2,
                     "key_id": keys.witness_2.key_id(),
-                    "cosignature": keys.witness_2.sign(&cosignature_bytes(cp26, WITNESS_2)),
+                    "cosignature": keys.witness_2.sign(&cosigned_bytes(cp26, WITNESS_2)),
                     "cosigned_at": T0,
                 } ]);
             },

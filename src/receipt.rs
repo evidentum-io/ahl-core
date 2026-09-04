@@ -59,7 +59,7 @@ use crate::tree::ValidatedLeafSet;
 use crate::{
     commit_keyed, commit_plain, cosignature_bytes, decode_pubkey, descriptor, entry_id, hash_hex,
     jcs, parse_hash_hex, proof_from_hex, sha256_hex, statement_id, tree_root, verify_signature,
-    AhlError, B64,
+    AhlError, CosignedCheckpoint, B64,
 };
 
 /// Receipt container version this verifier implements (I-D §7.1: `ahl_receipt_version`).
@@ -3570,6 +3570,11 @@ fn verify_rotation_proof(
     // already shape-checked above where present, but no cosignature is required from it.
     if rotating_manifest.get("level").and_then(Value::as_str) == Some("L3") {
         let outgoing_witnesses = witness_key_set(outgoing_manifest)?;
+        // Adaptor §11.1: a rotation-proof checkpoint is cosigned over the same six-member
+        // projection as any other receipt-borne one, `raw` excluded. Projected once for the
+        // whole element rather than per candidate cosignature — the preimage's checkpoint half
+        // does not vary between them.
+        let projected = CosignedCheckpoint::project(checkpoint)?;
         let mut cosigned = false;
         for witness in &witness_candidates {
             let witness_id = text(witness, "witness_id")?.to_owned();
@@ -3594,7 +3599,7 @@ fn verify_rotation_proof(
             run.spend(1)?;
             if verify_signature(
                 &decode_pubkey(&pubkey)?,
-                &cosignature_bytes(checkpoint, &witness_id),
+                &cosignature_bytes(&projected, &witness_id),
                 text(witness, "cosignature")?,
             )? {
                 cosigned = true;
@@ -5204,6 +5209,10 @@ fn verify_witness_cosignatures(
     let (witness_keys, witness_attempted, untrusted) = binding;
     let what = format!("anchoring.{member}");
     run.phase(Assertion::Witnesses);
+    // Adaptor §11.1: the preimage's checkpoint half is the six-member projection, `raw`
+    // excluded — for `anchoring.checkpoint` and `later_checkpoint` alike, since the ATL-shaped
+    // profiles let either carry `raw` and neither is cosigned over what it carries.
+    let projected = CosignedCheckpoint::project(checkpoint)?;
     let mut witnessed = false;
     let mut unevaluated = false;
     for cosignature in cosignature_array(anchoring, member, &what)? {
@@ -5231,7 +5240,7 @@ fn verify_witness_cosignatures(
         run.spend(1)?;
         if !verify_signature(
             &decode_pubkey(&resolved.pubkey)?,
-            &cosignature_bytes(checkpoint, &witness_id),
+            &cosignature_bytes(&projected, &witness_id),
             text(cosignature, "cosignature")?,
         )? {
             return Err(ReceiptError::WitnessCosignatureInvalid { witness_id });
@@ -8613,7 +8622,10 @@ mod tests {
                 {
                     "witness_id": "witness-1",
                     "key_id": witness_key.key_id(),
-                    "cosignature": witness_key.sign(&cosignature_bytes(&cp, "witness-1")),
+                    "cosignature": witness_key.sign(&cosignature_bytes(
+                        &crate::CosignedCheckpoint::project(&cp).expect("a six-member checkpoint"),
+                        "witness-1",
+                    )),
                 },
             ],
         });

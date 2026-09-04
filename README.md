@@ -2,6 +2,13 @@
 
 Core library and test vectors for AHL Protocol revision 0.4 (Anchored History Log).
 
+## Compatibility
+
+**0.4.0 breaks the cosignature API**: `cosignature_bytes` now takes
+`&CosignedCheckpoint` — the typed six-member projection of adaptor `ahl-adaptor-atl-v1` §11.1,
+built with `CosignedCheckpoint::project` — instead of a checkpoint `Value`, so a checkpoint's
+optional `raw` framing can no longer enter the preimage. Callers project first.
+
 ## No panic
 
 `ahl-core` reaches no panicking construct on any input to its three parsers — the statement
