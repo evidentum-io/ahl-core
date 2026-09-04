@@ -56,7 +56,20 @@ jobs:
       # Build only. Compiling and linking the three targets against the library on every pull
       # request is what keeps them from silently rotting out of step with the API they call;
       # running a campaign is not a gate, and its length is not a property of a pull request.
-      - run: cargo fuzz build
+      # cargo-fuzz defaults to the musl target on Linux, which the toolchain action does not
+      # install; the host target is what the fuzz crate is built against locally as well.
+      - run: cargo fuzz build --target x86_64-unknown-linux-gnu
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   determinism:
     name: Vector determinism

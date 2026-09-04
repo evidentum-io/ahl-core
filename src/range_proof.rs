@@ -371,14 +371,10 @@ pub fn decode(value: &str) -> AhlResult<RangeProof> {
             body.len()
         )));
     }
-    let nodes = body
-        .chunks_exact(32)
-        .map(|chunk| {
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(chunk);
-            hash
-        })
-        .collect();
+    // `as_chunks` returns the whole 32-octet chunks and the (empty, per the length check above)
+    // remainder without a per-chunk copy.
+    let (chunks, _remainder) = body.as_chunks::<32>();
+    let nodes = chunks.to_vec();
     Ok(RangeProof { tree_size, from_index, to_index, nodes })
 }
 
