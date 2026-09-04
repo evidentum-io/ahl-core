@@ -10,38 +10,65 @@
         "checkpoint_time": "2026-08-16T12:00:00.123456789Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:d66fef87c0f962f116952b4fc318d76686d5625b8d43cf22d608bb20f79638ae",
-        "raw": "base64:QVRMLVByb3RvY29sLXYxLUNQ1m/vh8D5YvEWlStPwxjXZobVYluNQ88i1gi7IPeWOK4EAAAAAAAAABVNChdZR8wYOHBWMR0WTeVYprIZ9E/7NZt4JZvMjnw7zKwD6b5c8FA=",
-        "root_hash": "sha256:387056311d164de558a6b219f44ffb359b78259bcc8e7c3bccac03e9be5cf050",
-        "signature": "base64:tfwKW4dr1070fP33HMGi0iL8P08myAC9JF9ZSEki5/3I+ODy7e1We37Y/pDZSg1u/rkxC0zmtSpAUlHZheOWCQ==",
-        "tree_size": 4
+        "raw": "base64:QVRMLVByb3RvY29sLXYxLUNQ1m/vh8D5YvEWlStPwxjXZobVYluNQ88i1gi7IPeWOK4FAAAAAAAAABVNChdZR8wYex3ch3Lizv9ICZ/OTAJTzxrMVfVPyE/1bmnZ7/tr/EQ=",
+        "root_hash": "sha256:7b1ddc8772e2ceff48099fce4c0253cf1acc55f54fc84ff56e69d9effb6bfc44",
+        "signature": "base64:hGLJRDk0WCBHeLgIyX5G3lpe+cmQcHyZBWAxKNjaVWPLuOMchpbIvxkSzA+PjgPfeAY39ZwQ4omsW0vKbDrEAg==",
+        "tree_size": 5
       },
       "cosignature": {
-        "cosignature": "base64:c6tggSG2xZGsc49E7YZO+GtEXptc/dfG8PcfVFZeUFklDcfVwNP3RxZHuGggG/GgJDVEpU41i8fDYwLeZU8hBw==",
+        "cosignature": "base64:MxvJcJrA5ORBEfcrg21c3QOvGZVZnjJm6VVhZOWpuh6gkPntY35Dq71P9SelY/1NLP/vXcdENWNKce//kjzeDA==",
         "cosigned_at": "2026-08-16T12:00:00Z",
         "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
         "witness_id": "witness-1"
       },
-      "name": "cp4"
+      "name": "cp5"
     },
     {
       "checkpoint": {
         "checkpoint_time": "2026-08-16T12:00:01.123456789Z",
         "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
         "log_id": "sha256:d66fef87c0f962f116952b4fc318d76686d5625b8d43cf22d608bb20f79638ae",
-        "raw": "base64:QVRMLVByb3RvY29sLXYxLUNQ1m/vh8D5YvEWlStPwxjXZobVYluNQ88i1gi7IPeWOK4FAAAAAAAAABUXpVJZR8wY8UOEe8MxvjzDKn4AAontZg7jz1u93ntm+div03ugRsk=",
-        "root_hash": "sha256:f143847bc331be3cc32a7e000289ed660ee3cf5bbdde7b66f9d8afd37ba046c9",
-        "signature": "base64:8SABRmcbaujizsVrBbj9EhMRSr9Gbah3LT6CdUu4MMHtNDMovsYQbBBN/6F+h0DSfgoVTHDoujuFAzGedOI5Cg==",
-        "tree_size": 5
+        "raw": "base64:QVRMLVByb3RvY29sLXYxLUNQ1m/vh8D5YvEWlStPwxjXZobVYluNQ88i1gi7IPeWOK4GAAAAAAAAABUXpVJZR8wYjjW7tt9OhOv/9AzPb6XPJnRQwner9aCNmH07jb7d0KI=",
+        "root_hash": "sha256:8e35bbb6df4e84ebfff40ccf6fa5cf267450c277abf5a08d987d3b8dbeddd0a2",
+        "signature": "base64:4+YxwtpJV3lVfIg0JXwD71OMvbX744Agnu/aYqFMDZPXFv/g9JcR9Gf6Tc4X7SyVWGn1ut1diF9vXdk2twSCDw==",
+        "tree_size": 6
       },
       "cosignature": {
-        "cosignature": "base64:e4zk2fZ+6LEeNuqtTL1YvYaJz0q1bwaW1enZbA7jDlVq4VpHXJCg6tI4iS719yG9ShqmqqBEpIh8ugyYAk/4Cg==",
+        "cosignature": "base64:zMYSj2u5iTMhsa7EE1z8SWn1evmwEPAjAHDldxKDbZeKYYAD8muRh2oYto6TAz0s1BRd0goa7GM2hBPPhJR+Cg==",
         "cosigned_at": "2026-08-16T12:00:00Z",
         "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
         "witness_id": "witness-1"
       },
-      "name": "cp5"
+      "name": "cp6"
+    },
+    {
+      "checkpoint": {
+        "checkpoint_time": "2026-08-16T12:00:02.123456789Z",
+        "key_id": "sha256:b62e867fa2f33afe62d5d6b1642e1621d543307846b2a57b897e710919b76709",
+        "log_id": "sha256:d66fef87c0f962f116952b4fc318d76686d5625b8d43cf22d608bb20f79638ae",
+        "raw": "base64:QVRMLVByb3RvY29sLXYxLUNQ1m/vh8D5YvEWlStPwxjXZobVYluNQ88i1gi7IPeWOK4HAAAAAAAAABXhP45ZR8wYcIxmVvM6PK5YNicfltzhB/v8Iu3ds4eGyORc4MVJGmo=",
+        "root_hash": "sha256:708c6656f33a3cae5836271f96dce107fbfc22edddb38786c8e45ce0c5491a6a",
+        "signature": "base64:X0MdNEWJ/wcrwSp9bLP4f7Qvkfrc9ZjVGM78WRK+rVYRijsEYP4cwXJpVdJcpLpshj/Quc77y1pp6dRHNgDIDA==",
+        "tree_size": 7
+      },
+      "cosignature": {
+        "cosignature": "base64:ai8rn4nfX1cDN8zPyZvXgeN5BYLghrPg0ttDtzLBMat3r7kr5MWVv3CJ7w9gHER/oxvscdh/B/S8gSWlZqF2DA==",
+        "cosigned_at": "2026-08-16T12:00:00Z",
+        "key_id": "sha256:c5b940ed3f65c391965de8295fc5d25f474fa57b48d36eb10ad363b8539c1b79",
+        "witness_id": "witness-1"
+      },
+      "name": "cp7"
     }
   ],
+  "consistency": {
+    "from_size": 5,
+    "path": [
+      "sha256:83419b08edda333eccd1a2eafdedf3abf7c4f67751037cbb69e604d340bdb20a",
+      "sha256:d4a74fd49e01f972d8b48f84f120e7e0c48c0d5da2aaf6798e84bb9052b3cb07",
+      "sha256:387056311d164de558a6b219f44ffb359b78259bcc8e7c3bccac03e9be5cf050"
+    ],
+    "to_size": 6
+  },
   "description": "Log tree of the ATL-bound toy corpus. Leaf bytes are NOT the anchored entry bytes: adaptor profile `ahl-adaptor-atl-v1` §4.2 combines two digests, so the leaf preimage is `SHA-256(JCS(envelope)) || METADATA_HASH` and the leaf hash is `SHA-256(0x00 || that)`. The first digest is the raw form of the AHL entry id. The profile id is pinned at the digest of the STAND-IN artifact under `profiles/`, never at the unreleased profile's — see that file's own opening lines.",
   "entries": [
     {
@@ -65,8 +92,18 @@
       "leaf_hash": "sha256:b32454a905d4eeed75e18c06244d8a20bc13ea1d65e39fee545c11e767912d29"
     },
     {
-      "entry_id": "sha256:e081cb857f24ff152ea82cd4c56bbd66ebc5a4b7760528faf5ce808c4ded2445",
+      "entry_id": "sha256:aa7eb3ebc195fa8ed0053886e46e33bf0921b3a4d7ff3d922042444b3bc5c8f2",
       "entry_index": 4,
+      "leaf_hash": "sha256:83419b08edda333eccd1a2eafdedf3abf7c4f67751037cbb69e604d340bdb20a"
+    },
+    {
+      "entry_id": "sha256:0fd61fd403407e1fd34cb4e8a8653dd79bab489b46936c320f995ad5a03b5b91",
+      "entry_index": 5,
+      "leaf_hash": "sha256:d4a74fd49e01f972d8b48f84f120e7e0c48c0d5da2aaf6798e84bb9052b3cb07"
+    },
+    {
+      "entry_id": "sha256:e081cb857f24ff152ea82cd4c56bbd66ebc5a4b7760528faf5ce808c4ded2445",
+      "entry_index": 6,
       "leaf_hash": "sha256:10d060d669c5bfc1cc7d42692fdf83a6dc582b9899276a0ecb4dd32ab385a85a"
     }
   ],

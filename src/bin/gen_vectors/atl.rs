@@ -3,8 +3,8 @@
 //! The main corpus binds `ahl-test-log-v1`, whose log leaf is the anchored entry bytes. This
 //! one exists so the pieces that DIFFER under the ATL binding are exercised end to end rather
 //! than at the unit level: the two-digest leaf construction of adaptor §4.2, the origin-derived
-//! `log_id` of §7.1, the 98-byte checkpoint blob of §6.1 with the `raw` framing of §6.4, and the
-//! inclusion geometry that follows from the leaf change (§8.2).
+//! `log_id` of §7.1, the 98-byte checkpoint blob of §6.1 with the `raw` framing of §6.4, the
+//! range enumeration of §10.4-§10.5, and the consistency proofs of §8.3.
 //!
 //! # What this corpus pins, and what it deliberately does not
 //!
@@ -22,6 +22,10 @@
 //! released artifact's — does not resolve here at all. The dispatch keys on the profile ID
 //! string, which is what names the serialization rules; the digest is what names the artifact,
 //! and a stand-in artifact is the honest thing to name while the real one is unreleased.
+//!
+//! Adaptor §10 records that the published ATL server serves no enumeration interface, so the
+//! range material below is the material a mirror would serve — corpus material under core spec
+//! §3.5, assembled here by construction rather than fetched.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -31,9 +35,10 @@ use ahl_core::receipt::{
     ReceiptError, TrustPolicy,
 };
 use ahl_core::{
-    atl_checkpoint, atl_checkpoint_blob_from_json, atl_log_id, cosignature_bytes, entry_id,
-    envelope, hash_hex, inclusion_proof, jcs, leaf_hash, log_leaf_bytes_for, parse_hash_hex,
-    proof_path_hex, sha256_hex, statement_id, tree_root, verify_envelope, verify_inclusion_proof,
+    atl_checkpoint, atl_checkpoint_blob_from_json, atl_log_id, consistency_path_hex,
+    consistency_proof, cosignature_bytes, entry_id, envelope, hash_hex, inclusion_proof, jcs,
+    leaf_hash, log_leaf_bytes_for, parse_hash_hex, proof_path_hex, range_proof, sha256_hex,
+    statement_id, tree_root, verify_consistency_proof, verify_envelope, verify_inclusion_proof,
     verify_signature, TestKey, ATL_PROFILE_ID,
 };
 use base64::Engine as _;
@@ -79,12 +84,14 @@ const WRONG_METADATA: &str = r#"{"ahl_adaptor":"not-this-profile"}"#;
 const UNHELD_ARTIFACT: &[u8] = b"an adaptor profile artifact this corpus does not hold";
 
 /// Entry-index labels, one per anchored envelope.
-const NAMES: [&str; 5] = [
+const NAMES: [&str; 7] = [
     "00-manifest-genesis",
     "01-ingestion-customers-a",
     "02-ingestion-customers-b",
     "03-derivation-s1",
-    "04-manifest-v2-unheld-profile-digest",
+    "04-retraction-customers-a-authorized",
+    "05-ingestion-customers-c",
+    "06-manifest-v2-unheld-profile-digest",
 ];
 
 /// A signed ATL checkpoint plus its witness cosignature.
@@ -161,28 +168,49 @@ impl AtlCorpus {
             &keys.producer_1,
         );
 
-        // Entry 4: a manifest version pinning the SAME profile id at the digest of an artifact
+        // Entry 4: a retraction of record A by the `customers` dataset authority. It is what the
+        // enumerated `trigger-effective` claim below is about, and it is the only reason this
+        // corpus needs a competing range at all.
+        let env_4 = signed(
+            "retraction",
+            &m1,
+            json!({
+                "dataset": DS_CUSTOMERS,
+                "record": records.c_a,
+                "scope": { "effective_from": T0, "retroactive": true },
+                "reason_code": "consent_withdrawn",
+            }),
+            &keys.producer_1,
+        );
+
+        // Entry 5: an ordinary ingestion, so the later checkpoint of the continued-history vector
+        // commits an entry the primary one does not.
+        let env_5 =
+            signed("ingestion", &m1, ingest(&records.c_c, "2026-08-16/atl-02"), &keys.producer_1);
+
+        // Entry 6: a manifest version pinning the SAME profile id at the digest of an artifact
         // this corpus does not hold. Anchored last, so it is the active version for exactly one
         // checkpoint and nothing that must verify is governed by it. I-D §7.5 step 2: a profile
         // held under that id whose HASH DIFFERS is a disagreement "decidable from the bytes in
         // hand", and the result is `invalid`.
-        let mut v2 = manifest(keys, &log_id, &unheld_hash, 4, Some(&entry_id(&env_0)));
+        let mut v2 = manifest(keys, &log_id, &unheld_hash, 6, Some(&entry_id(&env_0)));
         v2["log"]["adaptor"]["id"] = json!(ATL_PROFILE_ID);
         v2["witnesses"][0]["keys"][0]["valid_from_index"] = json!(0);
-        let env_4 = envelope(v2, &keys.producer_1);
+        let env_6 = envelope(v2, &keys.producer_1);
 
-        let envelopes = vec![env_0, env_1, env_2, env_3, env_4];
+        let envelopes = vec![env_0, env_1, env_2, env_3, env_4, env_5, env_6];
         let leaves = atl_leaves(&envelopes);
 
-        // cp4 is the primary checkpoint of every positive; cp5 is reached only by the negative
-        // that manifest version 2 exists for.
-        let anchors = ["cp4", "cp5"]
+        // cp5 is the primary checkpoint of every positive; cp6 is the later checkpoint the
+        // continued-history vector extends to; cp7 is reached only by the negative that manifest
+        // version 2 exists for.
+        let anchors = ["cp5", "cp6", "cp7"]
             .into_iter()
-            .zip([4u64, 5])
+            .zip([5u64, 6, 7])
             .map(|(name, size)| {
                 let at = usize::try_from(size).expect("small tree size");
                 let root_hash = hash_hex(&tree_root(&leaves[..at]));
-                let nanos = CHECKPOINT_NANOS + (size - 4) * 1_000_000_000;
+                let nanos = CHECKPOINT_NANOS + (size - 5) * 1_000_000_000;
                 signed_anchor(name, &log_id, size, &root_hash, nanos, keys)
             })
             .collect::<Vec<_>>();
@@ -193,9 +221,9 @@ impl AtlCorpus {
         // over that tree is genuinely signed and genuinely cosigned, so nothing about it is
         // malformed — only the leaves are built the wrong way, which is exactly what a verifier
         // using the wrong constant would fail to notice.
-        let wrong_root = hash_hex(&tree_root(&wrong_metadata_leaves(&envelopes)[..4]));
+        let wrong_root = hash_hex(&tree_root(&wrong_metadata_leaves(&envelopes)[..5]));
         let wrong_metadata =
-            signed_anchor("cp4-wrong-metadata", &log_id, 4, &wrong_root, CHECKPOINT_NANOS, keys);
+            signed_anchor("cp5-wrong-metadata", &log_id, 5, &wrong_root, CHECKPOINT_NANOS, keys);
 
         Self {
             log_id,
@@ -210,6 +238,33 @@ impl AtlCorpus {
 
     fn anchor(&self, name: &str) -> &AtlAnchor {
         self.anchors.iter().find(|a| a.name == name).expect("named checkpoint")
+    }
+
+    /// Authenticated range enumeration over `[from, to)` under `anchor` (adaptor §10.4-§10.5).
+    ///
+    /// The byte layout is the one the rest of this corpus uses; the LEAF HASHING is §4.2's,
+    /// which is the whole of the difference and the reason this material exists.
+    fn enumeration(&self, from: u64, to: u64, anchor: &AtlAnchor, leaves: &[Vec<u8>]) -> Value {
+        let at = usize::try_from(anchor.tree_size()).expect("small tree size");
+        let hashes: Vec<_> = leaves[..at].iter().map(|leaf| leaf_hash(leaf)).collect();
+        let proof = range_proof::generate(&hashes, from, to).expect("range within the checkpoint");
+        json!({
+            "range": { "from_index": from, "to_index": to },
+            "entries": (from..to)
+                .map(|index| json!({
+                    "entry_index": index,
+                    "envelope": self.envelopes[usize::try_from(index).expect("small index")],
+                }))
+                .collect::<Vec<_>>(),
+            "range_proof": { "adaptor_form": range_proof::encode(&proof) },
+        })
+    }
+
+    /// An RFC 9162 consistency proof between two published tree sizes (adaptor §8.3).
+    fn consistency_path(&self, from_size: u64, to_size: u64) -> Vec<String> {
+        let leaves = atl_leaves(&self.envelopes);
+        let proof = consistency_proof(&leaves, from_size, to_size).expect("published sizes");
+        consistency_path_hex(&proof)
     }
 
     /// Assemble one receipt over this corpus.
@@ -258,7 +313,7 @@ impl AtlCorpus {
         // §3.2: `anchoring.adaptor` names the same pair the ACTIVE manifest's own `log.adaptor`
         // pins, so a receipt anchored under a checkpoint version 2 governs carries version 2's
         // pin — which is the whole point of the negative that uses it.
-        let pinned = if anchor.tree_size() > 4 { &self.unheld_hash } else { &self.stand_in_hash };
+        let pinned = if anchor.tree_size() > 6 { &self.unheld_hash } else { &self.stand_in_hash };
         // A checkpoint commits `[0, tree_size)`, so every path this receipt carries is a path in
         // the tree of THAT size — not in the largest tree the corpus has grown to since.
         let committed = &leaves[..usize::try_from(anchor.tree_size()).expect("small tree size")];
@@ -379,7 +434,7 @@ impl AtlCorpus {
 
         for anchor in self.anchors.iter().chain(std::iter::once(&self.wrong_metadata)) {
             let size = usize::try_from(anchor.tree_size()).expect("small tree size");
-            let expected = if anchor.name == "cp4-wrong-metadata" {
+            let expected = if anchor.name == "cp5-wrong-metadata" {
                 tree_root(&wrong_metadata_leaves(&self.envelopes)[..size])
             } else {
                 tree_root(&leaves[..size])
@@ -435,9 +490,47 @@ impl AtlCorpus {
             );
         }
 
+        // §10.4: every sub-range of the primary checkpoint opens its root, and a proof for the
+        // wrong range does not.
+        let cp5 = self.anchor("cp5");
+        let hashes: Vec<_> = leaves[..5].iter().map(|leaf| leaf_hash(leaf)).collect();
+        let cp5_root = parse_hash_hex(cp5.checkpoint["root_hash"].as_str().expect("root_hash"))
+            .expect("root hash");
+        for from in 0..5u64 {
+            for to in (from + 1)..=5 {
+                let proof = range_proof::generate(&hashes, from, to).expect("valid range");
+                let span: Vec<Vec<u8>> = leaves
+                    [usize::try_from(from).expect("small")..usize::try_from(to).expect("small")]
+                    .to_vec();
+                assert!(
+                    range_proof::verify_over_leaves(&proof, &span, &cp5_root)
+                        .expect("well-formed proof"),
+                    "ATL range [{from}, {to}) did not open cp5's root"
+                );
+            }
+        }
+
+        // §8.3: the consistency proof between the two published sizes verifies, and one for the
+        // wrong pair does not.
+        let path = consistency_proof(&leaves, 5, 6).expect("published sizes");
+        let cp6_root =
+            parse_hash_hex(self.anchor("cp6").checkpoint["root_hash"].as_str().expect("root_hash"))
+                .expect("root hash");
+        assert!(
+            verify_consistency_proof(&path, &cp5_root, &cp6_root).expect("well-formed proof"),
+            "the ATL consistency proof 5 -> 6 did not verify"
+        );
+        let cp7_root =
+            parse_hash_hex(self.anchor("cp7").checkpoint["root_hash"].as_str().expect("root_hash"))
+                .expect("root hash");
+        assert!(
+            !verify_consistency_proof(&path, &cp5_root, &cp7_root).expect("well-formed proof"),
+            "a proof for the wrong pair of sizes must not verify"
+        );
+
         println!(
-            "  [ok] {} ATL entries, {} checkpoints, `raw` reconciled, every inclusion proof \
-             verified in ATL geometry",
+            "  [ok] {} ATL entries, {} checkpoints, `raw` reconciled, every sub-range of cp5 and \
+             the 5 -> 6 consistency proof verified",
             self.envelopes.len(),
             self.anchors.len() + 1
         );
@@ -496,6 +589,11 @@ impl AtlCorpus {
                         "cosignature": anchor.witness_entry(keys),
                     }))
                     .collect::<Vec<_>>(),
+                "consistency": {
+                    "from_size": 5,
+                    "to_size": 6,
+                    "path": self.consistency_path(5, 6),
+                },
             }),
         );
 
@@ -509,12 +607,13 @@ impl AtlCorpus {
         let policy = self.trust_policy(keys);
         let leaves = atl_leaves(&self.envelopes);
         let wrong_leaves = wrong_metadata_leaves(&self.envelopes);
-        let cp4 = self.anchor("cp4");
         let cp5 = self.anchor("cp5");
-        let record_a = self.record_a();
+        let cp6 = self.anchor("cp6");
+        let cp7 = self.anchor("cp7");
+        let records = self.record_subjects();
 
         let declared = |claim_type, subject_index, record_subject, note| {
-            declared_spec(cp4, &leaves, claim_type, subject_index, record_subject, note)
+            declared_spec(cp5, &leaves, claim_type, subject_index, record_subject, note)
         };
 
         let mut vectors: Vec<AtlVector> = Vec::new();
@@ -552,7 +651,7 @@ impl AtlCorpus {
                 &declared(
                     "record-ingested",
                     1,
-                    Some((DS_CUSTOMERS, &record_a)),
+                    Some((DS_CUSTOMERS, &records.0)),
                     "The entry-1 ingestion introduced record A into `customers`, proven under \
                      the ATL binding. `content_binding` is `none`: what this vector is about is \
                      the anchoring geometry, and the content-binding rules are §2.6's, identical \
@@ -560,6 +659,137 @@ impl AtlCorpus {
                 ),
             ),
             None,
+        ));
+
+        // --- enumerated governance in §10 geometry ------------------------------------
+        let currency = self.enumeration(0, 5, cp5, &leaves);
+        vectors.push((
+            "governance-state-atl-profile.ahl",
+            self.receipt(
+                keys,
+                &AtlSpec {
+                    claim_type: "governance-state",
+                    subject_index: 0,
+                    record_subject: None,
+                    anchor: cp5,
+                    leaves: &leaves,
+                    chain: vec![0],
+                    currency_mode: "enumerated",
+                    currency_material: currency.clone(),
+                    claim_material: json!({ "target_index": 1 }),
+                    continued_history: false,
+                    note: "Enumerated governance currency over exactly [0, 5), authenticated by \
+                           an adaptor §10.4 range proof whose CARRIED LEAVES are hashed by the \
+                           §4.2 construction. The byte layout of the proof is the one the rest \
+                           of this corpus uses — §10.5 makes that deliberate, \"so a single \
+                           range-proof implementation serves both\" — and the leaf hashing is \
+                           the whole of the difference: a verifier that applied the other \
+                           profile's leaf rule would recompute a root the checkpoint does not \
+                           carry. §10 records that the published ATL server serves no \
+                           enumeration interface, so this is the material a mirror would serve \
+                           (core spec §3.5), assembled here by construction. §10.6 also rules \
+                           out typed-subset proofs under this binding, which is why the range is \
+                           the full prefix rather than the governance statements alone.",
+                },
+            ),
+            None,
+        ));
+
+        let introduction = self.receipt(
+            keys,
+            &declared(
+                "record-ingested",
+                1,
+                Some((DS_CUSTOMERS, &records.0)),
+                "Embedded introduction proof: establishes who may issue a trigger for this \
+                 record (receipt §3 authority note). It says nothing about the record's content.",
+            ),
+        );
+        let introduction_again = introduction.clone();
+        vectors.push((
+            "trigger-effective-atl-profile.ahl",
+            self.receipt(
+                keys,
+                &AtlSpec {
+                    claim_type: "trigger-effective",
+                    subject_index: 4,
+                    record_subject: Some((DS_CUSTOMERS, &records.0)),
+                    anchor: cp5,
+                    leaves: &leaves,
+                    chain: vec![0],
+                    currency_mode: "enumerated",
+                    currency_material: currency,
+                    claim_material: json!({
+                        "introduction": introduction,
+                        "checkpoint_C": cp5.checkpoint,
+                        "competing": { "corpus_range": self.enumeration(1, 5, cp5, &leaves) },
+                    }),
+                    continued_history: false,
+                    note: "The retraction of record A at entry 4 GOVERNS at cp5: it is signed by \
+                           the `customers` dataset authority the genesis manifest declares, and \
+                           the competing range — the introduction-fixed [1, 5) — carries every \
+                           other candidate the checkpoint commits. Both ranges are ATL range \
+                           proofs (§10.4), so this is the claim type that puts §4.2 leaf \
+                           construction through the enumerated path rather than only through an \
+                           inclusion path, and the embedded introduction puts it through an \
+                           embedded receipt's own anchoring as well.",
+                },
+            ),
+            None,
+        ));
+
+        // --- continued history in ATL form --------------------------------------------
+        let mut continued = self.receipt(
+            keys,
+            &AtlSpec {
+                claim_type: "statement-anchored",
+                subject_index: 3,
+                record_subject: None,
+                anchor: cp5,
+                leaves: &leaves,
+                chain: vec![0],
+                currency_mode: "declared",
+                currency_material: json!({}),
+                claim_material: json!({}),
+                continued_history: true,
+                note: "`assurance.continued_history` is true, and adaptor §8.3 is what backs it: \
+                       an RFC 9162 proof from cp5 to cp6, serialized as a JSON array of \
+                       `sha256:<hex>` family strings, carried beside a `later_checkpoint` in ATL \
+                       form. That later checkpoint is authenticated on its own terms — its own \
+                       98-byte blob signature under the log key the manifest version active for \
+                       ITS tree size declares (§7.5.1 4f), and its own cosignatures in \
+                       `anchoring.later_witnesses[]` rather than the primary checkpoint's. §8.3 \
+                       records that the published ATL server serves no consistency-proof route, \
+                       so a deployment must supply one; the proof here is generated from the \
+                       corpus, which is what a mirror holding the entries would do.",
+            },
+        );
+        continued["anchoring"]["later_checkpoint"] = cp6.checkpoint.clone();
+        continued["anchoring"]["later_witnesses"] = json!([cp6.witness_entry(keys)]);
+        continued["anchoring"]["consistency_path"] = json!(self.consistency_path(5, 6));
+        vectors.push(("statement-anchored-atl-continued-history.ahl", continued.clone(), None));
+
+        let mut malformed_path = continued;
+        malformed_path["anchoring"]["consistency_path"][0] = json!("not-a-family-string");
+        malformed_path["claim"]["note"] = json!(
+            "MUST FAIL. One element of `anchoring.consistency_path` is not a `sha256:<hex>` \
+             family string. Adaptor §8.3 fixes the serialization as \"a JSON array of \
+             `sha256:<hex>` family strings in the order produced by the RFC 9162 algorithm\", so \
+             an element outside that grammar is not a proof node a verifier may interpret — and \
+             `assurance.continued_history` is true if and only if both members are present AND \
+             verify, which this one cannot."
+        );
+        vectors.push((
+            "statement-anchored-atl-consistency-path-malformed-must-fail.ahl",
+            malformed_path,
+            Some((
+                "adaptor `ahl-adaptor-atl-v1` §8.3 — a consistency proof is an array of \
+                 `sha256:<hex>` family strings",
+                |e: &ReceiptError| {
+                    matches!(e, ReceiptError::Malformed(detail)
+                        if detail.contains("`anchoring.consistency_path[0]` is not a `sha256:`"))
+                },
+            )),
         ));
 
         // --- negatives on the leaf construction ---------------------------------------
@@ -599,6 +829,54 @@ impl AtlCorpus {
             )),
         ));
 
+        vectors.push((
+            "trigger-effective-atl-metadata-hash-must-fail.ahl",
+            self.receipt(
+                keys,
+                &AtlSpec {
+                    claim_type: "trigger-effective",
+                    subject_index: 4,
+                    record_subject: Some((DS_CUSTOMERS, &records.0)),
+                    anchor: cp5,
+                    leaves: &leaves,
+                    chain: vec![0],
+                    currency_mode: "enumerated",
+                    currency_material: self.enumeration(0, 5, cp5, &leaves),
+                    claim_material: json!({
+                        "introduction": introduction_again,
+                        "checkpoint_C": cp5.checkpoint,
+                        "competing": {
+                            "corpus_range": self.enumeration(1, 5, &self.wrong_metadata, &wrong_leaves),
+                        },
+                    }),
+                    continued_history: false,
+                    note: "MUST FAIL, and it is the enumerated half of the metadata rule. \
+                           Everything outside the competing range is impeccable: cp5 is genuine, \
+                           its `raw` reconciles, the subject's own inclusion path opens its root \
+                           under the §4.2 leaf rule, and the governance currency over [0, 5) is \
+                           the honest one. The competing range [1, 5) is the one thing built the \
+                           wrong way — a correctly constructed §10.4 proof over leaves hashed \
+                           with a metadata digest the profile does not pin, declaring the same \
+                           tree size and the same range as the honest one. §10.4 fixes the leaf \
+                           hash of a carried entry as the §4.2 construction, so a verifier \
+                           recomputes the carried envelopes' leaves with the pinned constant, \
+                           consumes the proof's subtree hashes at the positions the recursion \
+                           fixes, and gets a root cp5 does not carry. The range is a PROPER \
+                           sub-range on purpose: a full-prefix range carries no subtree hashes \
+                           at all, so its recomputation is the carried leaves' own root either \
+                           way and the substitution has nowhere to hide — which is why the \
+                           enumerated governance range cannot be the one that shows this.",
+                },
+            ),
+            Some((
+                "adaptor `ahl-adaptor-atl-v1` §10.4 — a range proof's carried leaves are hashed \
+                 by the §4.2 construction",
+                |e: &ReceiptError| {
+                    matches!(e, ReceiptError::RangeProofInvalid { what: "competing triggers", .. })
+                },
+            )),
+        ));
+
         // --- negatives on the pinned artifact -----------------------------------------
         let mut wrong_digest = self.receipt(
             keys,
@@ -633,21 +911,21 @@ impl AtlCorpus {
                 keys,
                 &AtlSpec {
                     claim_type: "statement-anchored",
-                    subject_index: 3,
+                    subject_index: 5,
                     record_subject: None,
-                    anchor: cp5,
+                    anchor: cp7,
                     leaves: &leaves,
-                    chain: vec![0, 4],
+                    chain: vec![0, 6],
                     currency_mode: "declared",
                     currency_material: json!({}),
                     claim_material: json!({}),
                     continued_history: false,
                     note: "MUST FAIL, and this is the one §14 is really about. Manifest version \
-                           2, anchored at entry 4, pins the SAME profile id at the digest of an \
+                           2, anchored at entry 6, pins the SAME profile id at the digest of an \
                            artifact this verifier does not hold — which is what a manifest \
                            pinning the unreleased draft, or the artifact eventually released \
                            under that id, looks like to a verifier holding the stand-in. The \
-                           manifest is genuinely signed, its lineage is correct, and cp5 is a \
+                           manifest is genuinely signed, its lineage is correct, and cp7 is a \
                            genuine checkpoint of this log; none of that helps. I-D §7.5 step 2 \
                            resolves the profile from local possession by {id, digest} before any \
                            carried material is verified, and a held artifact whose digest \
@@ -680,7 +958,7 @@ impl AtlCorpus {
                  an unreconciled `raw` could present a verifier with values the log never signed.",
             ),
         );
-        raw_mismatch["anchoring"]["checkpoint"]["raw"] = wrong_size_raw(&cp4.checkpoint);
+        raw_mismatch["anchoring"]["checkpoint"]["raw"] = wrong_size_raw(&cp5.checkpoint);
         vectors.push((
             "statement-anchored-atl-raw-mismatch-must-fail.ahl",
             raw_mismatch,
@@ -779,12 +1057,16 @@ impl AtlCorpus {
         );
     }
 
-    /// The commitment of record A, ingested at entry 1.
-    fn record_a(&self) -> String {
-        self.envelopes[1]["payload"]["record"]
-            .as_str()
-            .expect("an ingestion names its record")
-            .to_owned()
+    /// The record commitments this corpus names: record A (ingested at entry 1, retracted at
+    /// entry 4) and record C (ingested at entry 5).
+    fn record_subjects(&self) -> (String, String) {
+        let read = |index: usize| {
+            self.envelopes[index]["payload"]["record"]
+                .as_str()
+                .expect("an ingestion names its record")
+                .to_owned()
+        };
+        (read(1), read(5))
     }
 }
 

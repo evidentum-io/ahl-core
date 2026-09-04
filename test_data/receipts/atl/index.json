@@ -36,12 +36,46 @@
       "file": "record-ingested-atl-profile.ahl"
     },
     {
+      "boundary": "the manifest and key state active at the target index is exactly the presented chain; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "governance-state",
+      "expect": "verified",
+      "file": "governance-state-atl-profile.ahl"
+    },
+    {
+      "boundary": "the trigger governs the record at the stated checkpoint, its issuer's authority held under enumerated governance; anchored under a witness-cosigned checkpoint; no claim of continued append-only history beyond that checkpoint; record content not verified",
+      "claim_type": "trigger-effective",
+      "expect": "verified",
+      "file": "trigger-effective-atl-profile.ahl"
+    },
+    {
+      "boundary": "the subject envelope is anchored at the stated entry index and signed under the producer-declared manifest chain; anchored under a witness-cosigned checkpoint; the log's history continued to be append-only through the later checkpoint carried, which is not evidence that every checkpoint the cadence required was published; record content not verified",
+      "claim_type": "statement-anchored",
+      "expect": "verified",
+      "file": "statement-anchored-atl-continued-history.ahl"
+    },
+    {
+      "claim_type": "statement-anchored",
+      "expect": "invalid",
+      "file": "statement-anchored-atl-consistency-path-malformed-must-fail.ahl",
+      "finding": "structure",
+      "reason": "malformed receipt: `anchoring.consistency_path[0]` is not a `sha256:` family string in lowercase hex (I-D §2.1, §7.1)",
+      "rule": "adaptor `ahl-adaptor-atl-v1` §8.3 — a consistency proof is an array of `sha256:<hex>` family strings"
+    },
+    {
       "claim_type": "statement-anchored",
       "expect": "invalid",
       "file": "statement-anchored-atl-metadata-hash-must-fail.ahl",
       "finding": "anchoring",
       "reason": "inclusion path for subject did not verify against the anchored root",
       "rule": "adaptor `ahl-adaptor-atl-v1` §4.2 — the ATL metadata digest is a fixed constant of the profile"
+    },
+    {
+      "claim_type": "trigger-effective",
+      "expect": "invalid",
+      "file": "trigger-effective-atl-metadata-hash-must-fail.ahl",
+      "finding": "claim-material",
+      "reason": "range proof for competing triggers did not verify: recomputed root differs from the checkpoint root",
+      "rule": "adaptor `ahl-adaptor-atl-v1` §10.4 — a range proof's carried leaves are hashed by the §4.2 construction"
     },
     {
       "claim_type": "statement-anchored",

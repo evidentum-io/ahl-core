@@ -611,9 +611,45 @@ repository is not a build input of this crate, which is the point.
     under it stays a profile limitation and a policy claiming `checkpoint_raw` for it is still a
     configuration error.
 
+### Enumeration and continued history
+
+Both go through the same leaf change, so both are exercised over receipts rather than helpers.
+
+`governance-state-atl-profile.ahl` carries enumerated governance currency over exactly
+`[0, tree_size(C))`, authenticated by an adaptor §10.4 range proof whose carried leaves are
+hashed by the §4.2 construction. The proof's byte layout is the one the rest of this corpus uses
+— §10.5 makes that deliberate, "so a single range-proof implementation serves both" — and the
+leaf hashing is the whole of the difference. §10.6 rules out typed-subset proofs under this
+binding, which is why the range is the full prefix rather than the governance statements alone.
+`trigger-effective-atl-profile.ahl` adds a proper sub-range: the retraction of record A at entry
+4 governs at cp5, against the introduction-fixed competing range `[1, 5)`, with the introduction
+carried as an embedded receipt of its own.
+
+`trigger-effective-atl-metadata-hash-must-fail.ahl` is the enumerated half of the metadata rule,
+and it has to be the COMPETING range rather than the governance one: a full-prefix range carries
+no subtree hashes at all, so its recomputation is the carried leaves' own root either way and a
+substituted leaf rule has nowhere to hide. Over `[1, 5)` the proof's subtree hashes are consumed
+at positions the recursion fixes before any node is read, and a verifier recomputing the carried
+envelopes' leaves with the pinned constant gets a root cp5 does not carry.
+
+`statement-anchored-atl-continued-history.ahl` asserts `continued_history: true`, backed by an
+RFC 9162 proof from cp5 to cp6 (§8.3) beside a `later_checkpoint` in ATL form with its own
+`later_witnesses`. That later checkpoint is authenticated on its own terms: its own 98-byte blob
+signature under the log key the manifest version active for ITS tree size declares (§7.5.1 4f),
+its own `raw` reconciliation, and its own cosignatures.
+`statement-anchored-atl-consistency-path-malformed-must-fail.ahl` puts one element outside §8.3's
+grammar — "a JSON array of `sha256:<hex>` family strings" — and is refused, because
+`continued_history` is true if and only if both members are present AND verify.
+
+Adaptor §10.1 and §8.3 record that the published ATL server serves neither an enumeration
+interface nor a consistency-proof route, and name both as deployment obligations. The material
+here is therefore what a **mirror** would serve — corpus material under core spec §3.5, published
+outside producer control — assembled by construction rather than fetched.
+
 ### The positives, and the rest of the negatives
 
-`statement-anchored-atl-profile.ahl` and `record-ingested-atl-profile.ahl` are the positives. `statement-anchored-atl-profile-digest-must-fail.ahl` pins a digest the held artifact
+`statement-anchored-atl-profile.ahl` and `record-ingested-atl-profile.ahl` are the plain
+positives. `statement-anchored-atl-profile-digest-must-fail.ahl` pins a digest the held artifact
 does not recompute to — §14 requires resolution by `{id, digest}` with the digest recomputed over
 the artifact, and I-D §7.5 step 2 makes that disagreement `invalid` rather than a capability gap.
 The gap itself — a verifier holding NO artifact under that id, which is `unverifiable` — is

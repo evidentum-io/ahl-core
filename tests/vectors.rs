@@ -6558,3 +6558,86 @@ fn the_atl_corpus_pins_a_stand_in_and_never_the_unreleased_profile() {
         report.findings
     );
 }
+
+/// Adaptor §10.4-§10.5 and §8.3 under the ATL binding, over receipts rather than helpers.
+///
+/// Round 1 left every ATL receipt `declared` with `continued_history: false`, so the §4.2 leaf
+/// construction never ran through the enumerated path and no ATL `later_checkpoint` was ever
+/// authenticated. These two vectors are what put both through it.
+#[test]
+fn atl_enumeration_and_continued_history_run_through_the_profile() {
+    let policy = atl_trust_policy();
+
+    // Enumerated governance currency over exactly [0, tree_size(C)), authenticated by a §10.4
+    // range proof whose carried leaves are §4.2's.
+    let (_, enumerated) = read_atl_receipt("governance-state-atl-profile.ahl");
+    let report = verify_receipt_report(&enumerated, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    assert_eq!(enumerated["claim"]["assurance"]["governance"], json!("enumerated"));
+    let material = &enumerated["governance"]["currency"]["material"];
+    assert_eq!(material["range"]["from_index"], json!(0));
+    assert_eq!(
+        material["range"]["to_index"], enumerated["anchoring"]["checkpoint"]["tree_size"],
+        "§4 fixes enumerated material at exactly [0, tree_size(C))"
+    );
+    assert!(field_str(&material["range_proof"], "adaptor_form")
+        .expect("adaptor_form")
+        .starts_with("base64:"));
+
+    // A trigger proven effective over an ATL competing range — a PROPER sub-range, so the proof
+    // actually carries subtree hashes.
+    let (_, trigger) = read_atl_receipt("trigger-effective-atl-profile.ahl");
+    let report = verify_receipt_report(&trigger, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    let competing = &trigger["claim_material"]["competing"]["corpus_range"];
+    assert_eq!(competing["range"]["from_index"], json!(1));
+    assert!(
+        competing["entries"].as_array().expect("entries").len() < 5,
+        "the competing range must be a proper sub-range"
+    );
+
+    // The same range built over leaves hashed with a metadata digest the profile does not pin
+    // is refused — which is what shows the enumerated path dispatches the leaf rule at all.
+    let (_, wrong) = read_atl_receipt("trigger-effective-atl-metadata-hash-must-fail.ahl");
+    assert!(matches!(
+        verify_receipt(&wrong, &policy),
+        Err(ReceiptError::RangeProofInvalid { what: "competing triggers", .. })
+    ));
+
+    // `continued_history: true`, backed by an ATL `later_checkpoint` with its own 98-byte blob
+    // signature, its own cosignatures, and an RFC 9162 proof between the two sizes.
+    let (_, continued) = read_atl_receipt("statement-anchored-atl-continued-history.ahl");
+    let report = verify_receipt_report(&continued, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Verified, "{:#?}", report.findings);
+    assert_eq!(continued["claim"]["assurance"]["continued_history"], json!(true));
+    let anchoring = &continued["anchoring"];
+    let later = &anchoring["later_checkpoint"];
+    assert!(
+        later["tree_size"].as_u64() > anchoring["checkpoint"]["tree_size"].as_u64(),
+        "the later checkpoint must extend the primary one"
+    );
+    assert_eq!(anchoring["later_witnesses"].as_array().expect("later_witnesses").len(), 1);
+    let later_blob = atl_checkpoint_blob_from_json(later).expect("well-formed checkpoint");
+    let log_key = &continued["keys"]["log"][0];
+    assert!(
+        verify_signature(
+            &decode_pubkey(field_str(log_key, "pubkey").expect("pubkey")).expect("pubkey"),
+            &later_blob,
+            field_str(later, "signature").expect("signature"),
+        )
+        .expect("well-formed signature"),
+        "the later checkpoint is signed over its OWN 98-byte blob"
+    );
+    reconcile_atl_checkpoint_raw(later, field_str(later, "raw").expect("§6.4 raw"))
+        .expect("the later checkpoint's raw must reconcile too");
+    for element in strings(&anchoring["consistency_path"]) {
+        parse_hash_hex(&element).expect("§8.3: every element is a `sha256:<hex>` family string");
+    }
+
+    // And the negative: one element outside that grammar is not a proof node a verifier may
+    // interpret, so `continued_history` cannot be true.
+    let (_, malformed) =
+        read_atl_receipt("statement-anchored-atl-consistency-path-malformed-must-fail.ahl");
+    let report = verify_receipt_report(&malformed, &policy).expect("the run completes");
+    assert_eq!(report.result, Outcome::Invalid, "{:#?}", report.findings);
+}
