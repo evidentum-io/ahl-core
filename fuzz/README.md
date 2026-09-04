@@ -4,11 +4,11 @@ Three libFuzzer targets, one per parser the crate exposes to untrusted bytes. `e
 arbitrary bytes to JSON and then through the two I-D §2.1 identifiers and the envelope
 signature check; `receipt` takes them through `verify_receipt_report` and `verify_receipt`
 under the corpus trust policy of `test_data/receipts/index.json`, with the limits tightened to
-256 KiB and 5 000 work units so no single input runs long; `manifest` splices the fuzzed value
-into the genesis element of a real receipt's `governance.chain[]` and recomputes the anchor, so
-any payload at all reaches the manifest and key statement schema validation the §7.5.1
-governance walk runs — there is no standalone entry point for it, and this target reaches it
-through the walk rather than inventing one. All three handle every `Result` and index nothing;
+256 KiB and 5 000 work units so no single input runs long; `manifest` calls the feature-gated seam
+`receipt::validate_governance_payload` directly (`--features fuzzing`), so any payload at all
+reaches the manifest and key statement FORM validation the §7.5.1 4b walk applies; it does not
+exercise chain authentication — §7.5 step 3 verifies each hop's inclusion path before a payload
+is read, which is why a receipt-level harness never reaches this schema. All three handle every `Result` and index nothing;
 a panic reported by one is a defect in the library, never in the harness.
 
 Run them on nightly (libFuzzer needs it), passing the committed seeds as a second corpus
