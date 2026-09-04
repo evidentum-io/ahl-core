@@ -60,6 +60,17 @@ jobs:
       # install; the host target is what the fuzz crate is built against locally as well.
       - run: cargo fuzz build --target x86_64-unknown-linux-gnu
 
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   determinism:
     name: Vector determinism
     runs-on: ubuntu-latest
