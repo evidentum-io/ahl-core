@@ -668,8 +668,9 @@ cargo llvm-cov --all-features --fail-under-lines 90
 ## Anti-drift with atl-core
 
 AHL is a sibling of ATL (Anchored Transparency Log), and their Merkle semantics must not drift
-apart. The crate depends on [`atl-core`](https://github.com/evidentum-io/atl-core) pinned to an
-exact revision and — normatively — **verifies every inclusion proof through
+apart. The crate depends on [`atl-core`](https://github.com/evidentum-io/atl-core) at the exact
+registry version `=0.23.2` — identical to git tag v0.23.2, which this crate formerly pinned by
+rev `79ac9c085857` — and — normatively — **verifies every inclusion proof through
 `atl_core::core::merkle::verify_inclusion`**, never through a local reimplementation.
 Canonicalization (RFC 8785 JCS), node hashing, root computation and proof generation come from
 the same place.

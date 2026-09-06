@@ -29,8 +29,9 @@ programmatically to arbitrary depth is not and is outside the claim; total work 
 the I-D §7.8 decoded-size budget (`Limits::max_decoded_bytes`), enforced over the canonical
 form of the whole receipt after the top-level version read (I-D §7.5 step 1) and before every
 remaining semantic and cryptographic check; and `atl-core` —
-the pinned sibling that performs canonicalization, node hashing and proof verification — is
-not covered, because the claim is about this crate's own code.
+the sibling pinned at the exact registry version `=0.23.2`, which performs canonicalization,
+node hashing and proof verification — is not covered, because the claim is about this crate's
+own code.
 
 ## The ATL adaptor profile
 

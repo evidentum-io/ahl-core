@@ -6293,10 +6293,11 @@ fn atl_trust_policy() -> TrustPolicy {
             .iter()
             .map(|(id, profile)| {
                 let capabilities = &profile["capabilities"];
-                // The ATL index names the artifact it holds, because what it holds is a STAND-IN
-                // rather than a document named after the profile id — the profile is unreleased
-                // and §14 forbids pinning it. As with the main policy the bytes are read from
-                // disk and the digest recomputed, never taken from the recorded hash string.
+                // The ATL index names the artifact it holds, because the corpus binds a profile
+                // of its own rather than the released `ahl-adaptor-atl-v1` — whose artifact the
+                // crate ships, and which this policy is deliberately not configured with. As
+                // with the main policy the bytes are read from disk and the digest recomputed,
+                // never taken from the recorded hash string.
                 let held = field_str(profile, "document").expect("the artifact policy holds");
                 let document = std::fs::read(test_data().join(held))
                     .unwrap_or_else(|e| panic!("read held artifact for `{id}`: {e}"));
@@ -6509,7 +6510,11 @@ fn the_atl_corpus_pins_its_own_profile_under_its_own_id() {
     );
     for required in [
         "**This profile is not that profile**",
-        "is not a copy, revision, stand-in or\npre-release of it",
+        "is not a copy,\nrevision, stand-in or substitute for it",
+        // It names the released profile it takes the shape from, and pins that profile's digest
+        // to the artifact shipped beside it — the same constant the library exposes.
+        "shipped verbatim beside this file\nat `profiles/ahl-adaptor-atl-v1.md`",
+        ATL_PROFILE_DIGEST,
         "any change to this file produces a\ndifferent hash and therefore a different profile",
     ] {
         assert!(text.contains(required), "the document must state: {required}");

@@ -700,8 +700,9 @@ cargo llvm-cov --all-features --fail-under-lines 90
 ## Anti-drift with atl-core
 
 AHL is a sibling of ATL (Anchored Transparency Log), and their Merkle semantics must not drift
-apart. The crate depends on [`atl-core`](https://github.com/evidentum-io/atl-core) pinned to an
-exact revision and — normatively — **verifies every inclusion proof through
+apart. The crate depends on [`atl-core`](https://github.com/evidentum-io/atl-core) at the exact
+registry version `=0.23.2` — identical to git tag v0.23.2, which this crate formerly pinned by
+rev `79ac9c085857` — and — normatively — **verifies every inclusion proof through
 `atl_core::core::merkle::verify_inclusion`**, never through a local reimplementation.
 Canonicalization (RFC 8785 JCS), node hashing, root computation and proof generation come from
 the same place.
@@ -741,9 +742,10 @@ check.
 /// A profile of its own, under an id of its own. `ahl-adaptor-atl-v1` §14 makes a profile's
 /// identity its bytes — "any change to this document, however small, produces a different hash
 /// and therefore a different profile. A changed profile MUST be published under a new id" — so
-/// a document that is not that artifact may not be published under that id, whatever it says
-/// about itself and whatever a local policy holds. This one takes the SHAPE from the ATL adaptor
-/// draft, cites it as the source, and states every rule as its own.
+/// the only document that may carry that id is the released artifact, which the crate ships at
+/// `test_data/profiles/ahl-adaptor-atl-v1.md`. This one takes the SHAPE from that profile, cites
+/// it as the source, and states every rule as its own, so the toy corpus is pinned to an
+/// artifact it may actually publish.
 pub const TEST_ATL_PROFILE_DOC: &str = r#"# Adaptor profile `ahl-test-atl-leaf-v1`
 
 **Status:** test profile for the AHL Protocol conformance corpus.
@@ -761,15 +763,23 @@ stated below, as a rule of THIS profile.
 ## Relationship to `ahl-adaptor-atl-v1`
 
 The serialization defined here has the same shape as the one the AHL adaptor profile
-`ahl-adaptor-atl-v1` defines for the Anchored Transparency Log, and that draft is the source the
-shape was taken from. **This profile is not that profile**, is not a copy, revision, stand-in or
-pre-release of it, and asserts nothing about it. Two consequences are worth being explicit about:
+`ahl-adaptor-atl-v1` defines for the Anchored Transparency Log, and that profile is the source
+the shape was taken from. It is released, published at
+<https://ahl-protocol.org/profiles/ahl-adaptor-atl-v1.md> and shipped verbatim beside this file
+at `profiles/ahl-adaptor-atl-v1.md`. **This profile is not that profile**, is not a copy,
+revision, stand-in or substitute for it, and asserts nothing about it.
+
+This profile exists so that the conformance corpus is pinned to an artifact it may actually
+publish. The corpus's checkpoints are signed by a toy key over a toy tree, so binding them to
+`ahl-adaptor-atl-v1` would assert a conformance claim the corpus cannot make — the shape is
+shared, the claim is not. Two consequences are worth being explicit about:
 
 - A receipt or manifest pinning `ahl-adaptor-atl-v1` is pinning that profile and its released
   artifact, and does not resolve against a verifier that holds only this document. That is the
   correct outcome and not a limitation of either profile.
-- Should `ahl-adaptor-atl-v1` be released, its digest is the digest of ITS artifact. Nothing here
-  predicts it, stands in for it, or may be substituted for it.
+- The digest of `ahl-adaptor-atl-v1` is the digest of ITS artifact, and is
+  `sha256:80a7defdd934242fb4986b2868f4553f0a245995c96ffe543baff59f6bb805aa`. Nothing here stands
+  in for it or may be substituted for it.
 
 The identity rule this profile lives under is the same one: any change to this file produces a
 different hash and therefore a different profile, which MUST be published under a new id. The

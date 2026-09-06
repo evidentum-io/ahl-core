@@ -8,12 +8,12 @@
           "consistency_proofs": true
         },
         "document": "profiles/ahl-test-atl-leaf-v1.md",
-        "hash": "sha256:028ffd43b43a4e088bbb65ad9c6898fd173c59160772b48f157da7b62ace11c0",
+        "hash": "sha256:924d106f7888719318aaa717e9ddc4b6a207eee8fabbdd81f141514bf2de85dd",
         "note": "The artifact held under this id is the document at `document`, which defines this profile's own serialization. Its shape is the one adaptor profile `ahl-adaptor-atl-v1` defines, cited there as the source; it is not that profile, and no artifact under that id is held by this policy at all. A receipt pinning `ahl-adaptor-atl-v1` is therefore `unverifiable` here — the profile is not held (I-D §7.5 step 2) — while a receipt pinning THIS id at a digest this document does not recompute to is `invalid`, which `statement-anchored-atl-unheld-manifest-pin-must-fail.ahl` shows."
       }
     },
     "dataset_keys": {},
-    "genesis_entry_id": "sha256:1115d3afd3edb87fdefb4c83b2eac8e5f4490c5dcb0c01329e2826648f9f2e40",
+    "genesis_entry_id": "sha256:e81616bf05155beaf99aee46abf95f94a76a5fc96744a074e628c98cf5ee556e",
     "genesis_key_ids": [
       "sha256:34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e"
     ],
