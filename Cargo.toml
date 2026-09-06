@@ -1,11 +1,12 @@
 [package]
 name = "ahl-core"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.92"
 license = "Apache-2.0"
 description = "Core library and test vectors for AHL Protocol (Anchored History Log)"
 repository = "https://github.com/evidentum-io/ahl-core"
+homepage = "https://ahl-protocol.org/implementations/ahl-core"
 readme = "README.md"
 categories = ["cryptography", "data-structures"]
 keywords = ["provenance", "transparency-log", "merkle-tree", "test-vectors"]
@@ -22,8 +23,13 @@ fuzzing = []
 
 [dependencies]
 # Anti-drift: JCS canonicalization, RFC 6962-style node hashing, and - normatively -
-# inclusion-proof verification come from the audited sibling implementation, pinned by rev.
-atl-core = { git = "https://github.com/evidentum-io/atl-core", rev = "79ac9c085857", default-features = false }
+# inclusion-proof verification come from the audited sibling implementation, taken from the
+# registry at the EXACT version `=0.23.2` - identical to git tag v0.23.2, which this crate
+# formerly pinned by rev 79ac9c085857. The `=` is the point: a caret requirement would let a
+# 0.23.3 that never existed when these vectors were generated supply the node hashing every
+# committed root depends on. A crate carrying a git dependency cannot be published, which is
+# why the rev pin could not stay.
+atl-core = { version = "=0.23.2", default-features = false }
 sha2 = "0.10"
 hmac = "0.12"
 ed25519-dalek = "2"
@@ -48,9 +54,9 @@ nursery = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
 # `syn` resolves to both 2.x and 3.x: `serde_derive` has moved to syn 3, while `thiserror` 1.x
 # still uses syn 2 — and `thiserror` 1.x arrives both directly and through `atl-core`, which is
-# a read-only sibling pinned by revision. Nothing in this crate can reconcile that, so the lint
-# is allowed here, visibly, rather than left as a standing CI failure. Revisit when the pinned
-# `atl-core` revision moves to `thiserror` 2.
+# a read-only sibling pinned to the exact registry version `=0.23.2`. Nothing in this crate can
+# reconcile that, so the lint is allowed here, visibly, rather than left as a standing CI
+# failure. Revisit when the pinned `atl-core` version moves to `thiserror` 2.
 multiple_crate_versions = "allow"
 # No-panic policy: library code reaches no panicking construct on any input. Every one of
 # these is a way a library function could abort the caller's process instead of returning a

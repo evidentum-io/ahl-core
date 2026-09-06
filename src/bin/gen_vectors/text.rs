@@ -292,7 +292,7 @@ two different bindings, which is the case receipt key binding is tolerant for.
 | Path | Contents |
 | --- | --- |
 | `adaptor/` | The test adaptor profile document `ahl-test-log-v1.md`, content-addressed and pinned by every manifest version of the main corpus |
-| `profiles/` | `ahl-test-atl-leaf-v1.md` — this corpus's own ATL-shaped adaptor profile, content-addressed and pinned by the ATL-bound corpus's manifest versions |
+| `profiles/` | `ahl-test-atl-leaf-v1.md` — this corpus's own ATL-shaped adaptor profile, content-addressed and pinned by the ATL-bound corpus's manifest versions; `ahl-adaptor-atl-v1.md` — the released ATL binding, shipped verbatim for clients and pinned by no vector here (see "Which profile this corpus pins") |
 | `vectors/statements/` | The toy corpus's anchored envelopes, plus malformed statements naming the rule each violates |
 | `vectors/merkle/` | Log tree (entry-index order, never sorted), the record-sorted batch, wide-outputs, input-set and disposition trees, and authenticated range proofs |
 | `vectors/checkpoints/` | Signed checkpoints at the tree sizes the scenarios need, each signed by the log key its active manifest version declares and cosigned by that version's witness — EXCEPT cp26 and cp56, deliberately signed and cosigned under the OUTGOING state for the I-D §7.1 rotation-anchoring proofs at manifest v2 (witness set) and manifest v4 (log key); see "Governance-key rotation" below |
@@ -561,28 +561,36 @@ both profiles.
 **`ahl-test-atl-leaf-v1`, which is this corpus's own profile, with its own document at
 `profiles/ahl-test-atl-leaf-v1.md`.** That document defines the leaf construction, the 98-byte
 checkpoint blob, the `raw` framing, the origin-derived log id, the tree geometry and the range
-form AS ITS OWN rules; it cites the ATL adaptor draft as the source of the shape and claims
+form AS ITS OWN rules; it cites the ATL adaptor profile as the source of the shape and claims
 nothing about being it. A verifier reading only that file is complete, as core spec §3 item 6
 requires.
 
-It is deliberately NOT published under `ahl-adaptor-atl-v1`, and the reason is that profile's
-own §14: "Any change to this document, however small, produces a different hash and therefore a
-different profile. A changed profile MUST be published under a new id." A profile's identity is
-its bytes. No document a corpus could ship is that artifact, so shipping one under that id would
-be a conformance violation whatever the document said about itself — a label reading "test only"
-does not change the bytes, and neither does the fact that the policy holding it is local. This
-crate therefore ships no artifact under that id at all.
+The corpus deliberately does not bind its log to `ahl-adaptor-atl-v1`, and the reason is that
+profile's own §14: "Any change to this document, however small, produces a different hash and
+therefore a different profile. A changed profile MUST be published under a new id." A profile's
+identity is its bytes, so the only thing that may carry that id is the released artifact itself,
+and a toy log pinning it would assert a conformance claim it cannot make — these checkpoints are
+signed by a toy key over a toy tree. A label reading "test only" would not change either fact.
+
+The released artifact IS shipped, at `profiles/ahl-adaptor-atl-v1.md`, byte for byte as
+released — 110 320 bytes,
+`sha256:80a7defdd934242fb4986b2868f4553f0a245995c96ffe543baff59f6bb805aa` — so that a client
+pinning the real profile can take `{id, digest}` from the crate rather than fetch a document to
+learn its own digest. The library exposes the same bytes as `ahl_core::ATL_PROFILE_DOCUMENT` and
+the digest as `ahl_core::ATL_PROFILE_DIGEST`, and a unit test recomputes one from the other.
+Shipping an artifact is not configuring a policy: this corpus's policy is configured with the
+test profile alone.
 
 The verifier implements both ids on one code path, because what differs between them is which
 ARTIFACT a policy must hold, never how a checkpoint is signed or a leaf is built. A verifier
-holding the released `ahl-adaptor-atl-v1` artifact resolves that id and verifies normally. This
-corpus's policy holds no artifact under it, so a receipt pinning it here — at any digest — is
-`unverifiable` on `adaptor-profile`: I-D §7.5 step 2 says "if the verifier possesses NO profile
-under that id, it lacks a capability", which is a gap in this verifier's configuration rather
-than a defect of the receipt. `tests/vectors.rs` asserts exactly that, beside the neighbouring
-rule that IS a defect — `statement-anchored-atl-unheld-manifest-pin-must-fail.ahl`, where entry
-4's manifest pins THIS id at a digest the held document does not recompute to, and §7.5 step 2's
-"decidable from the bytes in hand" makes it `invalid`.
+configured with the released `ahl-adaptor-atl-v1` artifact resolves that id and verifies
+normally. This corpus's policy holds no artifact under it, so a receipt pinning it here — at any
+digest — is `unverifiable` on `adaptor-profile`: I-D §7.5 step 2 says "if the verifier possesses
+NO profile under that id, it lacks a capability", which is a gap in this verifier's configuration
+rather than a defect of the receipt. `tests/vectors.rs` asserts exactly that, beside the
+neighbouring rule that IS a defect — `statement-anchored-atl-unheld-manifest-pin-must-fail.ahl`,
+where entry 4's manifest pins THIS id at a digest the held document does not recompute to, and
+§7.5 step 2's "decidable from the bytes in hand" makes it `invalid`.
 
 ### The three serializations
 
@@ -640,7 +648,7 @@ signature under the log key the manifest version active for ITS tree size declar
 grammar — "a JSON array of `sha256:<hex>` family strings" — and is refused, because
 `continued_history` is true if and only if both members are present AND verify.
 
-The ATL adaptor draft records that the published ATL server serves neither an enumeration
+The ATL adaptor profile records that the published ATL server serves neither an enumeration
 interface nor a consistency-proof route, and names both as deployment obligations. The material
 here is therefore what a **mirror** would serve — corpus material under core spec §3.5, published
 outside producer control — assembled by construction rather than fetched.
@@ -692,8 +700,9 @@ cargo llvm-cov --all-features --fail-under-lines 90
 ## Anti-drift with atl-core
 
 AHL is a sibling of ATL (Anchored Transparency Log), and their Merkle semantics must not drift
-apart. The crate depends on [`atl-core`](https://github.com/evidentum-io/atl-core) pinned to an
-exact revision and — normatively — **verifies every inclusion proof through
+apart. The crate depends on [`atl-core`](https://github.com/evidentum-io/atl-core) at the exact
+registry version `=0.23.2` — identical to git tag v0.23.2, which this crate formerly pinned by
+rev `79ac9c085857` — and — normatively — **verifies every inclusion proof through
 `atl_core::core::merkle::verify_inclusion`**, never through a local reimplementation.
 Canonicalization (RFC 8785 JCS), node hashing, root computation and proof generation come from
 the same place.
@@ -733,9 +742,10 @@ check.
 /// A profile of its own, under an id of its own. `ahl-adaptor-atl-v1` §14 makes a profile's
 /// identity its bytes — "any change to this document, however small, produces a different hash
 /// and therefore a different profile. A changed profile MUST be published under a new id" — so
-/// a document that is not that artifact may not be published under that id, whatever it says
-/// about itself and whatever a local policy holds. This one takes the SHAPE from the ATL adaptor
-/// draft, cites it as the source, and states every rule as its own.
+/// the only document that may carry that id is the released artifact, which the crate ships at
+/// `test_data/profiles/ahl-adaptor-atl-v1.md`. This one takes the SHAPE from that profile, cites
+/// it as the source, and states every rule as its own, so the toy corpus is pinned to an
+/// artifact it may actually publish.
 pub const TEST_ATL_PROFILE_DOC: &str = r#"# Adaptor profile `ahl-test-atl-leaf-v1`
 
 **Status:** test profile for the AHL Protocol conformance corpus.
@@ -753,15 +763,23 @@ stated below, as a rule of THIS profile.
 ## Relationship to `ahl-adaptor-atl-v1`
 
 The serialization defined here has the same shape as the one the AHL adaptor profile
-`ahl-adaptor-atl-v1` defines for the Anchored Transparency Log, and that draft is the source the
-shape was taken from. **This profile is not that profile**, is not a copy, revision, stand-in or
-pre-release of it, and asserts nothing about it. Two consequences are worth being explicit about:
+`ahl-adaptor-atl-v1` defines for the Anchored Transparency Log, and that profile is the source
+the shape was taken from. It is released, published at
+<https://ahl-protocol.org/profiles/ahl-adaptor-atl-v1.md> and shipped verbatim beside this file
+at `profiles/ahl-adaptor-atl-v1.md`. **This profile is not that profile**, is not a copy,
+revision, stand-in or substitute for it, and asserts nothing about it.
+
+This profile exists so that the conformance corpus is pinned to an artifact it may actually
+publish. The corpus's checkpoints are signed by a toy key over a toy tree, so binding them to
+`ahl-adaptor-atl-v1` would assert a conformance claim the corpus cannot make — the shape is
+shared, the claim is not. Two consequences are worth being explicit about:
 
 - A receipt or manifest pinning `ahl-adaptor-atl-v1` is pinning that profile and its released
   artifact, and does not resolve against a verifier that holds only this document. That is the
   correct outcome and not a limitation of either profile.
-- Should `ahl-adaptor-atl-v1` be released, its digest is the digest of ITS artifact. Nothing here
-  predicts it, stands in for it, or may be substituted for it.
+- The digest of `ahl-adaptor-atl-v1` is the digest of ITS artifact, and is
+  `sha256:80a7defdd934242fb4986b2868f4553f0a245995c96ffe543baff59f6bb805aa`. Nothing here stands
+  in for it or may be substituted for it.
 
 The identity rule this profile lives under is the same one: any change to this file produces a
 different hash and therefore a different profile, which MUST be published under a new id. The

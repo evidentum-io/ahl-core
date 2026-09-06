@@ -56,7 +56,8 @@ fn main() {
 
     // A second toy log, bound to the ATL-shaped test profile `ahl-test-atl-leaf-v1` — the
     // pieces such a profile serializes differently, exercised end to end rather than at the
-    // unit level. The crate ships no artifact under `ahl-adaptor-atl-v1` (adaptor §14).
+    // unit level. The corpus binds the test profile, never `ahl-adaptor-atl-v1`, whose released
+    // artifact the crate ships for clients but which no toy log may claim (adaptor §14).
     let atl = atl::AtlCorpus::build(&keys, &corpus.records, &root);
     atl.self_check(&keys);
     atl.write(&keys, &root);

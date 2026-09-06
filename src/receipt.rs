@@ -2628,12 +2628,14 @@ fn checkpoint_object(value: &Value) -> Result<&Value> {
 /// one of them.
 ///
 /// **What separates the two ATL-shaped ids is the ARTIFACT, not the procedure.**
-/// `ahl-adaptor-atl-v1` is the ATL binding, and this crate ships NO document for it: its own §14
-/// makes the digest the SHA-256 over the released artifact's exact bytes and adds that "any
-/// change to this document, however small, produces a different hash and therefore a different
-/// profile. A changed profile MUST be published under a new id." A verifier holding the released
-/// artifact resolves that id normally; a verifier holding nothing under it reports I-D §7.5 step
-/// 2's `unverifiable`, which is what this crate's own corpus policy does.
+/// `ahl-adaptor-atl-v1` is the ATL binding; its own §14 makes the digest the SHA-256 over the
+/// released artifact's exact bytes and adds that "any change to this document, however small,
+/// produces a different hash and therefore a different profile. A changed profile MUST be
+/// published under a new id." That artifact is released, and this crate ships it verbatim as
+/// [`crate::ATL_PROFILE_DOCUMENT`] at [`crate::ATL_PROFILE_DIGEST`], so a policy can be
+/// configured with the real profile from the crate. A verifier holding it resolves that id
+/// normally; a verifier holding nothing under it reports I-D §7.5 step 2's `unverifiable`, which
+/// is what this crate's own corpus policy does — shipping bytes is not configuring a policy.
 /// `ahl-test-atl-leaf-v1` is a different profile with a document of its own, which defines these
 /// same rules as ITS OWN and is what the conformance corpus pins.
 const TEST_ADAPTOR_PROFILE_ID: &str = crate::TEST_PROFILE_ID;

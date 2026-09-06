@@ -4,6 +4,16 @@ Core library and test vectors for AHL Protocol revision 0.4 (Anchored History Lo
 
 ## Compatibility
 
+**0.5.0 is additive at the API surface, and changes the corpus.** Two new public items,
+`ATL_PROFILE_DOCUMENT` and `ATL_PROFILE_DIGEST`, ship the released `ahl-adaptor-atl-v1`
+artifact. `atl-core` moves from a git revision to the exact registry version `=0.23.2` — the
+same code — so the crate carries no git dependency and can be published. The corpus's own test
+profile `ahl-test-atl-leaf-v1` was rewritten to the released state before its first publication,
+so its digest is now
+`sha256:924d106f7888719318aaa717e9ddc4b6a207eee8fabbdd81f141514bf2de85dd` and every ATL vector's
+`anchoring.adaptor.hash`, manifest `log.adaptor.hash` and downstream statement id follows. The
+profile id is unchanged.
+
 **0.4.0 breaks the cosignature API**: `cosignature_bytes` now takes
 `&CosignedCheckpoint` — the typed six-member projection of adaptor `ahl-adaptor-atl-v1` §11.1,
 built with `CosignedCheckpoint::project` — instead of a checkpoint `Value`, so a checkpoint's
@@ -29,8 +39,25 @@ programmatically to arbitrary depth is not and is outside the claim; total work 
 the I-D §7.8 decoded-size budget (`Limits::max_decoded_bytes`), enforced over the canonical
 form of the whole receipt after the top-level version read (I-D §7.5 step 1) and before every
 remaining semantic and cryptographic check; and `atl-core` —
-the pinned sibling that performs canonicalization, node hashing and proof verification — is
-not covered, because the claim is about this crate's own code.
+the sibling pinned at the exact registry version `=0.23.2`, which performs canonicalization,
+node hashing and proof verification — is not covered, because the claim is about this crate's
+own code.
+
+## The ATL adaptor profile
+
+`ahl-adaptor-atl-v1` is released, and this crate ships the artifact verbatim at
+`test_data/profiles/ahl-adaptor-atl-v1.md` — 110 320 bytes, exposed as
+`ahl_core::ATL_PROFILE_DOCUMENT` with its digest as `ahl_core::ATL_PROFILE_DIGEST`
+(`sha256:80a7de…b805aa`). Its own §14 makes a profile's identity its bytes, so a client pinning
+`{id, digest}` under the real id takes both from here rather than fetching the document to learn
+its own digest. A unit test recomputes the digest over the shipped bytes.
+
+The conformance corpus pins `ahl-test-atl-leaf-v1` — a separate profile with a document of its
+own that defines the same serialization as its own rules — and pins the real id nowhere. That is
+deliberate: the toy log's checkpoints are signed by a toy key over a toy tree, so binding them
+to the ATL binding would assert a conformance claim the corpus cannot make. Shipping an artifact
+is not configuring a policy; the corpus policy is configured with the test profile alone, which
+is why a receipt pinning `ahl-adaptor-atl-v1` against it is `unverifiable` (I-D §7.5 step 2).
 
 ## Documentation
 
