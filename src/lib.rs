@@ -931,7 +931,7 @@ pub const ATL_PROFILE_ID: &str = "ahl-adaptor-atl-v1";
 /// The bytes are what [`ATL_PROFILE_DIGEST`] is the SHA-256 of, and a unit test recomputes the
 /// digest over them rather than trusting either transcription. Released at
 /// `https://ahl-protocol.org/profiles/ahl-adaptor-atl-v1.md`; the copy shipped here is the same
-/// artifact, so a client can pin `{`[`ATL_PROFILE_ID`]`, `[`ATL_PROFILE_DIGEST`]`}` from the
+/// artifact, so a client can pin the pair [`ATL_PROFILE_ID`] / [`ATL_PROFILE_DIGEST`] from the
 /// crate instead of fetching the document to learn its own digest.
 pub const ATL_PROFILE_DOCUMENT: &[u8] =
     include_bytes!("../test_data/profiles/ahl-adaptor-atl-v1.md");
