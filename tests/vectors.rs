@@ -40,7 +40,7 @@ use ahl_core::{
     decode_pubkey, entry_id, field_str, hash_hex, inclusion_proof, jcs, leaf_hash, parse_hash_hex,
     proof_from_hex, proof_path_hex, range_proof, reconcile_atl_checkpoint_raw, sha256_hex,
     statement_id, tree_root, verify_envelope, verify_inclusion_proof, verify_signature, AhlError,
-    CosignedCheckpoint, TestKey,
+    CosignedCheckpoint, TestKey, ATL_PROFILE_DIGEST, ATL_PROFILE_DOCUMENT, ATL_PROFILE_ID,
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -3611,7 +3611,18 @@ fn a_foreign_version_subject_is_unverifiable_even_with_a_corrupted_id() {
     );
 }
 
-/// Every file under `root`, keyed by its path relative to `root`, with its exact bytes.
+/// The one file under `test_data/` the generator does not write.
+///
+/// `profiles/ahl-adaptor-atl-v1.md` is the RELEASED adaptor artifact, shipped verbatim for
+/// clients that pin `{id, digest}` under the real profile id (`ahl_core::ATL_PROFILE_DOCUMENT`).
+/// Its bytes are fixed by `ahl-adaptor-atl-v1` §14 and by nothing this repository computes, so
+/// regenerating it is not a thing the generator could do — a unit test recomputes its digest
+/// instead. It is excluded here so the generator's file set still has to match the rest of
+/// `test_data/` exactly.
+const SHIPPED_NOT_GENERATED: &str = "profiles/ahl-adaptor-atl-v1.md";
+
+/// Every generated file under `root`, keyed by its path relative to `root`, with its exact
+/// bytes. [`SHIPPED_NOT_GENERATED`] is skipped.
 fn collect_generated_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
         for entry in std::fs::read_dir(dir).expect("read_dir") {
@@ -3620,6 +3631,9 @@ fn collect_generated_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
                 walk(&path, root, out);
             } else {
                 let relative = path.strip_prefix(root).expect("entry is under root").to_path_buf();
+                if relative == Path::new(SHIPPED_NOT_GENERATED) {
+                    continue;
+                }
                 out.insert(relative, std::fs::read(&path).expect("read generated file"));
             }
         }
@@ -6465,10 +6479,12 @@ fn the_atl_shaped_profile_is_dispatched_end_to_end() {
 ///
 /// `ahl-adaptor-atl-v1` §14: "Any change to this document, however small, produces a different
 /// hash and therefore a different profile. A changed profile MUST be published under a new id."
-/// No document a corpus could ship is that artifact, so nothing a corpus ships may be published
-/// under that id — a label saying "test only" changes nothing, and neither does the fact that a
-/// policy holding it is local. What the corpus pins instead is `ahl-test-atl-leaf-v1`, a profile
-/// with a document of its own that defines the same serialization as its own rules.
+/// The crate now ships that released artifact verbatim, for clients that pin `{id, digest}`
+/// under the real id — and the corpus still pins `ahl-test-atl-leaf-v1`, a profile with a
+/// document of its own that defines the same serialization as its own rules. The toy log's
+/// checkpoints are signed by a toy key over a toy tree; binding them to the ATL binding's id
+/// would assert a conformance claim the corpus cannot make, so the corpus policy holds no
+/// artifact under that id and every receipt pinning it here is `unverifiable`.
 #[test]
 fn the_atl_corpus_pins_its_own_profile_under_its_own_id() {
     let index = atl_index();
@@ -6522,25 +6538,36 @@ fn the_atl_corpus_pins_its_own_profile_under_its_own_id() {
     assert_eq!(field_str(adaptor, "id").expect("pinned id"), "ahl-test-atl-leaf-v1");
     assert_eq!(field_str(adaptor, "hash").expect("pinned hash"), pinned);
 
-    // Nothing under the ATL binding's own id is shipped, anywhere.
+    // The one artifact shipped under the ATL binding's own id is the RELEASED one, byte for
+    // byte — nothing this repository authored, restated or labelled. §14 makes the bytes the
+    // identity, so the test that matters is the digest over the file on disk.
+    let released = std::fs::read(test_data().join("profiles").join("ahl-adaptor-atl-v1.md"))
+        .expect("the released artifact is shipped");
+    assert_eq!(released.len(), 110_320);
+    assert_eq!(sha256_hex(&released), ATL_PROFILE_DIGEST);
+    assert_eq!(released, ATL_PROFILE_DOCUMENT, "the shipped file is what the crate compiles in");
+    // And it is the ONLY thing carrying that id: no second document, no variant, no stand-in.
+    let mut under_the_id = Vec::new();
     for entry in std::fs::read_dir(test_data().join("profiles"))
         .expect("profiles directory")
         .chain(std::fs::read_dir(test_data().join("adaptor")).expect("adaptor directory"))
     {
         let name = entry.expect("directory entry").file_name().to_string_lossy().into_owned();
-        assert!(
-            !name.contains("ahl-adaptor-atl-v1"),
-            "no artifact may be published under the ATL binding's id: {name}"
-        );
+        if name.contains(ATL_PROFILE_ID) {
+            under_the_id.push(name);
+        }
     }
+    assert_eq!(under_the_id, vec!["ahl-adaptor-atl-v1.md".to_owned()]);
 
     // A receipt pinning `ahl-adaptor-atl-v1` — at ANY digest — is refused by this policy, and
     // the outcome is `unverifiable` rather than `invalid`: I-D §7.5 step 2 separates the two,
     // and "if the verifier possesses NO profile under that id, it lacks a capability". The
-    // corpus holds no artifact under that id, so every such receipt is short of a capability
-    // rather than defective — a fact about this verifier's configuration, not about the receipt.
-    // A verifier that DID hold the released artifact would resolve the id and verify normally,
-    // which is why the build implements it.
+    // corpus policy holds no artifact under that id, so every such receipt is short of a
+    // capability rather than defective — a fact about this verifier's configuration, not about
+    // the receipt. Shipping the artifact does not change that: a policy resolves an id from the
+    // profiles it was CONFIGURED with, and this one is configured with the test profile alone.
+    // A verifier configured with the released artifact resolves the id and verifies normally,
+    // which is why the build implements it and why the crate now ships the bytes.
     let policy = atl_trust_policy();
     let (_, base) = read_atl_receipt("statement-anchored-atl-leaf.ahl");
     for digest in [pinned.as_str(), &sha256_hex(b"some other artifact")] {

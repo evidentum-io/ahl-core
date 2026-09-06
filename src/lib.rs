@@ -913,23 +913,50 @@ pub const TEST_PROFILE_ID: &str = "ahl-test-log-v1";
 
 /// Adaptor profile id of the ATL binding.
 ///
-/// This crate ships NO document for it. `ahl-adaptor-atl-v1` §14 makes the profile digest the
-/// SHA-256 over the exact bytes of the RELEASED artifact and adds that "any change to this
-/// document, however small, produces a different hash and therefore a different profile. A
-/// changed profile MUST be published under a new id." Until that artifact exists a corpus can
-/// pin nothing under this id, and no document a corpus could ship would be it. The id is
-/// implemented here so that a verifier holding the released artifact can use it; for a verifier
-/// holding nothing under it the outcome is I-D §7.5 step 2's `unverifiable`.
+/// The profile is released, and this crate ships its artifact: [`ATL_PROFILE_DOCUMENT`] holds
+/// the exact bytes and [`ATL_PROFILE_DIGEST`] the digest they hash to. `ahl-adaptor-atl-v1`
+/// §14 makes the profile digest the SHA-256 over the exact bytes of the released artifact and
+/// adds that "any change to this document, however small, produces a different hash and
+/// therefore a different profile. A changed profile MUST be published under a new id." A
+/// profile's identity is therefore its bytes, which is why the artifact is shipped verbatim
+/// rather than restated: a client pinning `{id, digest}` under this id takes both from here.
+///
+/// The conformance corpus is a separate matter. It pins [`TEST_ATL_PROFILE_ID`] throughout and
+/// pins this id nowhere, by design — see that constant. For a verifier whose policy holds no
+/// artifact under this id the outcome stays I-D §7.5 step 2's `unverifiable`.
 pub const ATL_PROFILE_ID: &str = "ahl-adaptor-atl-v1";
+
+/// The released `ahl-adaptor-atl-v1` artifact, verbatim — 110 320 bytes.
+///
+/// The bytes are what [`ATL_PROFILE_DIGEST`] is the SHA-256 of, and a unit test recomputes the
+/// digest over them rather than trusting either transcription. Released at
+/// `https://ahl-protocol.org/profiles/ahl-adaptor-atl-v1.md`; the copy shipped here is the same
+/// artifact, so a client can pin `{`[`ATL_PROFILE_ID`]`, `[`ATL_PROFILE_DIGEST`]`}` from the
+/// crate instead of fetching the document to learn its own digest.
+pub const ATL_PROFILE_DOCUMENT: &[u8] =
+    include_bytes!("../test_data/profiles/ahl-adaptor-atl-v1.md");
+
+/// Profile digest of the released `ahl-adaptor-atl-v1` artifact.
+///
+/// The `sha256:` family-string form `anchoring.adaptor.hash` and `log.adaptor.hash` carry, so
+/// it is what a manifest or receipt pins directly. Equal to `sha256_hex(ATL_PROFILE_DOCUMENT)`,
+/// which a unit test asserts.
+pub const ATL_PROFILE_DIGEST: &str =
+    "sha256:80a7defdd934242fb4986b2868f4553f0a245995c96ffe543baff59f6bb805aa";
 
 /// Adaptor profile id of the conformance corpus's own ATL-shaped test profile.
 ///
 /// A separate profile with a document of its own, and deliberately not a stand-in for the one
 /// above: that document defines the leaf construction, checkpoint blob, `raw` framing,
 /// origin-derived log id, tree geometry and range form AS ITS OWN rules, citing the ATL adaptor
-/// draft as where the shape comes from and claiming nothing about being that profile. The
+/// profile as where the shape comes from and claiming nothing about being that profile. The
 /// serialization is identical, which is the point — the corpus exercises those rules under an
 /// identity it may actually publish.
+///
+/// The corpus keeps pinning this id now that [`ATL_PROFILE_ID`]'s artifact is released and
+/// shipped, and that is deliberate: a toy log's checkpoints are signed by a toy key over a toy
+/// tree, so binding them to the real ATL binding's id would assert a conformance claim the
+/// corpus cannot make. What the corpus exercises is the serialization, which both ids share.
 pub const TEST_ATL_PROFILE_ID: &str = "ahl-test-atl-leaf-v1";
 
 /// Whether `profile_id` names a profile whose serialization is the ATL-shaped one.
@@ -1213,6 +1240,25 @@ mod tests {
             "sha256:bb4f98461f062d897980c9050f8f859c3b83c84486c5e6857262f6dfa97468a4"
         );
     }
+
+    #[test]
+    fn the_shipped_atl_profile_artifact_hashes_to_the_pinned_digest() {
+        // `ahl-adaptor-atl-v1` §14: a profile's identity is the SHA-256 over the exact bytes of
+        // the released artifact. Recomputing it over the shipped bytes is what makes the
+        // constant a fact about the file rather than a transcription a client has to trust.
+        assert_eq!(ATL_PROFILE_DOCUMENT.len(), 110_320);
+        assert_eq!(sha256_hex(ATL_PROFILE_DOCUMENT), ATL_PROFILE_DIGEST);
+        assert!(ATL_PROFILE_DIGEST.starts_with(SHA256_PREFIX));
+        // The released artifact is a second document under a second id; it changes nothing
+        // about which serialization the id reaches.
+        assert!(is_atl_shaped(ATL_PROFILE_ID));
+        // And it is NOT the corpus's own profile — different bytes, different digest.
+        assert_ne!(sha256_hex(TEST_ATL_PROFILE_DOCUMENT), ATL_PROFILE_DIGEST);
+    }
+
+    /// The corpus's own ATL-shaped profile, read for the inequality above only.
+    const TEST_ATL_PROFILE_DOCUMENT: &[u8] =
+        include_bytes!("../test_data/profiles/ahl-test-atl-leaf-v1.md");
 
     #[test]
     fn the_two_profiles_build_a_log_leaf_differently() {
