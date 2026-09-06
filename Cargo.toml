@@ -22,8 +22,11 @@ fuzzing = []
 
 [dependencies]
 # Anti-drift: JCS canonicalization, RFC 6962-style node hashing, and - normatively -
-# inclusion-proof verification come from the audited sibling implementation, pinned by rev.
-atl-core = { git = "https://github.com/evidentum-io/atl-core", rev = "79ac9c085857", default-features = false }
+# inclusion-proof verification come from the audited sibling implementation, taken from the
+# registry at an exact published version. This was a git rev (79ac9c085857, which is tag
+# v0.23.2); the registry release is the same code, and a crate carrying a git dependency cannot
+# be published.
+atl-core = { version = "0.23.2", default-features = false }
 sha2 = "0.10"
 hmac = "0.12"
 ed25519-dalek = "2"
