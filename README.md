@@ -4,6 +4,16 @@ Core library and test vectors for AHL Protocol revision 0.4 (Anchored History Lo
 
 ## Compatibility
 
+**0.5.0 is additive at the API surface, and changes the corpus.** Two new public items,
+`ATL_PROFILE_DOCUMENT` and `ATL_PROFILE_DIGEST`, ship the released `ahl-adaptor-atl-v1`
+artifact. `atl-core` moves from a git revision to the exact registry version `=0.23.2` — the
+same code — so the crate carries no git dependency and can be published. The corpus's own test
+profile `ahl-test-atl-leaf-v1` was rewritten to the released state before its first publication,
+so its digest is now
+`sha256:924d106f7888719318aaa717e9ddc4b6a207eee8fabbdd81f141514bf2de85dd` and every ATL vector's
+`anchoring.adaptor.hash`, manifest `log.adaptor.hash` and downstream statement id follows. The
+profile id is unchanged.
+
 **0.4.0 breaks the cosignature API**: `cosignature_bytes` now takes
 `&CosignedCheckpoint` — the typed six-member projection of adaptor `ahl-adaptor-atl-v1` §11.1,
 built with `CosignedCheckpoint::project` — instead of a checkpoint `Value`, so a checkpoint's
