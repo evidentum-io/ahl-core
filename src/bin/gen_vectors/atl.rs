@@ -10,22 +10,25 @@
 //!
 //! Not `ahl-adaptor-atl-v1`. That profile's own §14 makes identity a matter of bytes — "any
 //! change to this document, however small, produces a different hash and therefore a different
-//! profile. A changed profile MUST be published under a new id" — so no document a corpus could
-//! ship is that artifact, and publishing one under that id would be a conformance violation
-//! whatever the document said about itself and whatever a local policy held.
+//! profile. A changed profile MUST be published under a new id" — so the only thing that may be
+//! published under that id is the released artifact itself, and the crate ships exactly that at
+//! `test_data/profiles/ahl-adaptor-atl-v1.md` for clients pinning the real profile. What a toy
+//! corpus may not do is BIND ITS OWN LOG to that id: these checkpoints are signed by a toy key
+//! over a toy tree, and pinning the ATL binding there would assert a conformance claim the
+//! corpus cannot make.
 //!
 //! What this corpus pins is `ahl-test-atl-leaf-v1`, a profile of its own with a document of its
 //! own at `test_data/profiles/ahl-test-atl-leaf-v1.md`. That document defines the leaf
 //! construction, the 98-byte checkpoint blob, the `raw` framing, the origin-derived log id, the
-//! tree geometry and the range form AS ITS OWN rules, and cites the ATL adaptor draft as the
+//! tree geometry and the range form AS ITS OWN rules, and cites the ATL adaptor profile as the
 //! source of the shape while claiming nothing about being it. The serialization is the same,
 //! which is the point: the corpus exercises those rules under an identity it may publish.
 //!
 //! The verifier keys both ids onto one code path, so a receipt pinning `ahl-adaptor-atl-v1`
-//! against a policy holding that profile's released artifact verifies the same way. This crate
-//! ships no document for that id, so its own policy holds none, and a receipt pinning it here is
-//! `unverifiable` — the profile is not held (I-D §7.5 step 2), which is a gap in the verifier's
-//! configuration rather than a defect of the artifact.
+//! against a policy CONFIGURED with that profile's released artifact verifies the same way. This
+//! corpus's policy is configured with the test profile alone, so a receipt pinning the ATL
+//! binding here is `unverifiable` — the profile is not held (I-D §7.5 step 2), which is a gap in
+//! the verifier's configuration rather than a defect of the artifact.
 //!
 //! Adaptor §10 records that the published ATL server serves no enumeration interface, so the
 //! range material below is the material a mirror would serve — corpus material under core spec
